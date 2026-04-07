@@ -21,3 +21,4 @@ image = "=0.25.9"
 tracing = { version = "0.1.44", features = ["max_level_trace", "release_max_level_warn"] }
 tracing-subscriber = "0.3.22"
 tracing-appender = "0.2.4"
+yaml-rust2 = "0.11.0"

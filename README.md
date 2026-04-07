@@ -104,7 +104,7 @@ With the following contents:
 [Nemo Action]
 Name=View obj model
 Comment=Open obj model with dlk-model-viewer
-Exec=dlk-objviewer -f +z -u +y -r +x %F
+Exec=dlk-objviewer -settings settings.json %F
 Icon-Name=applications-graphics
 Selection=s
 Extensions=obj;
@@ -122,28 +122,32 @@ If you want to set the mouse sensitivity just set --mouse-sensitivity to whateve
 
 ---
 
-## Controls
+## Settings
 
-Press 'o' to enter object mode and 'c' to enter camera mode.
-While in camera mode, moving your mouse will rotate the camera.
-While in object mode, moving your mouse will rotate the object.
+### Bindings
+Bindings are defined in the settings file under the `"bindings"` section. Each binding consists of the following fields:
 
-Click on the application window to grab the mouse for rotations.
-Click again or press escape to free the mouse.
+- **`command`**  
+  The command that will be executed.  
+  Examples: `move_forward`, `move_left`
 
-E, S, D, F, SPACE, and CTRL will move the camera while in camera mode.
+- **`input`**  
+  The key or button that activates the command.  
+  Examples: `w`, `a`, `s`, `d`
 
----
+- **`event`**  
+  Specifies when the command will be executed.  
+  Examples: `press`, `hold`, `release`
 
-## Roadmap
+- **`requires`** *(optional)*  
+  Defines an additional requirement that must be met for the command to execute. This typically references another binding.
 
-Planned experiments and improvements:
+#### Example
+To require **Shift + Click** to move the camera forward:
 
-- Improved camera controls
-- Materials and textures
-- Rendering improvements
-- Additional model formats
-
+1. Add a condition to the `move_forward` binding:
+   ```yaml
+   "requires": "move_forward_requirement"
 ---
 
 ## License

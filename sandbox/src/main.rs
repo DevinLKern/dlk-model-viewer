@@ -1,15 +1,20 @@
 mod camera;
 mod constants;
+mod input_manager;
 mod result;
+mod settings;
 
 use camera::Camera;
 use constants::{WORLD_FORWARDS, WORLD_RIGHT, WORLD_UP};
 use image::DynamicImage;
+use input_manager::{Input, InputEvent, InputManager};
 use renderer::{MaterialUBO, ShaderVertVertex};
 use result::{Error, Result};
+use settings::{Command, Settings, Event};
 
 use ash::vk;
 
+use std::collections::HashSet;
 use std::str::FromStr;
 use std::{
     collections::HashMap,
@@ -28,17 +33,13 @@ use math::Vec3;
 use math::Vec4;
 use math::{Quat, Zero};
 
-enum ApplicationState {
-    ObjectMode,
-    CameraMode,
-}
-
 struct Application {
-    state: ApplicationState,
-    mouse_sensitivity: f64,
-    focused_window: Option<WindowId>,
-    active_window: Option<WindowId>,
-    windows: HashMap<WindowId, (renderer::RenderContext, Window, Camera)>,
+    settings: Settings,
+    binding_map: HashMap<Command, usize>,
+    input_manager: InputManager,
+    toggled: HashSet<Input>,
+    camera: Camera,
+    windows: HashMap<WindowId, (renderer::RenderContext, Window)>,
     renderer: renderer::Renderer,
     draw_infos: Box<[(vulkan::VertexBV, vulkan::IndexBV, u32)]>,
     model_transform: math::AffineTransform,
@@ -68,15 +69,11 @@ impl Application {
         return None;
     }
     fn new(
-        mouse_sensitivity: f64,
-        derive_normals: bool,
-        obj_to_world: math::Mat3<f32>,
+        settings: crate::Settings,
         model_path: &std::path::Path,
         debug_enabled: bool,
         display_handle: &winit::raw_window_handle::DisplayHandle,
     ) -> Result<Self> {
-        let state = ApplicationState::ObjectMode;
-
         // load materials
         let file_path = model_path.with_extension("mtl");
         let mtl_materials = obj_mtl::load_materials(&file_path)?;
@@ -283,7 +280,7 @@ impl Application {
                 }
 
                 for (v0, v1, v2) in triangles {
-                    let derived_normal = if derive_normals {
+                    let derived_normal = if settings.derive_normals {
                         match (v0.vn, v1.vn, v2.vn) {
                             (None, None, None) => {
                                 let p0 = &objf.vs[v0.v];
@@ -295,7 +292,7 @@ impl Application {
 
                                 let face_normal = p1.sub(p0).cross(p2.sub(p0));
 
-                                Some(obj_to_world.mul_vec(face_normal).into_arr())
+                                Some(settings.model_to_world.mul_vec(face_normal).into_arr())
                             }
                             _ => None,
                         }
@@ -311,7 +308,8 @@ impl Application {
                         let index = if let Some(&i) = vertex_map.get(&v) {
                             i
                         } else {
-                            let position = obj_to_world
+                            let position = settings
+                                .model_to_world
                                 .mul_vec(Vec3::new(
                                     objf.vs[v.v].x as f32,
                                     objf.vs[v.v].y as f32,
@@ -326,7 +324,8 @@ impl Application {
                             };
 
                             let normal = if let Some(i) = v.vn {
-                                obj_to_world
+                                settings
+                                    .model_to_world
                                     .mul_vec(Vec3::new(
                                         objf.vns[i].x as f32,
                                         objf.vns[i].y as f32,
@@ -456,12 +455,20 @@ impl Application {
             }
         }
 
+        let fov_y = settings.fov_y;
+
+        let mut binding_map = HashMap::new();
+        for (index, binding) in settings.bindings.iter().enumerate() {
+            binding_map.insert(binding.command, index);
+        }
+
         Ok(Self {
-            state,
-            mouse_sensitivity,
-            focused_window: None,
-            active_window: None,
+            settings,
+            binding_map,
+            input_manager: InputManager::new(),
+            toggled: HashSet::<Input>::new(),
             renderer,
+            camera: Camera::new(fov_y, 1.0, Vec3::ZERO.sub(WORLD_FORWARDS), WORLD_FORWARDS),
             windows: std::collections::HashMap::new(),
             draw_infos: draw_infos.into_boxed_slice(),
             exiting: false,
@@ -471,8 +478,69 @@ impl Application {
             global_ambient_light: 0.1,
         })
     }
+    fn meets_requirements(&self, binding_index: usize) -> Option<bool> {
+        let binding = self.settings.bindings.get(binding_index)?;
+        let b = match binding.event {
+            Event::Hold => self.input_manager.is_held(&binding.input),
+            Event::Press => self.input_manager.just_pressed(&binding.input),
+            Event::Release => self.input_manager.just_released(&binding.input),
+            Event::Toggle => self.toggled.contains(&binding.input),
+            Event::Movement => {
+                self.input_manager.mouse_delta.0 != 0.0 || self.input_manager.mouse_delta.1 != 0.0
+            }
+        };
 
-    // returns true if a window close was requested.
+        let requirements_met = if let Some(idx) = binding.requirement {
+            self.meets_requirements(idx)?
+        } else {
+            true
+        };
+
+        Some(b && requirements_met)
+    }
+    fn execute_commands(&mut self) {
+        {
+            let mut offset = Vec3::ZERO;
+            let dirs = [
+                (Command::MoveForward, WORLD_FORWARDS),
+                (Command::MoveBackward, Vec3::ZERO.sub(WORLD_FORWARDS)),
+                (Command::MoveRight, WORLD_RIGHT),
+                (Command::MoveLeft, Vec3::ZERO.sub(WORLD_RIGHT)),
+                (Command::MoveUp, WORLD_UP),
+                (Command::MoveDown, Vec3::ZERO.sub(WORLD_UP)),
+            ];
+            for (cmd, dir) in dirs.iter() {
+                let binding_index = match self.binding_map.get(cmd) {
+                    Some(x) => x,
+                    _ => continue,
+                };
+
+                if self.meets_requirements(*binding_index).unwrap() {
+                    offset.add_assign(*dir);
+                }
+            }
+
+            const SPEED: f32 = 0.002;
+            offset.scale_assign(SPEED);
+            self.camera.move_local(offset);
+
+            {
+                let binding_index = match self.binding_map.get(&Command::Rotate) {
+                    Some(x) => *x,
+                    None => return,
+                };
+
+                if self.meets_requirements(binding_index).unwrap() {
+                    let dx =
+                        (self.input_manager.mouse_delta.0 * self.settings.mouse_sensitivity) as f32;
+                    let dy =
+                        (self.input_manager.mouse_delta.1 * self.settings.mouse_sensitivity) as f32;
+                    self.camera.rotate(dx, dy);
+                }
+            }
+        }
+    }
+
     fn handle_window_event(
         &mut self,
         event: winit::event::WindowEvent,
@@ -480,15 +548,21 @@ impl Application {
     ) -> Result<bool> {
         use winit::event::WindowEvent;
 
-        let (context, window, camera) = self
+        match event {
+            WindowEvent::RedrawRequested => {
+                self.execute_commands();
+            }
+            _ => {}
+        }
+
+        let (context, window) = self
             .windows
             .get_mut(window_id)
             .ok_or(Error::WindowIdInvalid)?;
 
-        match event {
+        let event = match event {
             WindowEvent::CloseRequested => {
                 tracing::debug!("close requested!");
-                // unsafe { self.renderer.destroy_render_context(context) };
                 return Ok(true);
             }
             WindowEvent::Resized(s) => {
@@ -500,22 +574,62 @@ impl Application {
                     let (w, h) = (s.width as f32, s.height as f32);
                     let aspect_ratio = w / h;
 
-                    camera.set_aspect_ratio(aspect_ratio);
+                    self.camera.set_aspect_ratio(aspect_ratio);
                 }
 
                 let new_context = self.renderer.create_render_context(window)?;
                 *context = new_context;
 
                 let camera_ubo = renderer::CameraUBO {
-                    view: camera.get_view_matrix().into_2d_arr(),
-                    proj: camera.get_projection_matrix().into_2d_arr(),
+                    view: self.camera.get_view_matrix().into_2d_arr(),
+                    proj: self.camera.get_projection_matrix().into_2d_arr(),
                 };
                 context.update_camera(camera_ubo)?;
+
+                return Ok(false);
             }
             WindowEvent::RedrawRequested => {
+                let rotation_condition_input = self.binding_map
+                    .get(&Command::Rotate)
+                    .and_then(|&idx| self.settings.bindings.get(idx))
+                    .and_then(|binding| binding.requirement)
+                    .and_then(|idx| self.settings.bindings.get(idx))
+                    .filter(|binding| matches!(binding.event, Event::Toggle))
+                    .map(|binding| binding.input);
+
+                for input in self.input_manager.all_just_pressed() {
+                    if self.toggled.contains(input) {
+                        if let Some(rci) = rotation_condition_input {
+                            if rci == *input {
+                                match window.set_cursor_grab(winit::window::CursorGrabMode::None) {
+                                    Err(e) => {
+                                        tracing::error!("{}", e);
+                                    }
+                                    _ => {}
+                                }
+                                window.set_cursor_visible(true);
+                            }
+                        }
+                        self.toggled.remove(input);
+                    } else {
+                        if let Some(rci) = rotation_condition_input {
+                            if rci == *input {
+                                window
+                                    .set_cursor_grab(winit::window::CursorGrabMode::Locked)
+                                    .or_else(|_| {
+                                        window.set_cursor_grab(winit::window::CursorGrabMode::Confined)
+                                    })
+                                    .inspect_err(|e| tracing::error!("{e}"))?;
+                                window.set_cursor_visible(false);
+                            }
+                        }
+                        self.toggled.insert(*input);
+                    }
+                }
+
                 let camera_ubo = renderer::CameraUBO {
-                    view: camera.get_view_matrix().into_2d_arr(),
-                    proj: camera.get_projection_matrix().into_2d_arr(),
+                    view: self.camera.get_view_matrix().into_2d_arr(),
+                    proj: self.camera.get_projection_matrix().into_2d_arr(),
                 };
                 context.update_camera(camera_ubo)?;
 
@@ -570,120 +684,14 @@ impl Application {
                 unsafe { context.draw(record_draw_commands) }?;
 
                 window.request_redraw();
-            }
-            WindowEvent::KeyboardInput { event, .. } => {
-                use winit::event::KeyEvent;
-                use winit::keyboard::KeyCode;
 
-                const SPEED: f32 = 0.025;
-                match event {
-                    KeyEvent { physical_key, .. } => match physical_key {
-                        winit::keyboard::PhysicalKey::Code(c) => match c {
-                            KeyCode::Escape => {
-                                self.active_window = None;
-                                match window.set_cursor_grab(winit::window::CursorGrabMode::None) {
-                                    Err(e) => {
-                                        tracing::error!("{}", e);
-                                    }
-                                    _ => {}
-                                }
-                                window.set_cursor_visible(true);
-                            }
-                            KeyCode::KeyE => {
-                                if let ApplicationState::CameraMode = self.state {
-                                    camera.move_local(WORLD_FORWARDS.scaled(SPEED));
-                                }
-                            }
-                            KeyCode::KeyD => {
-                                if let ApplicationState::CameraMode = self.state {
-                                    camera.move_local(WORLD_FORWARDS.scaled(-SPEED));
-                                }
-                            }
-                            KeyCode::KeyF => {
-                                if let ApplicationState::CameraMode = self.state {
-                                    camera.move_local(WORLD_RIGHT.scaled(SPEED));
-                                }
-                            }
-                            KeyCode::KeyS => {
-                                if let ApplicationState::CameraMode = self.state {
-                                    camera.move_local(WORLD_RIGHT.scaled(-SPEED));
-                                }
-                            }
-                            KeyCode::Space => {
-                                if let ApplicationState::CameraMode = self.state {
-                                    camera.move_local(WORLD_UP.scaled(SPEED));
-                                }
-                            }
-                            KeyCode::ControlLeft => {
-                                if let ApplicationState::CameraMode = self.state {
-                                    camera.move_local(WORLD_UP.scaled(-SPEED));
-                                }
-                            }
-                            KeyCode::KeyO => {
-                                self.state = ApplicationState::ObjectMode;
-                            }
-                            KeyCode::KeyC => {
-                                self.state = ApplicationState::CameraMode;
-                            }
-                            _ => {}
-                        },
-                        _ => {}
-                    },
-                }
-                // println!("Keyboard Input!");
+                return Ok(false);
             }
-            WindowEvent::Moved(_) => {
-                // println!("Moved!");
-            }
-            WindowEvent::Focused(b) => {
-                if b {
-                    self.focused_window = Some(*window_id);
-                }
-                // tracing::trace!("Focused!");
-            }
-            WindowEvent::MouseInput { button, state, .. } => {
-                match state {
-                    winit::event::ElementState::Released => {
-                        return Ok(false);
-                    }
-                    _ => {
-                        //
-                    }
-                }
-                use winit::event::MouseButton;
+            e => e,
+        };
 
-                // tracing::trace!("Mouse Input!");
-                match button {
-                    MouseButton::Left => match self.active_window {
-                        None => {
-                            self.active_window = self.focused_window;
-                            window
-                                .set_cursor_grab(winit::window::CursorGrabMode::Locked)
-                                .or_else(|_| {
-                                    window.set_cursor_grab(winit::window::CursorGrabMode::Confined)
-                                })
-                                .inspect_err(|e| tracing::error!("{e}"))?;
-                            window.set_cursor_visible(false);
-                        }
-                        Some(_) => {
-                            self.active_window = None;
-                            match window.set_cursor_grab(winit::window::CursorGrabMode::None) {
-                                Err(e) => {
-                                    tracing::error!("{}", e);
-                                }
-                                _ => {}
-                            }
-                            window.set_cursor_visible(true);
-                        }
-                    },
-                    _ => {}
-                }
-            }
-            _ => {
-                //
-            }
-        }
-
+        self.input_manager.update(InputEvent::Window(event));
+                
         Ok(false)
     }
 }
@@ -697,13 +705,17 @@ impl ApplicationHandler for Application {
 
         return event_loop.exit();
     }
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        self.input_manager.start_frame();
+        
+    }
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if !self.windows.is_empty() {
             return;
         }
 
         let window_attributes =
-            winit::window::WindowAttributes::default().with_title("dlk-objviewer");
+            winit::window::WindowAttributes::default().with_title("dlk-model-viewer");
         let window = match event_loop.create_window(window_attributes) {
             Ok(w) => w,
             Err(e) => {
@@ -727,7 +739,7 @@ impl ApplicationHandler for Application {
             let aspect_ratio = w / h;
 
             Camera::new(
-                65.0,
+                self.settings.fov_y,
                 aspect_ratio,
                 self.model_transform
                     .position
@@ -753,7 +765,7 @@ impl ApplicationHandler for Application {
             )
             .unwrap();
 
-        self.windows.insert(window_id, (context, window, camera));
+        self.windows.insert(window_id, (context, window));
     }
 
     #[allow(unused_variables)]
@@ -763,78 +775,7 @@ impl ApplicationHandler for Application {
         device_id: winit::event::DeviceId,
         event: winit::event::DeviceEvent,
     ) {
-        use winit::event::DeviceEvent;
-
-        let (_, _, camera) = match self.active_window {
-            Some(id) => match self.windows.get_mut(&id) {
-                Some(x) => x,
-                None => {
-                    return;
-                }
-            },
-            None => {
-                return;
-            }
-        };
-        match self.state {
-            ApplicationState::CameraMode => {
-                match event {
-                    DeviceEvent::MouseMotion { delta } => {
-                        let dx = delta.0 * self.mouse_sensitivity;
-                        let dy = delta.1 * self.mouse_sensitivity;
-
-                        camera.rotate(dx as f32, dy as f32);
-                    }
-                    _ => {
-                        // tracing::info!("Not implemented")
-                    }
-                }
-            }
-            ApplicationState::ObjectMode => {
-                match event {
-                    DeviceEvent::MouseMotion { delta } => {
-                        let dx = delta.0 * self.mouse_sensitivity;
-                        let dy = delta.1 * self.mouse_sensitivity;
-
-                        let qx = Quat::unit_from_angle_axis(dx as f32, WORLD_UP);
-                        let qy = Quat::unit_from_angle_axis(dy as f32, WORLD_RIGHT);
-
-                        self.model_transform.rotate_local(qx.mul(qy));
-
-                        for (i, (_, _, idx)) in self.draw_infos.iter().enumerate().skip(1) {
-                            let src = renderer::MeshUBO {
-                                model: self.model_transform.as_mat4().into_2d_arr(),
-                                material_index: *idx,
-                            };
-                            unsafe {
-                                let offset =
-                                    i as u64 * self.renderer.model_transform_buffer_element_size;
-                                let dst = self
-                                    .renderer
-                                    .model_transform_buffer
-                                    .map_memory(
-                                        offset,
-                                        self.renderer.model_transform_buffer_element_size,
-                                    )
-                                    .inspect_err(|e| tracing::error!("{e}"))
-                                    .unwrap();
-
-                                std::ptr::copy_nonoverlapping(
-                                    &src,
-                                    dst as *mut renderer::MeshUBO,
-                                    1,
-                                );
-
-                                self.renderer.model_transform_buffer.unmap();
-                            }
-                        }
-                    }
-                    _ => {
-                        // tracing::info!("Not implemented")
-                    }
-                }
-            }
-        }
+        self.input_manager.update(InputEvent::Device(event));
     }
 
     fn window_event(
@@ -862,11 +803,7 @@ impl ApplicationHandler for Application {
 }
 
 fn main() -> Result<()> {
-    // let file_appender = tracing_appender::rolling::daily("logs", "app.log");
-    // let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-
     tracing_subscriber::fmt()
-        //     .with_writer(non_blocking)
         .with_max_level(tracing::Level::DEBUG)
         .with_file(true)
         .with_line_number(true)
@@ -893,19 +830,7 @@ fn main() -> Result<()> {
 
     if let Some(_) = args.iter().find(|s| s.as_str() == "--help") {
         println!("Options:");
-        println!("    -f Specifies the forwards direction of the model. Defaults to +z.");
-        println!("        may be one of: <+x|-x|+y|-y|+z|-z>.");
-        println!("    -r Specifies the right direction of the model. Defaults to +x.");
-        println!("        may be one of: <+x|-x|+y|-y|+z|-z>");
-        println!("    -u Specifies the up direction of the model. Defaults to +y.");
-        println!("        may be one of: <+x|-x|+y|-y|+z|-z>");
-        println!("    --derive-normals normals to be derived when missing. Defaults to true.");
-        println!("        may be one of of: <true|false>");
-        println!(
-            "    --mouse-sensitivity Specifies the sensitivity of the mouse. Defaults to 50.0"
-        );
-        println!("        may be any value from 1 to 100");
-
+        println!("    --settings. Defaults to files/default_settings.yaml.");
         return Ok(());
     }
 
@@ -914,124 +839,31 @@ fn main() -> Result<()> {
         std::path::PathBuf::from(args[args.len() - 1].clone())
     };
 
-    let mouse_sensitivity = {
-        let idx = args.iter().enumerate().find_map(|(i, s)| {
-            if s == "--mouse-sensitivity" {
-                Some(i)
-            } else {
-                None
-            }
+    let settings = {
+        let arg_idx = args.iter().enumerate().find_map(|(idx, arg)| {
+            if arg == "--settings" { Some(idx) } else { None }
         });
 
-        let sensitivity = if let Some(i) = idx {
-            if let Some(s) = args.get(i + 1) {
-                if let Ok(ms) = s.parse::<f64>() {
-                    ms
-                } else {
-                    println!("Error: {} is not a valid mouse sensitivity.", s);
+        let path_str = if let Some(idx) = arg_idx {
+            args.get(idx + 1)
+        } else {
+            Some(&String::from_str("files/default_settings.yaml").unwrap())
+        };
+
+        if let Some(str) = path_str {
+            let path = match std::path::PathBuf::from_str(str) {
+                Ok(p) => p,
+                Err(e) => {
+                    println!("Could not load settings. Error info: {e}");
                     return Ok(());
                 }
-            } else {
-                println!("Eror: Could not get mouse sentitivy. Terminating program.");
-                return Ok(());
-            }
-        } else {
-            50.0
-        };
+            };
 
-        if sensitivity < 1.0 || 100.0 < sensitivity {
-            println!("Warning: Sensitivity should be set to a value between 1 and 100.");
+            Settings::new(&path, &args)?
+        } else {
+            println!("Settings file not present");
+            return Ok(());
         }
-
-        sensitivity / 50000.0
-    };
-
-    let derive_normals = {
-        let idx = args.iter().enumerate().find_map(|(i, s)| {
-            if s == "--derive-normals" {
-                Some(i)
-            } else {
-                None
-            }
-        });
-        if let Some(i) = idx {
-            match args.get(i + 1).map(|x| x.as_str()) {
-                Some("true") => true,
-                Some("false") => false,
-                _ => {
-                    return print_usage();
-                }
-            }
-        } else {
-            true
-        }
-    };
-
-    let (obj_r, obj_u, obj_f) = {
-        let ri = args
-            .iter()
-            .enumerate()
-            .find_map(|(i, s)| if s == "-r" { Some(i) } else { None });
-        let ui = args
-            .iter()
-            .enumerate()
-            .find_map(|(i, s)| if s == "-u" { Some(i) } else { None });
-        let fi = args
-            .iter()
-            .enumerate()
-            .find_map(|(i, s)| if s == "-f" { Some(i) } else { None });
-
-        let rs = if let Some(i) = ri {
-            args.get(i + 1).map(|x| x.as_str())
-        } else {
-            Some("+x")
-        };
-        let us = if let Some(i) = ui {
-            args.get(i + 1).map(|x| x.as_str())
-        } else {
-            Some("+y")
-        };
-        let fs = if let Some(i) = fi {
-            args.get(i + 1).map(|x| x.as_str())
-        } else {
-            Some("+z")
-        };
-
-        let str_to_vec = |s: Option<&str>| -> Option<math::Vec3<f32>> {
-            match s {
-                Some("+x") => Some(Vec3::new(1.0, 0.0, 0.0)),
-                Some("-x") => Some(Vec3::new(-1.0, 0.0, 0.0)),
-                Some("+y") => Some(Vec3::new(0.0, 1.0, 0.0)),
-                Some("-y") => Some(Vec3::new(0.0, -1.0, 0.0)),
-                Some("+z") => Some(Vec3::new(0.0, 0.0, 1.0)),
-                Some("-z") => Some(Vec3::new(0.0, 0.0, -1.0)),
-                _ => None,
-            }
-        };
-
-        match (str_to_vec(rs), str_to_vec(us), str_to_vec(fs)) {
-            (Some(rv), Some(uv), Some(fv)) => (rv, uv, fv),
-            _ => {
-                return print_usage();
-            }
-        }
-    };
-
-    if obj_r.cross(obj_u) != obj_f && obj_u.cross(obj_r) != obj_f {
-        println!("Invalid input. Right, left, and up must form a valid coordinate system.");
-        return Ok(());
-    }
-
-    let obj_to_world = {
-        let to_obj = math::Mat3::<f32>::from_cols(obj_r, obj_u, obj_f);
-
-        // The transpose is equivalent to the inverse of a matrix when the matrix is orthonormal.
-        let from_obj = to_obj.transposed();
-
-        const INTO_WORLD: math::Mat3<f32> =
-            math::Mat3::from_cols(WORLD_RIGHT, WORLD_UP, WORLD_FORWARDS);
-
-        from_obj.mul(&INTO_WORLD)
     };
 
     let event_loop = EventLoop::new().inspect_err(|e| tracing::error!("{e}"))?;
@@ -1041,9 +873,7 @@ fn main() -> Result<()> {
         let owned_display_handle = event_loop.owned_display_handle();
         let display_handle = owned_display_handle.display_handle()?;
         Application::new(
-            mouse_sensitivity,
-            derive_normals,
-            obj_to_world,
+            settings,
             model_path.as_path(),
             debug_enabled,
             &display_handle,

@@ -8,6 +8,9 @@ pub enum Error {
     ImageError(image::ImageError),
     ObjMtlError(obj_mtl::Error),
     RendererError(renderer::Error),
+    YamlEmitError(yaml_rust2::EmitError),
+    YamlScanError(yaml_rust2::ScanError),
+    ConfigFileInvalid(&'static str),
     WindowIdInvalid,
 }
 
@@ -15,15 +18,17 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::IoError(e) => write!(f, "IoError: {}", e),
-            Self::WinitExternalError(e) => write!(f, "ExternalError({})", e),
-            Self::WinitEventLoopError(e) => write!(f, "EventLoopError({})", e),
-            Self::WinitHandleError(e) => write!(f, "HandleError({})", e),
-            Self::VulkanError(e) => write!(f, "VulkanError({})", e),
-            Self::ImageError(e) => write!(f, "ImageError({})", e),
-            Self::RendererError(e) => write!(f, "RendererError({})", e),
+            Self::WinitExternalError(e) => write!(f, "ExternalError({e})"),
+            Self::WinitEventLoopError(e) => write!(f, "EventLoopError({e})"),
+            Self::WinitHandleError(e) => write!(f, "HandleError({e})"),
+            Self::VulkanError(e) => write!(f, "VulkanError({e})"),
+            Self::ImageError(e) => write!(f, "ImageError({e})"),
+            Self::RendererError(e) => write!(f, "RendererError({e})"),
             Self::WindowIdInvalid => write!(f, "WindowIdInvalid"),
-            Self::ObjMtlError(e) => write!(f, "ObjMtlError({})", e),
-            // _ => write!(f, "std::fmt::Display not implemented!"),
+            Self::ObjMtlError(e) => write!(f, "ObjMtlError({e})"),
+            Self::YamlEmitError(e) => write!(f, "YamlEmitError({e})"),
+            Self::YamlScanError(e) => write!(f, "YamlScanError({e})"),
+            Self::ConfigFileInvalid(e) => write!(f, "ConfigFileInvalid({e})"),
         }
     }
 }
@@ -76,6 +81,18 @@ impl From<renderer::Error> for Error {
 impl From<winit::error::ExternalError> for Error {
     fn from(value: winit::error::ExternalError) -> Self {
         Error::WinitExternalError(value)
+    }
+}
+
+impl From<yaml_rust2::EmitError> for Error {
+    fn from(value: yaml_rust2::EmitError) -> Self {
+        Error::YamlEmitError(value)
+    }
+}
+
+impl From<yaml_rust2::ScanError> for Error {
+    fn from(value: yaml_rust2::ScanError) -> Self {
+        Error::YamlScanError(value)
     }
 }
 

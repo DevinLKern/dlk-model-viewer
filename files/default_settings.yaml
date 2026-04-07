@@ -1,0 +1,41 @@
+bindings:
+  - command: move_forward
+    input: e
+    event: hold
+
+  - command: move_left
+    input: s
+    event: hold
+
+  - command: move_backward
+    input: d
+    event: hold
+
+  - command: move_right
+    input: f
+    event: hold
+
+  - command: move_up
+    input: space
+    event: hold
+
+  - command: move_down
+    input: ctrl_left
+    event: hold
+
+  - command: rotate
+    input: mouse_moved
+    event: movement
+    requires: mouse_move_requirement
+
+  - command: mouse_move_requirement
+    input: mouse1
+    event: toggle
+
+options:
+  fov_y: 70.0
+  mouse_sensitivity: 30.0
+  derive_normals: true
+  model_up: "+z"
+  model_right: "+x"
+  model_forward: "+y"
