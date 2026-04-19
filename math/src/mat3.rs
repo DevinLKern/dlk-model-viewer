@@ -1,3 +1,4 @@
+use crate::Mat4;
 use crate::Vec3;
 use crate::Vec4;
 use crate::traits::{Identity, One, Zero};
@@ -195,11 +196,19 @@ impl<T> Mat3<T>
 where
     T: Zero + One + Copy,
 {
-    pub const fn into_mat4(self, v: T) -> crate::mat4::Mat4<T> {
-        crate::mat4::Mat4::from_rows(
-            self.r0().into_vec4(),
-            self.r1().into_vec4(),
-            self.r2().into_vec4(),
+    pub const fn into_mat4(self, v: T) -> crate::Mat4<T> {
+        crate::Mat4::from_cols(
+            self.c0().into_vec4(),
+            self.c1().into_vec4(),
+            self.c2().into_vec4(),
+            Vec4::new(T::ZERO, T::ZERO, T::ZERO, v),
+        )
+    }
+    pub const fn as_mat4(&self, v: T) -> crate::Mat4<T> {
+        Mat4::from_cols(
+            self.c0().as_vec4(),
+            self.c1().as_vec4(),
+            self.c2().as_vec4(),
             Vec4::new(T::ZERO, T::ZERO, T::ZERO, v),
         )
     }

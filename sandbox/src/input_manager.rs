@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+
 #[allow(unused)]
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum Input {
@@ -48,16 +49,16 @@ impl Input {
             "ctrl_right" => Input::Key(KeyCode::ControlRight),
             "mouse1" => Input::MouseButton(MouseButton::Left),
             "mouse2" => Input::MouseButton(MouseButton::Right),
-            "0" => Input::Key(KeyCode::Digit0),
-            "1" => Input::Key(KeyCode::Digit1),
-            "2" => Input::Key(KeyCode::Digit2),
-            "3" => Input::Key(KeyCode::Digit3),
-            "4" => Input::Key(KeyCode::Digit4),
-            "5" => Input::Key(KeyCode::Digit5),
-            "6" => Input::Key(KeyCode::Digit6),
-            "7" => Input::Key(KeyCode::Digit7),
-            "8" => Input::Key(KeyCode::Digit8),
-            "9" => Input::Key(KeyCode::Digit9),
+            "key0" => Input::Key(KeyCode::Digit0),
+            "key1" => Input::Key(KeyCode::Digit1),
+            "key2" => Input::Key(KeyCode::Digit2),
+            "key3" => Input::Key(KeyCode::Digit3),
+            "key4" => Input::Key(KeyCode::Digit4),
+            "key5" => Input::Key(KeyCode::Digit5),
+            "key6" => Input::Key(KeyCode::Digit6),
+            "key7" => Input::Key(KeyCode::Digit7),
+            "key8" => Input::Key(KeyCode::Digit8),
+            "key9" => Input::Key(KeyCode::Digit9),
             "mouse_moved" => Input::MouseMotion,
             _ => return None,
         };
@@ -114,7 +115,7 @@ impl InputManager {
             }
             _ => return,
         };
-        
+
         let (input, event_state) = match event {
             WindowEvent::MouseInput { button, state, .. } => (Input::MouseButton(button), state),
             WindowEvent::KeyboardInput { event, .. } => {
@@ -152,8 +153,7 @@ impl InputManager {
         !self.cur_active_inputs.contains(input) && self.prev_active_inputs.contains(input)
     }
     pub fn all_just_pressed(&self) -> impl Iterator<Item = &Input> {
-        self
-            .cur_active_inputs
+        self.cur_active_inputs
             .iter()
             .filter_map(|input| -> Option<&Input> {
                 if self.prev_active_inputs.contains(input) {

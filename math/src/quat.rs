@@ -2,7 +2,6 @@ use crate::mat3::Mat3;
 use crate::mat4::Mat4;
 use crate::traits::{Identity, Zero};
 use crate::vec3::Vec3;
-use crate::vec4::Vec4;
 
 #[allow(dead_code)]
 #[derive(Copy, Clone, Debug)]
@@ -20,6 +19,55 @@ impl Identity for Quat {
 
 #[allow(dead_code)]
 impl Quat {
+    pub fn from_basis(right: Vec3<f32>, up: Vec3<f32>, forward: Vec3<f32>) -> Self {
+        let right = right.normalized();
+        let up = up.normalized();
+        let forward = forward.normalized();
+        
+        let m00 = right.x();
+        let m01 = up.x();
+        let m02 = forward.x();
+
+        let m10 = right.y();
+        let m11 = up.y();
+        let m12 = forward.y();
+
+        let m20 = right.z();
+        let m21 = up.z();
+        let m22 = forward.z();
+
+        let trace = m00 + m11 + m22;
+
+        if trace > 0.0 {
+            let s = (trace + 1.0).sqrt() * 2.0;
+            let w = 0.25 * s;
+            let x = (m21 - m12) / s;
+            let y = (m02 - m20) / s;
+            let z = (m10 - m01) / s;
+            Self::from_xyzw(x, y, z, w)
+        } else if m00 > m11 && m00 > m22 {
+            let s = (1.0 + m00 - m11 - m22).sqrt() * 2.0;
+            let w = (m21 - m12) / s;
+            let x = 0.25 * s;
+            let y = (m01 + m10) / s;
+            let z = (m02 + m20) / s;
+            Self::from_xyzw(x, y, z, w)
+        } else if m11 > m22 {
+            let s = (1.0 + m11 - m00 - m22).sqrt() * 2.0;
+            let w = (m02 - m20) / s;
+            let x = (m01 + m10) / s;
+            let y = 0.25 * s;
+            let z = (m12 + m21) / s;
+            Self::from_xyzw(x, y, z, w)
+        } else {
+            let s = (1.0 + m22 - m00 - m11).sqrt() * 2.0;
+            let w = (m10 - m01) / s;
+            let x = (m02 + m20) / s;
+            let y = (m12 + m21) / s;
+            let z = 0.25 * s;
+            Self::from_xyzw(x, y, z, w)
+        }
+    }
     #[inline]
     pub fn unit_from_angle_axis(angle_rad: f32, axis: Vec3<f32>) -> Self {
         let half = angle_rad * 0.5;
@@ -31,15 +79,15 @@ impl Quat {
         }
     }
     #[inline]
-    pub const fn from_xyzw(v: Vec4<f32>) -> Self {
+    pub const fn from_xyzw(x: f32, y: f32, z: f32, w: f32) -> Self {
         Self {
-            w: v.w(),
-            v: Vec3::new(v.x(), v.y(), v.z()),
+            w,
+            v: Vec3::new(x, y, z),
         }
     }
     #[inline]
-    pub fn unit_from_wxyz(v: Vec4<f32>) -> Self {
-        Self::from_xyzw(v).normalized()
+    pub fn unit_from_wxyz(x: f32, y: f32, z: f32, w: f32) -> Self {
+        Self::from_xyzw(x, y, z, w).normalized()
     }
     #[inline]
     pub const fn w(&self) -> f32 {
@@ -209,7 +257,7 @@ impl PartialEq for Quat {
 
 #[cfg(test)]
 mod tests {
-    use crate::{quat::Quat, vec3::Vec3, vec4::Vec4};
+    use crate::{quat::Quat, vec3::Vec3};
 
     #[test]
     fn angle_axis_tests() {
@@ -228,11 +276,11 @@ mod tests {
 
     #[test]
     fn multiplication1() {
-        let a = Quat::from_xyzw(Vec4::new(1.0, -2.0, 3.0, -4.0));
-        let b = Quat::from_xyzw(Vec4::new(5.0, 6.0, -7.0, 8.0));
+        let a = Quat::from_xyzw(1.0, -2.0, 3.0, -4.0);
+        let b = Quat::from_xyzw(5.0, 6.0, -7.0, 8.0);
 
         let result = a.mul(b);
-        let expected = Quat::from_xyzw(Vec4::new(-16.0, -18.0, 68.0, -4.0));
+        let expected = Quat::from_xyzw(-16.0, -18.0, 68.0, -4.0);
         assert_eq!(result, expected);
     }
 

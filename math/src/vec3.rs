@@ -53,6 +53,10 @@ impl<T: Zero + Copy> Vec3<T> {
         Vec4::new(self.x(), self.y(), self.z(), T::ZERO)
     }
     #[inline]
+    pub const fn as_vec4(&self) -> Vec4<T> {
+        Vec4::new(self.x(), self.y(), self.z(), T::ZERO)
+    }
+    #[inline]
     pub const fn into_arr(self) -> [T; 3] {
         [self.x(), self.y(), self.z()]
     }

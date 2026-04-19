@@ -4,13 +4,13 @@ mod input_manager;
 mod result;
 mod settings;
 
-use camera::Camera;
+use camera::{Camera, controllers::*};
 use constants::{WORLD_FORWARDS, WORLD_RIGHT, WORLD_UP};
 use image::DynamicImage;
 use input_manager::{Input, InputEvent, InputManager};
 use renderer::{MaterialUBO, ShaderVertVertex};
 use result::{Error, Result};
-use settings::{Command, Settings, Event};
+use settings::{Command, Event, Settings};
 
 use ash::vk;
 
@@ -33,16 +33,27 @@ use math::Vec3;
 use math::Vec4;
 use math::{Quat, Zero};
 
+#[derive(Debug)]
+enum CameraInUse {
+    Fps,
+    Orbit,
+}
+
 struct Application {
+    window_name: Box<str>,
     settings: Settings,
     binding_map: HashMap<Command, usize>,
     input_manager: InputManager,
     toggled: HashSet<Input>,
-    camera: Camera,
+    camera_in_use: CameraInUse,
+    fps_camera: Camera,
+    fps_controller: FpsCameraController,
+    orbit_camera: Camera,
+    orbit_controller: OrbitCameraController,
     windows: HashMap<WindowId, (renderer::RenderContext, Window)>,
     renderer: renderer::Renderer,
     draw_infos: Box<[(vulkan::VertexBV, vulkan::IndexBV, u32)]>,
-    model_transform: math::AffineTransform,
+    _model_transform: math::AffineTransform,
     global_light_direction: Vec3<f32>,
     global_light_color: Vec4<f32>,
     global_ambient_light: f32,
@@ -69,6 +80,7 @@ impl Application {
         return None;
     }
     fn new(
+        window_name: Box<str>,
         settings: crate::Settings,
         model_path: &std::path::Path,
         debug_enabled: bool,
@@ -292,7 +304,7 @@ impl Application {
 
                                 let face_normal = p1.sub(p0).cross(p2.sub(p0));
 
-                                Some(settings.model_to_world.mul_vec(face_normal).into_arr())
+                                Some(face_normal.into_arr())
                             }
                             _ => None,
                         }
@@ -308,14 +320,11 @@ impl Application {
                         let index = if let Some(&i) = vertex_map.get(&v) {
                             i
                         } else {
-                            let position = settings
-                                .model_to_world
-                                .mul_vec(Vec3::new(
-                                    objf.vs[v.v].x as f32,
-                                    objf.vs[v.v].y as f32,
-                                    objf.vs[v.v].z as f32,
-                                ))
-                                .into_arr();
+                            let position = [
+                                objf.vs[v.v].x as f32,
+                                objf.vs[v.v].y as f32,
+                                objf.vs[v.v].z as f32,
+                            ];
 
                             let tex_coord = if let Some(i) = v.vt {
                                 [objf.vts[i].u as f32, 1.0 - objf.vts[i].v as f32]
@@ -324,14 +333,11 @@ impl Application {
                             };
 
                             let normal = if let Some(i) = v.vn {
-                                settings
-                                    .model_to_world
-                                    .mul_vec(Vec3::new(
-                                        objf.vns[i].x as f32,
-                                        objf.vns[i].y as f32,
-                                        objf.vns[i].z as f32,
-                                    ))
-                                    .into_arr()
+                                [
+                                    objf.vns[i].x as f32,
+                                    objf.vns[i].y as f32,
+                                    objf.vns[i].z as f32,
+                                ]
                             } else {
                                 derived_normal
                             };
@@ -436,8 +442,15 @@ impl Application {
         }
 
         for (i, (transform, material_index)) in mesh_ubo_buffer_data.iter().enumerate() {
+            let model_transform = if i != 0 {
+                transform
+                    .as_mat4()
+                    .mul(&settings.model_to_world.as_mat4(1.0))
+            } else {
+                transform.as_mat4()
+            };
             let ubo_data = renderer::MeshUBO {
-                model: transform.as_mat4().into_2d_arr(),
+                model: model_transform.into_2d_arr(),
                 material_index: *material_index,
             };
             let src = &ubo_data;
@@ -455,24 +468,36 @@ impl Application {
             }
         }
 
-        let fov_y = settings.fov_y;
-
         let mut binding_map = HashMap::new();
         for (index, binding) in settings.bindings.iter().enumerate() {
             binding_map.insert(binding.command, index);
         }
 
+        // causes blank screen
+        let mut orbit_camera =  Camera::orthographic(1.0, 1.0, 10.0);
+        orbit_camera.transform.translate_global(Vec3::ZERO.sub(WORLD_FORWARDS.scaled(2.0)));
+        orbit_camera.look_at(model_transform.position, WORLD_UP);
+
+        let mut fps_camera = Camera::perspective(settings.fov_y);
+        fps_camera.transform.translate_global(Vec3::ZERO.sub(WORLD_FORWARDS));
+        fps_camera.look_at(model_transform.position, WORLD_UP);
+
         Ok(Self {
+            window_name,
             settings,
             binding_map,
             input_manager: InputManager::new(),
             toggled: HashSet::<Input>::new(),
             renderer,
-            camera: Camera::new(fov_y, 1.0, Vec3::ZERO.sub(WORLD_FORWARDS), WORLD_FORWARDS),
+            camera_in_use: CameraInUse::Orbit,
+            fps_camera,
+            fps_controller: FpsCameraController::new(),
+            orbit_camera,
+            orbit_controller: OrbitCameraController::new(model_transform.position),
             windows: std::collections::HashMap::new(),
             draw_infos: draw_infos.into_boxed_slice(),
             exiting: false,
-            model_transform,
+            _model_transform: model_transform,
             global_light_direction: Vec3::ZERO.sub(WORLD_UP).add(WORLD_RIGHT.scaled(0.2)),
             global_light_color: Vec4::new(1.0, 1.0, 1.0, 1.0),
             global_ambient_light: 0.1,
@@ -499,62 +524,85 @@ impl Application {
         Some(b && requirements_met)
     }
     fn execute_commands(&mut self) {
-        {
-            let mut offset = Vec3::ZERO;
-            let dirs = [
-                (Command::MoveForward, WORLD_FORWARDS),
-                (Command::MoveBackward, Vec3::ZERO.sub(WORLD_FORWARDS)),
-                (Command::MoveRight, WORLD_RIGHT),
-                (Command::MoveLeft, Vec3::ZERO.sub(WORLD_RIGHT)),
-                (Command::MoveUp, WORLD_UP),
-                (Command::MoveDown, Vec3::ZERO.sub(WORLD_UP)),
-            ];
-            for (cmd, dir) in dirs.iter() {
-                let binding_index = match self.binding_map.get(cmd) {
-                    Some(x) => x,
-                    _ => continue,
-                };
+        let mut offset = Vec3::ZERO;
+        let dirs = [
+            (Command::MoveForward, WORLD_FORWARDS),
+            (Command::MoveBackward, Vec3::ZERO.sub(WORLD_FORWARDS)),
+            (Command::MoveRight, WORLD_RIGHT),
+            (Command::MoveLeft, Vec3::ZERO.sub(WORLD_RIGHT)),
+            (Command::MoveUp, WORLD_UP),
+            (Command::MoveDown, Vec3::ZERO.sub(WORLD_UP)),
+        ];
+        for (cmd, dir) in dirs.iter() {
+            let binding_index = match self.binding_map.get(cmd) {
+                Some(x) => x,
+                _ => continue,
+            };
 
-                if self.meets_requirements(*binding_index).unwrap() {
-                    offset.add_assign(*dir);
-                }
+            if self.meets_requirements(*binding_index).unwrap() {
+                offset.add_assign(*dir);
             }
+        }
+        let (dx, dy) = if let Some(idx) = self.binding_map.get(&Command::Rotate) {
+            if let Some(true) = self.meets_requirements(*idx) {
+                let dx = (self.input_manager.mouse_delta.0) as f32;
+                let dy = (self.input_manager.mouse_delta.1) as f32;
+                (dx, dy)
+            } else {
+                (0.0, 0.0)
+            }
+        } else {
+            (0.0, 0.0)
+        };
 
-            const SPEED: f32 = 0.002;
-            offset.scale_assign(SPEED);
-            self.camera.move_local(offset);
+        // switch from orbit to fps
+        if let Some(idx) = self.binding_map.get(&Command::UseFpsCamera) {
+            if let Some(true) = self.meets_requirements(*idx) {
+                self.camera_in_use = CameraInUse::Fps;
+            }
+        }
 
-            {
-                let binding_index = match self.binding_map.get(&Command::Rotate) {
-                    Some(x) => *x,
-                    None => return,
-                };
+        // switch from fps to orbit
+        if let Some(idx) = self.binding_map.get(&Command::UseOrbitCamera) {
+            if let Some(true) = self.meets_requirements(*idx) {
+                self.camera_in_use = CameraInUse::Orbit;
+            }
+        }
+                
+        const SPEED: f32 = 0.002;
+        match self.camera_in_use {
+            CameraInUse::Fps => {
+                offset.scale_assign(SPEED);
+                self.fps_controller.move_local(offset);
+                self.fps_controller.rotate(dx, dy);
 
-                if self.meets_requirements(binding_index).unwrap() {
-                    let dx =
-                        (self.input_manager.mouse_delta.0 * self.settings.mouse_sensitivity) as f32;
-                    let dy =
-                        (self.input_manager.mouse_delta.1 * self.settings.mouse_sensitivity) as f32;
-                    self.camera.rotate(dx, dy);
-                }
+                self.fps_controller
+                    .update(&mut self.fps_camera, self.settings.mouse_sensitivity as f32);
+            }
+            CameraInUse::Orbit => {
+                self.orbit_controller.rotate(dx, dy);
+                offset.scale_assign_nonuniform(WORLD_FORWARDS);
+                offset.scale_assign(SPEED);
+                let z = offset.x() + offset.y() + offset.z();
+                self.orbit_controller.r#move(z);
+                self.orbit_controller.update(&mut self.orbit_camera, self.settings.mouse_sensitivity as f32);
             }
         }
     }
-
     fn handle_window_event(
         &mut self,
         event: winit::event::WindowEvent,
         window_id: &winit::window::WindowId,
     ) -> Result<bool> {
         use winit::event::WindowEvent;
-
+        
         match event {
             WindowEvent::RedrawRequested => {
                 self.execute_commands();
             }
             _ => {}
         }
-
+        
         let (context, window) = self
             .windows
             .get_mut(window_id)
@@ -574,29 +622,25 @@ impl Application {
                     let (w, h) = (s.width as f32, s.height as f32);
                     let aspect_ratio = w / h;
 
-                    self.camera.set_aspect_ratio(aspect_ratio);
+                    self.fps_camera.update_aspect_ratio(aspect_ratio);
+                    self.orbit_camera.update_aspect_ratio(aspect_ratio);
                 }
 
                 let new_context = self.renderer.create_render_context(window)?;
                 *context = new_context;
 
-                let camera_ubo = renderer::CameraUBO {
-                    view: self.camera.get_view_matrix().into_2d_arr(),
-                    proj: self.camera.get_projection_matrix().into_2d_arr(),
-                };
-                context.update_camera(camera_ubo)?;
-
                 return Ok(false);
             }
             WindowEvent::RedrawRequested => {
-                let rotation_condition_input = self.binding_map
+                // grabs cursor
+                let rotation_condition_input = self
+                    .binding_map
                     .get(&Command::Rotate)
                     .and_then(|&idx| self.settings.bindings.get(idx))
                     .and_then(|binding| binding.requirement)
                     .and_then(|idx| self.settings.bindings.get(idx))
                     .filter(|binding| matches!(binding.event, Event::Toggle))
                     .map(|binding| binding.input);
-
                 for input in self.input_manager.all_just_pressed() {
                     if self.toggled.contains(input) {
                         if let Some(rci) = rotation_condition_input {
@@ -617,7 +661,9 @@ impl Application {
                                 window
                                     .set_cursor_grab(winit::window::CursorGrabMode::Locked)
                                     .or_else(|_| {
-                                        window.set_cursor_grab(winit::window::CursorGrabMode::Confined)
+                                        window.set_cursor_grab(
+                                            winit::window::CursorGrabMode::Confined,
+                                        )
                                     })
                                     .inspect_err(|e| tracing::error!("{e}"))?;
                                 window.set_cursor_visible(false);
@@ -627,12 +673,24 @@ impl Application {
                     }
                 }
 
-                let camera_ubo = renderer::CameraUBO {
-                    view: self.camera.get_view_matrix().into_2d_arr(),
-                    proj: self.camera.get_projection_matrix().into_2d_arr(),
-                };
-                context.update_camera(camera_ubo)?;
-
+                match self.camera_in_use {
+                    CameraInUse::Fps => {
+                        let camera_ubo = renderer::CameraUBO {
+                            view: self.fps_camera.view_matrix().into_2d_arr(),
+                            proj: self.fps_camera.projection_matrix().into_2d_arr(),
+                        };
+                        context.update_camera(camera_ubo)?;
+                    }
+                    CameraInUse::Orbit => {
+                        let camera_ubo = renderer::CameraUBO {
+                            view: self.orbit_camera.view_matrix().into_2d_arr(),
+                            proj: self.orbit_camera.projection_matrix().into_2d_arr(),
+                        };
+                        context.update_camera(camera_ubo)?;
+                    }
+                }
+                
+                
                 let pipeline = context.get_pipeline();
 
                 let temp = context.index as u32 * context.per_frame_buffer_element_size;
@@ -662,7 +720,11 @@ impl Application {
                         );
                     }
 
-                    for (vb, ib, mesh_idx) in self.draw_infos.iter() {
+                    let itr = match &self.camera_in_use {
+                        CameraInUse::Fps => self.draw_infos.iter().skip(0),
+                        CameraInUse::Orbit => self.draw_infos.iter().skip(1)
+                    };
+                    for (vb, ib, mesh_idx) in itr {
                         {
                             let sets = [self.renderer.descriptor_sets[1]];
                             self.renderer.device.cmd_bind_descriptor_sets(
@@ -691,7 +753,7 @@ impl Application {
         };
 
         self.input_manager.update(InputEvent::Window(event));
-                
+
         Ok(false)
     }
 }
@@ -707,7 +769,6 @@ impl ApplicationHandler for Application {
     }
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         self.input_manager.start_frame();
-        
     }
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if !self.windows.is_empty() {
@@ -715,7 +776,7 @@ impl ApplicationHandler for Application {
         }
 
         let window_attributes =
-            winit::window::WindowAttributes::default().with_title("dlk-model-viewer");
+            winit::window::WindowAttributes::default().with_title(self.window_name.clone());
         let window = match event_loop.create_window(window_attributes) {
             Ok(w) => w,
             Err(e) => {
@@ -733,29 +794,13 @@ impl ApplicationHandler for Application {
                 return self.exiting(event_loop);
             }
         };
-        let camera = {
+        {
             let s = window.inner_size();
             let (w, h) = (s.width as f32, s.height as f32);
             let aspect_ratio = w / h;
 
-            Camera::new(
-                self.settings.fov_y,
-                aspect_ratio,
-                self.model_transform
-                    .position
-                    .add(Vec3::ZERO.sub(WORLD_FORWARDS)),
-                WORLD_FORWARDS,
-            )
+            self.fps_camera.update_aspect_ratio(aspect_ratio);
         };
-
-        let camera_ubo = renderer::CameraUBO {
-            view: camera.get_view_matrix().into_2d_arr(),
-            proj: camera.get_projection_matrix().into_2d_arr(),
-        };
-        context
-            .update_camera(camera_ubo)
-            .inspect_err(|e| tracing::error!("{e}"))
-            .unwrap();
 
         self.renderer
             .update_world_light(
@@ -810,15 +855,15 @@ fn main() -> Result<()> {
         .init();
 
     let args: Box<[String]> = std::env::args().collect();
+    let name = format!(
+        "{}",
+        std::env::current_exe()?.file_name().unwrap().display()
+    );
 
     let print_usage = || -> Result<()> {
-        let name = format!(
-            "{}",
-            std::env::current_exe()?.file_name().unwrap().display()
-        );
         println!(
             "Invalid program arguments. Usage: {} <options> <model>",
-            name
+            name.clone()
         );
         println!("To view all options type {} --help", name);
         return Ok(());
@@ -839,32 +884,33 @@ fn main() -> Result<()> {
         std::path::PathBuf::from(args[args.len() - 1].clone())
     };
 
-    let settings = {
-        let arg_idx = args.iter().enumerate().find_map(|(idx, arg)| {
-            if arg == "--settings" { Some(idx) } else { None }
-        });
+    let settings =
+        {
+            let arg_idx = args.iter().enumerate().find_map(|(idx, arg)| {
+                if arg == "--settings" { Some(idx) } else { None }
+            });
 
-        let path_str = if let Some(idx) = arg_idx {
-            args.get(idx + 1)
-        } else {
-            Some(&String::from_str("files/default_settings.yaml").unwrap())
-        };
-
-        if let Some(str) = path_str {
-            let path = match std::path::PathBuf::from_str(str) {
-                Ok(p) => p,
-                Err(e) => {
-                    println!("Could not load settings. Error info: {e}");
-                    return Ok(());
-                }
+            let path_str = if let Some(idx) = arg_idx {
+                args.get(idx + 1)
+            } else {
+                Some(&String::from_str("files/default_settings.yaml").unwrap())
             };
 
-            Settings::new(&path, &args)?
-        } else {
-            println!("Settings file not present");
-            return Ok(());
-        }
-    };
+            if let Some(str) = path_str {
+                let path = match std::path::PathBuf::from_str(str) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        println!("Could not load settings. Error info: {e}");
+                        return Ok(());
+                    }
+                };
+
+                Settings::new(&path, &args)?
+            } else {
+                println!("Settings file not present");
+                return Ok(());
+            }
+        };
 
     let event_loop = EventLoop::new().inspect_err(|e| tracing::error!("{e}"))?;
 
@@ -873,6 +919,7 @@ fn main() -> Result<()> {
         let owned_display_handle = event_loop.owned_display_handle();
         let display_handle = owned_display_handle.display_handle()?;
         Application::new(
+            name.into_boxed_str(),
             settings,
             model_path.as_path(),
             debug_enabled,

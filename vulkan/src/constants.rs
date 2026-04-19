@@ -1,7 +1,9 @@
 use math::Vec3;
 
+// TODO: this is wrong. left, right, top, bottom, near, and far are opinionated?
+// Vulkan doesnt define right, left, ... but it does set view a view volume
 #[allow(dead_code)]
-pub const VK_VIEW_VOLUME_FAR: f32 = 1.0;
+pub const VK_VIEW_VOLUME_FAR: f32 = -1.0;
 #[allow(dead_code)]
 pub const VK_VIEW_VOLUME_NEAR: f32 = 0.0;
 #[allow(dead_code)]
@@ -14,8 +16,6 @@ pub const VK_VIEW_VOLUME_TOP: f32 = -1.0;
 pub const VK_VIEW_VOLUME_BOTTOM: f32 = 1.0;
 
 #[allow(dead_code)]
-pub const VK_DIR_UP: Vec3<f32> = Vec3::new(0.0, 1.0, 0.0);
+pub const VIEW_VOLUME_MIN: Vec3<f32> = Vec3::new(-1.0, -1.0, -1.0);
 #[allow(dead_code)]
-pub const VK_DIR_RIGHT: Vec3<f32> = Vec3::new(1.0, 0.0, 0.0);
-#[allow(dead_code)]
-pub const VK_DIR_FORWARDS: Vec3<f32> = Vec3::new(0.0, 0.0, -1.0);
+pub const VIEW_VOLUME_MAX: Vec3<f32> = Vec3::new(1.0, 1.0, 0.0);

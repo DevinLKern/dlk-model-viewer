@@ -1,10 +1,8 @@
 use crate::{Identity, Mat4, Quat, Vec3, Zero};
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct RigidTransform {
     pub position: Vec3<f32>,
-    // TODO: orientation should be private
     pub orientation: Quat,
 }
 
@@ -18,7 +16,9 @@ impl RigidTransform {
     }
     #[inline]
     pub const fn inv(&self) -> Self {
-        Self::new(self.position.scaled(-1.0), self.orientation.inverse())
+        let inv_rot = self.orientation.inverse();
+        let inv_pos = inv_rot.rotate_vec(self.position.scaled(-1.0));
+        Self::new(inv_pos, inv_rot)
     }
     #[inline]
     pub const fn translate_global(&mut self, offset: Vec3<f32>) {
@@ -47,11 +47,16 @@ impl RigidTransform {
     pub const fn get_rotation_matrix(&self) -> Mat4<f32> {
         self.orientation.as_mat4()
     }
+    #[inline]
     pub const fn as_mat4(&self) -> Mat4<f32> {
         let t = self.get_translation_matrix();
         let r = self.get_rotation_matrix();
-
-        r.mul(&t)
+        
+        t.mul(&r)
+    }
+    #[inline]
+    pub const fn into_mat4(self) -> Mat4<f32> {
+        self.as_mat4()
     }
 }
 
@@ -79,5 +84,3 @@ trait HasRigidTransform {
     fn orientation(&self) -> &Quat;
     fn position_and_orientation(&self) -> &RigidTransform;
 }
-
-// TODO: add tests for all of these methods and finalize their designs
