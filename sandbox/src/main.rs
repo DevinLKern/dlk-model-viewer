@@ -40,6 +40,7 @@ enum CameraInUse {
 }
 
 struct Application {
+    last: std::time::Instant,
     window_name: Box<str>,
     settings: Settings,
     binding_map: HashMap<Command, usize>,
@@ -482,7 +483,10 @@ impl Application {
         fps_camera.transform.translate_global(Vec3::ZERO.sub(WORLD_FORWARDS));
         fps_camera.look_at(model_transform.position, WORLD_UP);
 
+        let last = std::time::Instant::now();
+
         Ok(Self {
+            last,
             window_name,
             settings,
             binding_map,
@@ -568,8 +572,13 @@ impl Application {
                 self.camera_in_use = CameraInUse::Orbit;
             }
         }
-                
-        const SPEED: f32 = 0.002;
+
+        let now = std::time::Instant::now();
+        let elapsed = (now - self.last).as_secs_f32();
+        self.last = now;
+
+        // camera should move at 2 unites per second
+        const SPEED: f32 = 2.000;
         match self.camera_in_use {
             CameraInUse::Fps => {
                 offset.scale_assign(SPEED);
@@ -577,7 +586,7 @@ impl Application {
                 self.fps_controller.rotate(dx, dy);
 
                 self.fps_controller
-                    .update(&mut self.fps_camera, self.settings.mouse_sensitivity as f32);
+                    .update(&mut self.fps_camera, self.settings.mouse_sensitivity as f32, elapsed);
             }
             CameraInUse::Orbit => {
                 self.orbit_controller.rotate(dx, dy);
@@ -585,7 +594,7 @@ impl Application {
                 offset.scale_assign(SPEED);
                 let z = offset.x() + offset.y() + offset.z();
                 self.orbit_controller.r#move(z);
-                self.orbit_controller.update(&mut self.orbit_camera, self.settings.mouse_sensitivity as f32);
+                self.orbit_controller.update(&mut self.orbit_camera, self.settings.mouse_sensitivity as f32, elapsed);
             }
         }
     }

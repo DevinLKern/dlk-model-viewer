@@ -306,7 +306,7 @@ impl Settings {
         Ok(Settings {
             _default_camera: default_camera,
             fov_y: fov_y as f32,
-            mouse_sensitivity: mouse_sensitivity / 10000.0,
+            mouse_sensitivity: mouse_sensitivity / 10.0,
             derive_normals,
             model_to_world,
             bindings: bindings.into_boxed_slice(),

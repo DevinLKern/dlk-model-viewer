@@ -3,7 +3,7 @@ use math::{Vec2, Vec3, Quat, Zero};
 use crate::{Camera, constants::{WORLD_FORWARDS, WORLD_RIGHT, WORLD_UP}};
 
 pub trait CameraController {
-    fn update(&mut self, camera: &mut Camera, sensitivity: f32);
+    fn update(&mut self, camera: &mut Camera, sensitivity: f32, dt: f32);
 }
 
 pub struct FpsCameraController {
@@ -34,9 +34,9 @@ impl FpsCameraController {
 }
 
 impl CameraController for FpsCameraController {
-    fn update(&mut self, camera: &mut Camera, sensitivity: f32) {
-        self.yaw += -sensitivity * self.rotation_delta.x();
-        self.pitch += -sensitivity * self.rotation_delta.y();
+    fn update(&mut self, camera: &mut Camera, sensitivity: f32, dt: f32) {
+        self.yaw += -sensitivity * self.rotation_delta.x() * dt;
+        self.pitch += -sensitivity * self.rotation_delta.y() * dt;
 
         let q_yaw = Quat::unit_from_angle_axis(self.yaw, WORLD_UP);
 
@@ -46,7 +46,7 @@ impl CameraController for FpsCameraController {
         let right = q_yaw.rotate_vec(WORLD_RIGHT);
         let q_pitch = Quat::unit_from_angle_axis(self.pitch, right); 
         camera.transform.orientation =  q_pitch.mul(q_yaw);
-        camera.transform.translate_local(self.movement);
+        camera.transform.translate_local(self.movement.scaled(dt));
         
         self.rotation_delta = Vec2::ZERO;
         self.movement = Vec3::ZERO;
@@ -85,9 +85,9 @@ impl OrbitCameraController {
 }
 
 impl CameraController for OrbitCameraController {
-    fn update(&mut self, camera: &mut Camera, sensitivity: f32) {
-        let dx = self.rotation_delta.x() * sensitivity;
-        let dy = self.rotation_delta.y() * sensitivity;
+    fn update(&mut self, camera: &mut Camera, sensitivity: f32, dt: f32) {
+        let dx = self.rotation_delta.x() * sensitivity * dt;
+        let dy = self.rotation_delta.y() * sensitivity * dt;
         self.rotation_delta = Vec2::ZERO;
     
         let up = camera.transform.orientation.rotate_vec(WORLD_UP);
@@ -100,7 +100,7 @@ impl CameraController for OrbitCameraController {
         camera.look_at(self.target, up);
 
         let radius = camera.transform.position.sub(self.target).length();
-        let new_radius = (radius - self.delta_radius).max(0.1);
+        let new_radius = (radius - (self.delta_radius * dt)).max(0.1);
         let allowed_dr = radius - new_radius;
         camera.transform.translate_local(WORLD_FORWARDS.scaled(allowed_dr));
         self.delta_radius = 0.0;
