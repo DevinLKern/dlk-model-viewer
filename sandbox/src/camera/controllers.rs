@@ -11,6 +11,7 @@ pub struct FpsCameraController {
     pub pitch: f32,
     pub rotation_delta: Vec2<f32>,
     pub movement: Vec3<f32>,
+    pub zoom_delta: f32,
 }
 
 impl FpsCameraController {
@@ -20,6 +21,7 @@ impl FpsCameraController {
             pitch: 0.0,
             rotation_delta: Vec2::ZERO,
             movement: Vec3::ZERO,
+            zoom_delta: 0.0,
         }
     }
     #[inline]
@@ -47,9 +49,14 @@ impl CameraController for FpsCameraController {
         let q_pitch = Quat::unit_from_angle_axis(self.pitch, right); 
         camera.transform.orientation =  q_pitch.mul(q_yaw);
         camera.transform.translate_local(self.movement.scaled(dt));
+
+        let zoom = camera.get_zoom();
+        let new_zoom = (zoom + self.zoom_delta).clamp(1.0, 4.0);
+        camera.set_zoom(new_zoom);
         
         self.rotation_delta = Vec2::ZERO;
         self.movement = Vec3::ZERO;
+        self.zoom_delta = 0.0;
     }
 }
 
@@ -58,6 +65,7 @@ pub struct OrbitCameraController {
     pub target: Vec3<f32>,
     pub delta_radius: f32,
     pub rotation_delta: Vec2<f32>,
+    pub zoom_delta: f32,
 }
 
 #[allow(unused)]
@@ -67,6 +75,7 @@ impl OrbitCameraController {
             target,
             delta_radius: 0.0,
             rotation_delta: Vec2::ZERO,
+            zoom_delta: 0.0,
         }
     }
     #[inline]
@@ -104,5 +113,10 @@ impl CameraController for OrbitCameraController {
         let allowed_dr = radius - new_radius;
         camera.transform.translate_local(WORLD_FORWARDS.scaled(allowed_dr));
         self.delta_radius = 0.0;
+
+        let zoom = camera.get_zoom();
+        let new_zoom = (zoom + self.zoom_delta).clamp(1.0, 4.0);
+        camera.set_zoom(new_zoom);
+        self.zoom_delta = 0.0;
     }
 }

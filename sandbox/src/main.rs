@@ -573,6 +573,25 @@ impl Application {
             }
         }
 
+        const DZ: f32 = 0.25;
+        if let Some(idx) = self.binding_map.get(&Command::ZoomIn) {
+            if let Some(true) = self.meets_requirements(*idx) {
+                match &self.camera_in_use {
+                    CameraInUse::Fps => self.fps_controller.zoom_delta += DZ,
+                    CameraInUse::Orbit => self.orbit_controller.zoom_delta += DZ
+                }
+            }
+        }
+
+        if let Some(idx) = self.binding_map.get(&Command::ZoomOut) {
+            if let Some(true) = self.meets_requirements(*idx) {
+                match &self.camera_in_use {
+                    CameraInUse::Fps => self.fps_controller.zoom_delta -= DZ,
+                    CameraInUse::Orbit => self.orbit_controller.zoom_delta -= DZ
+                }
+            }
+        }
+        
         let now = std::time::Instant::now();
         let elapsed = (now - self.last).as_secs_f32();
         self.last = now;
@@ -631,8 +650,8 @@ impl Application {
                     let (w, h) = (s.width as f32, s.height as f32);
                     let aspect_ratio = w / h;
 
-                    self.fps_camera.update_aspect_ratio(aspect_ratio);
-                    self.orbit_camera.update_aspect_ratio(aspect_ratio);
+                    self.fps_camera.set_aspect_ratio(aspect_ratio);
+                    self.orbit_camera.set_aspect_ratio(aspect_ratio);
                 }
 
                 let new_context = self.renderer.create_render_context(window)?;
@@ -808,7 +827,7 @@ impl ApplicationHandler for Application {
             let (w, h) = (s.width as f32, s.height as f32);
             let aspect_ratio = w / h;
 
-            self.fps_camera.update_aspect_ratio(aspect_ratio);
+            self.fps_camera.set_aspect_ratio(aspect_ratio);
         };
 
         self.renderer

@@ -3,27 +3,23 @@ use math::{Mat4, Vec4};
 
 #[derive(Debug)]
 pub struct PerspectiveProjection {
-    // zoom: f32,
+    pub zoom: f32,
     fov_y: f32,
-    aspect_ratio: f32,
+    pub aspect_ratio: f32,
     near: f32,
     far: f32,
 }
 
 impl PerspectiveProjection {
     #[inline]
-    pub const fn new(fov_y: f32, aspect_ratio: f32) -> Self {
+    pub const fn new(fov_y: f32) -> Self {
         Self {
-            // zoom: 1.0,
+            zoom: 1.0,
             fov_y,
-            aspect_ratio,
+            aspect_ratio: 1.0,
             near: 0.1,
             far: 1000.0,
         }
-    }
-    #[inline]
-    pub const fn update_aspect_ratio(&mut self, new_aspect_ratio: f32) {
-        self.aspect_ratio = new_aspect_ratio;
     }
     #[inline]
     pub fn projection_matrix(&self) -> Mat4<f32> {
@@ -34,7 +30,8 @@ impl PerspectiveProjection {
         const T: f32 = vulkan::VK_VIEW_VOLUME_TOP;
         const B: f32 = vulkan::VK_VIEW_VOLUME_BOTTOM;
 
-        let half_tan = (self.fov_y.to_radians() / 2.0).tan();
+        let fov_y = self.fov_y / self.zoom;
+        let half_tan = (fov_y.to_radians() / 2.0).tan();
 
         Mat4::from_cols(
             Vec4::new(1.0 / (self.aspect_ratio * half_tan), 0.0, 0.0, 0.0),
@@ -47,7 +44,8 @@ impl PerspectiveProjection {
 
 #[derive(Debug)]
 pub struct OrthographicProjection {
-    aspect_ratio: f32,
+    pub zoom: f32,
+    pub aspect_ratio: f32,
     l: f32,
     r: f32,
     t: f32,
@@ -62,6 +60,7 @@ impl OrthographicProjection {
         let height = height / 2.0;
         
         Self {
+            zoom: 1.0,
             aspect_ratio: 1.0,
             l: -width,
             r: width,
@@ -87,15 +86,13 @@ impl OrthographicProjection {
         let ty = -(self.b + self.t) / (self.b - self.t);
         let tz = self.n / (self.f - self.n);
 
+        let zf = self.zoom;
+
         Mat4::from_cols(
-            Vec4::new(sx, 0.0, 0.0, 0.0),
-            Vec4::new(0.0, sy, 0.0, 0.0),
+            Vec4::new(sx * zf, 0.0, 0.0, 0.0),
+            Vec4::new(0.0, sy * zf, 0.0, 0.0),
             Vec4::new(0.0, 0.0, sz, 0.0),
             Vec4::new(tx, ty, tz, 1.0),
         )
-    }
-
-    pub fn update_aspect_ratio(&mut self, new_aspect_ratio: f32) {
-        self.aspect_ratio = new_aspect_ratio;
     }
 }

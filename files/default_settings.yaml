@@ -30,14 +30,22 @@ bindings:
 
   - command: mouse_move_requirement
     input: mouse1
-    event: hold
+    event: toggle
 
   - command: use_fps_camera
-    input: key1
+    input: "1"
     event: press
 
   - command: use_orbit_camera
-    input: key2
+    input: "2"
+    event: press
+
+  - command: zoom_in
+    input: "="
+    event: press
+
+  - command: zoom_out
+    input: "-"
     event: press
 
 options:

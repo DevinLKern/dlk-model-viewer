@@ -20,9 +20,13 @@ pub struct Camera {
     pub transform: RigidTransform,
 }
 
-#[allow(unused)]
+// #[allow(unused)]
 impl Camera {
     pub fn orthographic(width: f32, height: f32, depth: f32) -> Self {
+        debug_assert!(width != 0.0);
+        debug_assert!(height != 0.0);
+        debug_assert!(depth != 0.0);
+        
         let projection = OrthographicProjection::new(width, height, depth);
         let projection = Projection::Orthographic(projection);
         let transform = RigidTransform {
@@ -35,7 +39,9 @@ impl Camera {
         }
     }
     pub fn perspective(fov_y: f32) -> Self {
-        let projection = PerspectiveProjection::new(fov_y, 1.0);
+        debug_assert!(fov_y > 0.0);
+        
+        let projection = PerspectiveProjection::new(fov_y);
         let projection = Projection::Perspective(projection);
         let transform = math::RigidTransform {
             position: Vec3::ZERO,
@@ -57,10 +63,10 @@ impl Camera {
     pub fn view_matrix(&self) -> Mat4<f32> {
         self.transform.inv().into_mat4()
     }
-    #[inline]
-    pub fn view_projection(&self) -> Mat4<f32> {
-        self.view_matrix().mul(&self.projection_matrix())
-    }
+    // #[inline]
+    // pub fn view_projection(&self) -> Mat4<f32> {
+    //     self.view_matrix().mul(&self.projection_matrix())
+    // }
     #[inline]
     pub fn look_at(&mut self, target: Vec3<f32>, up: Vec3<f32>) {
         let f = target.sub(self.transform.position).normalized();    
@@ -70,10 +76,26 @@ impl Camera {
         self.transform.orientation = Quat::from_basis(r, u, Vec3::ZERO.sub(f));
         // self.transform.orientation = Quat::from_basis(r, u, f);
     }
-    pub fn update_aspect_ratio(&mut self, new_aspect_ratio: f32) {
+    pub fn set_zoom(&mut self, new_zoom: f32) {
+        debug_assert!(new_zoom > 0.0);
+
         match &mut self.projection {
-            Projection::Orthographic(o) => o.update_aspect_ratio(new_aspect_ratio),
-            Projection::Perspective(p) => p.update_aspect_ratio(new_aspect_ratio),
+            Projection::Orthographic(o) => o.zoom = new_zoom,
+            Projection::Perspective(p) => p.zoom = new_zoom,
+        }
+    }
+    pub fn get_zoom(&self) -> f32 {
+        match &self.projection {
+            Projection::Orthographic(o) => o.zoom,
+            Projection::Perspective(p) => p.zoom,
+        }
+    }
+    pub fn set_aspect_ratio(&mut self, new_aspect_ratio: f32) {
+        debug_assert!(new_aspect_ratio > 0.0);
+        
+        match &mut self.projection {
+            Projection::Orthographic(o) => o.aspect_ratio = new_aspect_ratio,
+            Projection::Perspective(p) => p.aspect_ratio = new_aspect_ratio,
         }
     }
 }
