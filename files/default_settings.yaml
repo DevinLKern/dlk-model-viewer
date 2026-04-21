@@ -41,11 +41,11 @@ bindings:
     event: press
 
   - command: zoom_in
-    input: "="
+    input: "mousewheel_up"
     event: press
 
   - command: zoom_out
-    input: "-"
+    input: "mousewheel_down"
     event: press
 
 options:

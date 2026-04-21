@@ -628,6 +628,16 @@ impl Application {
             WindowEvent::RedrawRequested => {
                 self.execute_commands();
             }
+            WindowEvent::MouseWheel { delta, .. } => {
+                use winit::event::MouseScrollDelta;
+                let y = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y,
+                    MouseScrollDelta::PixelDelta(d) => d.y as f32,
+                };
+                if y != 0.0 {
+                    self.input_manager.wheel_delta_y += y;
+                }
+            }
             _ => {}
         }
         

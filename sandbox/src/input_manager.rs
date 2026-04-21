@@ -7,6 +7,8 @@ pub enum Input {
     Key(winit::keyboard::KeyCode),
     MouseButton(winit::event::MouseButton),
     MouseMotion,
+    MouseWheelUp,
+    MouseWheelDown,
 }
 
 impl Input {
@@ -60,6 +62,8 @@ impl Input {
             "8" => Input::Key(KeyCode::Digit8),
             "9" => Input::Key(KeyCode::Digit9),
             "mouse_moved" => Input::MouseMotion,
+            "mousewheel_up" => Input::MouseWheelUp,
+            "mousewheel_down" => Input::MouseWheelDown,
             "=" => Input::Key(KeyCode::Equal),
             "-" => Input::Key(KeyCode::Minus),
             _ => return None,
@@ -88,6 +92,7 @@ pub struct InputManager {
     pub prev_active_inputs: std::collections::HashSet<Input>,
     pub cur_active_inputs: std::collections::HashSet<Input>,
     pub mouse_delta: (f64, f64),
+    pub wheel_delta_y: f32,
 }
 
 impl InputManager {
@@ -96,12 +101,26 @@ impl InputManager {
             prev_active_inputs: HashSet::new(),
             cur_active_inputs: HashSet::new(),
             mouse_delta: (0.0, 0.0),
+            wheel_delta_y: 0.0,
         }
     }
     // end_frame not needed?
     pub fn start_frame(&mut self) {
         self.prev_active_inputs = self.cur_active_inputs.clone();
+        self.cur_active_inputs
+            .remove(&Input::MouseWheelUp);
+        self.cur_active_inputs
+            .remove(&Input::MouseWheelDown);
         self.mouse_delta = (0.0, 0.0);
+        if self.wheel_delta_y != 0.0 {
+            let wheel_input = if self.wheel_delta_y > 0.0 {
+                Input::MouseWheelUp
+            } else {
+                Input::MouseWheelDown
+            };
+            self.cur_active_inputs.insert(wheel_input);
+            self.wheel_delta_y = 0.0;
+        }
     }
     pub fn update(&mut self, event: InputEvent) {
         use winit::event::ElementState;
@@ -113,6 +132,17 @@ impl InputManager {
             InputEvent::Device(winit::event::DeviceEvent::MouseMotion { delta }) => {
                 self.mouse_delta.0 += delta.0;
                 self.mouse_delta.1 += delta.1;
+                return;
+            }
+            InputEvent::Device(winit::event::DeviceEvent::MouseWheel { delta }) => {
+                use winit::event::MouseScrollDelta;
+                let y = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y,
+                    MouseScrollDelta::PixelDelta(delta) => delta.y as f32,
+                };
+                if y != 0.0 {
+                    self.wheel_delta_y += y;
+                }
                 return;
             }
             _ => return,
@@ -130,6 +160,17 @@ impl InputManager {
             WindowEvent::Focused(b) => {
                 if !b {
                     self.cur_active_inputs.clear();
+                }
+                return;
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                use winit::event::MouseScrollDelta;
+                let y = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y,
+                    MouseScrollDelta::PixelDelta(d) => d.y as f32,
+                };
+                if y != 0.0 {
+                    self.wheel_delta_y += y;
                 }
                 return;
             }
