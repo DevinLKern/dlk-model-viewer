@@ -250,11 +250,13 @@ impl Settings {
             .get(&Yaml::String(String::from("default_camera")))
             .ok_or(Error::ConfigFileInvalid("default_camera not found"))?
             .as_str()
-            .ok_or(Error::ConfigFileInvalid("Expected default_camera to be a str"))?;
+            .ok_or(Error::ConfigFileInvalid(
+                "Expected default_camera to be a str",
+            ))?;
         let default_camera = match default_camera {
             "fps" => CameraInUse::Fps,
             "orbit" => CameraInUse::Orbit,
-            _ => return Err(Error::ConfigFileInvalid("invalid default_camera value"))
+            _ => return Err(Error::ConfigFileInvalid("invalid default_camera value")),
         };
 
         let model_up = options

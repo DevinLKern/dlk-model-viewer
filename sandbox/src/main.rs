@@ -100,7 +100,6 @@ impl Application {
 
             texture_data.push(default_texture_data);
 
-            // load diffuse textures
             for mat in mtl_materials.iter() {
                 let diffuse_texture = if let Some(texture) = &mat.diffuse.texture {
                     texture
@@ -108,12 +107,10 @@ impl Application {
                     continue;
                 };
 
-                // skip if texture already loaded
                 if texture_indices.contains_key(&diffuse_texture.file_path) {
                     continue;
                 }
 
-                // search for texture
                 let path = {
                     let base = model_path.with_file_name("");
                     let target = match PathBuf::from_str(&diffuse_texture.file_path) {
@@ -475,12 +472,16 @@ impl Application {
         }
 
         // causes blank screen
-        let mut orbit_camera =  Camera::orthographic(1.0, 1.0, 10.0);
-        orbit_camera.transform.translate_global(Vec3::ZERO.sub(WORLD_FORWARDS.scaled(2.0)));
+        let mut orbit_camera = Camera::orthographic(1.0, 1.0, 10.0);
+        orbit_camera
+            .transform
+            .translate_global(Vec3::ZERO.sub(WORLD_FORWARDS.scaled(2.0)));
         orbit_camera.look_at(model_transform.position, WORLD_UP);
 
         let mut fps_camera = Camera::perspective(settings.fov_y);
-        fps_camera.transform.translate_global(Vec3::ZERO.sub(WORLD_FORWARDS));
+        fps_camera
+            .transform
+            .translate_global(Vec3::ZERO.sub(WORLD_FORWARDS));
         fps_camera.look_at(model_transform.position, WORLD_UP);
 
         let last = std::time::Instant::now();
@@ -514,9 +515,7 @@ impl Application {
             Event::Press => self.input_manager.just_pressed(&binding.input),
             Event::Release => self.input_manager.just_released(&binding.input),
             Event::Toggle => self.toggled.contains(&binding.input),
-            Event::Movement => {
-                self.input_manager.mouse_delta.0 != 0.0 || self.input_manager.mouse_delta.1 != 0.0
-            }
+            Event::Movement => true,
         };
 
         let requirements_met = if let Some(idx) = binding.requirement {
@@ -527,8 +526,52 @@ impl Application {
 
         Some(b && requirements_met)
     }
-    fn execute_commands(&mut self) {
+    fn execute_commands(&mut self, window_id: &winit::window::WindowId) -> Result<()> {
+        let (_, window) = self.windows.get(window_id).ok_or(Error::WindowIdInvalid)?;
+
+        // switch from orbit to fps
+        if let Some(idx) = self.binding_map.get(&Command::UseFpsCamera) {
+            if let Some(true) = self.meets_requirements(*idx) {
+                self.camera_in_use = CameraInUse::Fps;
+            }
+        }
+
+        // switch from fps to orbit
+        if let Some(idx) = self.binding_map.get(&Command::UseOrbitCamera) {
+            if let Some(true) = self.meets_requirements(*idx) {
+                self.camera_in_use = CameraInUse::Orbit;
+            }
+        }
+
+        // hides and grabs or shows ad releases the cursor
+        let rotation_condition_input = self
+            .binding_map
+            .get(&Command::Rotate)
+            .and_then(|&idx| self.settings.bindings.get(idx))
+            .and_then(|binding| binding.requirement)
+            .and_then(|idx| self.settings.bindings.get(idx))
+            .filter(|binding| matches!(binding.event, Event::Toggle))
+            .map(|binding| binding.input);
+        if let Some(input) = rotation_condition_input {
+            use winit::window::CursorGrabMode;
+            let toggled = self.toggled.contains(&input);
+            if self.input_manager.just_released(&input) {
+                if self.toggled.contains(&input) {
+                    window.set_cursor_grab(CursorGrabMode::None)?;
+                    self.toggled.remove(&input);
+                } else {
+                    window
+                        .set_cursor_grab(CursorGrabMode::Locked)
+                        .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined))?;
+                    self.toggled.insert(input);
+                }
+            }
+            window.set_cursor_visible(!toggled);
+        }
+
         let mut offset = Vec3::ZERO;
+        // camera should move at 2 units per second
+        const SPEED: f32 = 2.000;
         let dirs = [
             (Command::MoveForward, WORLD_FORWARDS),
             (Command::MoveBackward, Vec3::ZERO.sub(WORLD_FORWARDS)),
@@ -547,29 +590,14 @@ impl Application {
                 offset.add_assign(*dir);
             }
         }
-        let (dx, dy) = if let Some(idx) = self.binding_map.get(&Command::Rotate) {
-            if let Some(true) = self.meets_requirements(*idx) {
-                let dx = (self.input_manager.mouse_delta.0) as f32;
-                let dy = (self.input_manager.mouse_delta.1) as f32;
-                (dx, dy)
-            } else {
-                (0.0, 0.0)
-            }
-        } else {
-            (0.0, 0.0)
-        };
-
-        // switch from orbit to fps
-        if let Some(idx) = self.binding_map.get(&Command::UseFpsCamera) {
-            if let Some(true) = self.meets_requirements(*idx) {
-                self.camera_in_use = CameraInUse::Fps;
-            }
-        }
-
-        // switch from fps to orbit
-        if let Some(idx) = self.binding_map.get(&Command::UseOrbitCamera) {
-            if let Some(true) = self.meets_requirements(*idx) {
-                self.camera_in_use = CameraInUse::Orbit;
+        offset = offset.normalized();
+        match self.camera_in_use {
+            CameraInUse::Fps => self.fps_controller.r#move(offset),
+            CameraInUse::Orbit => {
+                offset.scale_assign_nonuniform(WORLD_FORWARDS);
+                offset.scale_assign(SPEED);
+                let z = offset.x() + offset.y() + offset.z();
+                self.orbit_controller.r#move(z);
             }
         }
 
@@ -578,7 +606,7 @@ impl Application {
             if let Some(true) = self.meets_requirements(*idx) {
                 match &self.camera_in_use {
                     CameraInUse::Fps => self.fps_controller.zoom_delta += DZ,
-                    CameraInUse::Orbit => self.orbit_controller.zoom_delta += DZ
+                    CameraInUse::Orbit => self.orbit_controller.zoom_delta += DZ,
                 }
             }
         }
@@ -587,35 +615,49 @@ impl Application {
             if let Some(true) = self.meets_requirements(*idx) {
                 match &self.camera_in_use {
                     CameraInUse::Fps => self.fps_controller.zoom_delta -= DZ,
-                    CameraInUse::Orbit => self.orbit_controller.zoom_delta -= DZ
+                    CameraInUse::Orbit => self.orbit_controller.zoom_delta -= DZ,
                 }
             }
         }
-        
+
+        let (dx, dy) = self
+            .binding_map
+            .get(&Command::Rotate)
+            .and_then(|idx| self.meets_requirements(*idx))
+            .filter(|&ok| ok)
+            .map(|_| {
+                (
+                    self.input_manager.mouse_delta.0 as f32,
+                    self.input_manager.mouse_delta.1 as f32,
+                )
+            })
+            .unwrap_or((0.0, 0.0));
+        if let Some(idx) = self.binding_map.get(&Command::Rotate) {
+            if let Some(true) = self.meets_requirements(*idx) {
+                match self.camera_in_use {
+                    CameraInUse::Fps => self.fps_controller.rotate(dx, dy),
+                    CameraInUse::Orbit => self.orbit_controller.rotate(dx, dy),
+                }
+            }
+        }
+
         let now = std::time::Instant::now();
         let elapsed = (now - self.last).as_secs_f32();
         self.last = now;
-
-        // camera should move at 2 unites per second
-        const SPEED: f32 = 2.000;
         match self.camera_in_use {
-            CameraInUse::Fps => {
-                offset.scale_assign(SPEED);
-                self.fps_controller.move_local(offset);
-                self.fps_controller.rotate(dx, dy);
-
-                self.fps_controller
-                    .update(&mut self.fps_camera, self.settings.mouse_sensitivity as f32, elapsed);
-            }
-            CameraInUse::Orbit => {
-                self.orbit_controller.rotate(dx, dy);
-                offset.scale_assign_nonuniform(WORLD_FORWARDS);
-                offset.scale_assign(SPEED);
-                let z = offset.x() + offset.y() + offset.z();
-                self.orbit_controller.r#move(z);
-                self.orbit_controller.update(&mut self.orbit_camera, self.settings.mouse_sensitivity as f32, elapsed);
-            }
+            CameraInUse::Fps => self.fps_controller.update(
+                &mut self.fps_camera,
+                self.settings.mouse_sensitivity as f32,
+                elapsed,
+            ),
+            CameraInUse::Orbit => self.orbit_controller.update(
+                &mut self.orbit_camera,
+                self.settings.mouse_sensitivity as f32,
+                elapsed,
+            ),
         }
+
+        Ok(())
     }
     fn handle_window_event(
         &mut self,
@@ -623,28 +665,6 @@ impl Application {
         window_id: &winit::window::WindowId,
     ) -> Result<bool> {
         use winit::event::WindowEvent;
-        
-        match event {
-            WindowEvent::RedrawRequested => {
-                self.execute_commands();
-            }
-            WindowEvent::MouseWheel { delta, .. } => {
-                use winit::event::MouseScrollDelta;
-                let y = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y,
-                    MouseScrollDelta::PixelDelta(d) => d.y as f32,
-                };
-                if y != 0.0 {
-                    self.input_manager.wheel_delta_y += y;
-                }
-            }
-            _ => {}
-        }
-        
-        let (context, window) = self
-            .windows
-            .get_mut(window_id)
-            .ok_or(Error::WindowIdInvalid)?;
 
         let event = match event {
             WindowEvent::CloseRequested => {
@@ -652,6 +672,11 @@ impl Application {
                 return Ok(true);
             }
             WindowEvent::Resized(s) => {
+                let (context, window) = self
+                    .windows
+                    .get_mut(window_id)
+                    .ok_or(Error::WindowIdInvalid)?;
+
                 unsafe { self.renderer.device.device_wait_idle() }
                     .inspect_err(|e| tracing::error!("{e}"))
                     .unwrap();
@@ -670,46 +695,12 @@ impl Application {
                 return Ok(false);
             }
             WindowEvent::RedrawRequested => {
-                // grabs cursor
-                let rotation_condition_input = self
-                    .binding_map
-                    .get(&Command::Rotate)
-                    .and_then(|&idx| self.settings.bindings.get(idx))
-                    .and_then(|binding| binding.requirement)
-                    .and_then(|idx| self.settings.bindings.get(idx))
-                    .filter(|binding| matches!(binding.event, Event::Toggle))
-                    .map(|binding| binding.input);
-                for input in self.input_manager.all_just_pressed() {
-                    if self.toggled.contains(input) {
-                        if let Some(rci) = rotation_condition_input {
-                            if rci == *input {
-                                match window.set_cursor_grab(winit::window::CursorGrabMode::None) {
-                                    Err(e) => {
-                                        tracing::error!("{}", e);
-                                    }
-                                    _ => {}
-                                }
-                                window.set_cursor_visible(true);
-                            }
-                        }
-                        self.toggled.remove(input);
-                    } else {
-                        if let Some(rci) = rotation_condition_input {
-                            if rci == *input {
-                                window
-                                    .set_cursor_grab(winit::window::CursorGrabMode::Locked)
-                                    .or_else(|_| {
-                                        window.set_cursor_grab(
-                                            winit::window::CursorGrabMode::Confined,
-                                        )
-                                    })
-                                    .inspect_err(|e| tracing::error!("{e}"))?;
-                                window.set_cursor_visible(false);
-                            }
-                        }
-                        self.toggled.insert(*input);
-                    }
-                }
+                self.execute_commands(window_id)?;
+
+                let (context, window) = self
+                    .windows
+                    .get_mut(window_id)
+                    .ok_or(Error::WindowIdInvalid)?;
 
                 match self.camera_in_use {
                     CameraInUse::Fps => {
@@ -727,8 +718,7 @@ impl Application {
                         context.update_camera(camera_ubo)?;
                     }
                 }
-                
-                
+
                 let pipeline = context.get_pipeline();
 
                 let temp = context.index as u32 * context.per_frame_buffer_element_size;
@@ -760,7 +750,7 @@ impl Application {
 
                     let itr = match &self.camera_in_use {
                         CameraInUse::Fps => self.draw_infos.iter().skip(0),
-                        CameraInUse::Orbit => self.draw_infos.iter().skip(1)
+                        CameraInUse::Orbit => self.draw_infos.iter().skip(1),
                     };
                     for (vb, ib, mesh_idx) in itr {
                         {

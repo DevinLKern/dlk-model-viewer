@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 
-
 #[allow(unused)]
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum Input {
@@ -104,13 +103,10 @@ impl InputManager {
             wheel_delta_y: 0.0,
         }
     }
-    // end_frame not needed?
     pub fn start_frame(&mut self) {
         self.prev_active_inputs = self.cur_active_inputs.clone();
-        self.cur_active_inputs
-            .remove(&Input::MouseWheelUp);
-        self.cur_active_inputs
-            .remove(&Input::MouseWheelDown);
+        self.cur_active_inputs.remove(&Input::MouseWheelUp);
+        self.cur_active_inputs.remove(&Input::MouseWheelDown);
         self.mouse_delta = (0.0, 0.0);
         if self.wheel_delta_y != 0.0 {
             let wheel_input = if self.wheel_delta_y > 0.0 {
@@ -132,17 +128,6 @@ impl InputManager {
             InputEvent::Device(winit::event::DeviceEvent::MouseMotion { delta }) => {
                 self.mouse_delta.0 += delta.0;
                 self.mouse_delta.1 += delta.1;
-                return;
-            }
-            InputEvent::Device(winit::event::DeviceEvent::MouseWheel { delta }) => {
-                use winit::event::MouseScrollDelta;
-                let y = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y,
-                    MouseScrollDelta::PixelDelta(delta) => delta.y as f32,
-                };
-                if y != 0.0 {
-                    self.wheel_delta_y += y;
-                }
                 return;
             }
             _ => return,
@@ -169,9 +154,8 @@ impl InputManager {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     MouseScrollDelta::PixelDelta(d) => d.y as f32,
                 };
-                if y != 0.0 {
-                    self.wheel_delta_y += y;
-                }
+
+                self.wheel_delta_y += y;
                 return;
             }
             _ => return,
@@ -186,23 +170,16 @@ impl InputManager {
             }
         };
     }
+    #[inline]
     pub fn is_held(&self, input: &Input) -> bool {
         self.cur_active_inputs.contains(input)
     }
+    #[inline]
     pub fn just_pressed(&self, input: &Input) -> bool {
         self.cur_active_inputs.contains(input) && !self.prev_active_inputs.contains(input)
     }
+    #[inline]
     pub fn just_released(&self, input: &Input) -> bool {
         !self.cur_active_inputs.contains(input) && self.prev_active_inputs.contains(input)
-    }
-    pub fn all_just_pressed(&self) -> impl Iterator<Item = &Input> {
-        self.cur_active_inputs
-            .iter()
-            .filter_map(|input| -> Option<&Input> {
-                if self.prev_active_inputs.contains(input) {
-                    return None;
-                }
-                Some(input)
-            })
     }
 }

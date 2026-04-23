@@ -2,7 +2,7 @@ use core::f32;
 
 use math::*;
 
-use crate::{camera::projections::{OrthographicProjection, PerspectiveProjection}};
+use crate::camera::projections::{OrthographicProjection, PerspectiveProjection};
 
 pub mod controllers;
 pub mod projections;
@@ -26,7 +26,7 @@ impl Camera {
         debug_assert!(width != 0.0);
         debug_assert!(height != 0.0);
         debug_assert!(depth != 0.0);
-        
+
         let projection = OrthographicProjection::new(width, height, depth);
         let projection = Projection::Orthographic(projection);
         let transform = RigidTransform {
@@ -40,7 +40,7 @@ impl Camera {
     }
     pub fn perspective(fov_y: f32) -> Self {
         debug_assert!(fov_y > 0.0);
-        
+
         let projection = PerspectiveProjection::new(fov_y);
         let projection = Projection::Perspective(projection);
         let transform = math::RigidTransform {
@@ -69,10 +69,10 @@ impl Camera {
     // }
     #[inline]
     pub fn look_at(&mut self, target: Vec3<f32>, up: Vec3<f32>) {
-        let f = target.sub(self.transform.position).normalized();    
+        let f = target.sub(self.transform.position).normalized();
         let r = f.cross(up);
         let u = r.cross(f);
-    
+
         self.transform.orientation = Quat::from_basis(r, u, Vec3::ZERO.sub(f));
         // self.transform.orientation = Quat::from_basis(r, u, f);
     }
@@ -92,7 +92,7 @@ impl Camera {
     }
     pub fn set_aspect_ratio(&mut self, new_aspect_ratio: f32) {
         debug_assert!(new_aspect_ratio > 0.0);
-        
+
         match &mut self.projection {
             Projection::Orthographic(o) => o.aspect_ratio = new_aspect_ratio,
             Projection::Perspective(p) => p.aspect_ratio = new_aspect_ratio,

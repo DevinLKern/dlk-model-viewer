@@ -51,7 +51,7 @@ impl RigidTransform {
     pub const fn as_mat4(&self) -> Mat4<f32> {
         let t = self.get_translation_matrix();
         let r = self.get_rotation_matrix();
-        
+
         t.mul(&r)
     }
     #[inline]

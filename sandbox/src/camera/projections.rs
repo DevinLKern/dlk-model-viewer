@@ -1,6 +1,5 @@
 use math::{Mat4, Vec4};
 
-
 #[derive(Debug)]
 pub struct PerspectiveProjection {
     pub zoom: f32,
@@ -54,11 +53,11 @@ pub struct OrthographicProjection {
     f: f32,
 }
 
-impl OrthographicProjection { 
+impl OrthographicProjection {
     pub fn new(width: f32, height: f32, depth: f32) -> Self {
         let width = width / 2.0;
         let height = height / 2.0;
-        
+
         Self {
             zoom: 1.0,
             aspect_ratio: 1.0,
@@ -77,11 +76,11 @@ impl OrthographicProjection {
 
         let l = -half_width;
         let r = half_width;
-        
+
         let sx = -2.0 / (r - l);
         let sy = -2.0 / (self.b - self.t);
         let sz = 1.0 / (self.f - self.n);
-        
+
         let tx = -(self.r + self.l) / (self.r - self.l);
         let ty = -(self.b + self.t) / (self.b - self.t);
         let tz = self.n / (self.f - self.n);

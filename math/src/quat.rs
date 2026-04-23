@@ -23,7 +23,7 @@ impl Quat {
         let right = right.normalized();
         let up = up.normalized();
         let forward = forward.normalized();
-        
+
         let m00 = right.x();
         let m01 = up.x();
         let m02 = forward.x();
