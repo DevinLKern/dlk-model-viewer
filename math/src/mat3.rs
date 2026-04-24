@@ -5,7 +5,7 @@ use crate::traits::{Identity, One, Zero};
 
 #[allow(dead_code)]
 #[repr(transparent)]
-#[derive(Clone, Debug)]
+#[derive(Copy, Clone, Debug)]
 pub struct Mat3<T>([Vec3<T>; 3]);
 
 impl<T> Mat3<T>

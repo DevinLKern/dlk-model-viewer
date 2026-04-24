@@ -11,6 +11,9 @@ pub enum Error {
     YamlEmitError(yaml_rust2::EmitError),
     YamlScanError(yaml_rust2::ScanError),
     ConfigFileInvalid(&'static str),
+    MultipleMaterialsPerShape,
+    InvalidMaterialIndex,
+    CouldNotFindFile,
     WindowIdInvalid,
 }
 
@@ -29,6 +32,9 @@ impl std::fmt::Display for Error {
             Self::YamlEmitError(e) => write!(f, "YamlEmitError({e})"),
             Self::YamlScanError(e) => write!(f, "YamlScanError({e})"),
             Self::ConfigFileInvalid(e) => write!(f, "ConfigFileInvalid({e})"),
+            Self::MultipleMaterialsPerShape => write!(f, "MultipleMaterialsPerShape"),
+            Self::InvalidMaterialIndex => write!(f, "InvalidMaterialIndex"),
+            Self::CouldNotFindFile => write!(f, "CouldNotFindFile"),
         }
     }
 }

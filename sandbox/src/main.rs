@@ -5,14 +5,14 @@ mod result;
 mod settings;
 
 use camera::{Camera, controllers::*};
-use constants::{WORLD_FORWARDS, WORLD_RIGHT, WORLD_UP};
-use image::DynamicImage;
+use constants::{ENGINE_FORWARDS, ENGINE_RIGHT, ENGINE_UP};
 use input_manager::{Input, InputEvent, InputManager};
-use renderer::{MaterialUBO, ShaderVertVertex};
+use renderer::ShaderVertVertex;
 use result::{Error, Result};
 use settings::{Command, Event, Settings};
 
 use ash::vk;
+use vulkan::{IndexBV, VertexBV};
 
 use std::collections::HashSet;
 use std::str::FromStr;
@@ -39,6 +39,7 @@ enum CameraInUse {
     Orbit,
 }
 
+#[allow(unused)]
 struct Application {
     last: std::time::Instant,
     window_name: Box<str>,
@@ -53,8 +54,18 @@ struct Application {
     orbit_controller: OrbitCameraController,
     windows: HashMap<WindowId, (renderer::RenderContext, Window)>,
     renderer: renderer::Renderer,
-    draw_infos: Box<[(vulkan::VertexBV, vulkan::IndexBV, u32)]>,
-    _model_transform: math::AffineTransform,
+
+    default_texture_index: usize,
+
+    plane_vertex_buffer: vulkan::VertexBV,
+    plane_index_buffer: vulkan::IndexBV,
+    plane_material: u32,
+    plane_transform: math::AffineTransform,
+    plane_mesh_ubo_offset: u32,
+
+    model_draw_infos: Vec<(vulkan::VertexBV, vulkan::IndexBV, u32)>,
+    model_transform: math::AffineTransform,
+
     global_light_direction: Vec3<f32>,
     global_light_color: Vec4<f32>,
     global_ambient_light: f32,
@@ -89,381 +100,334 @@ impl Application {
     ) -> Result<Self> {
         // load materials
         let file_path = model_path.with_extension("mtl");
-        let mtl_materials = obj_mtl::load_materials(&file_path)?;
+        let objf = obj_mtl::ObjScene::from_file(model_path)?;
 
-        // load textures and images
-        let (texture_data, texture_name_to_index) = {
-            let mut texture_data = Vec::<DynamicImage>::with_capacity(8);
-            let mut texture_indices = HashMap::<Box<str>, usize>::new();
-            let default_texture_data =
-                image::load_from_memory_with_format(DEFAULT_IMAGE, image::ImageFormat::Png)?;
-
-            texture_data.push(default_texture_data);
-
-            for mat in mtl_materials.iter() {
-                let diffuse_texture = if let Some(texture) = &mat.diffuse.texture {
-                    texture
-                } else {
-                    continue;
-                };
-
-                if texture_indices.contains_key(&diffuse_texture.file_path) {
-                    continue;
-                }
-
-                let path = {
-                    let base = model_path.with_file_name("");
-                    let target = match PathBuf::from_str(&diffuse_texture.file_path) {
-                        Ok(path) => path,
-                        Err(_) => {
-                            tracing::warn!(
-                                "Malformed diffuse texture file path. Reverting to base color."
-                            );
-                            continue;
-                        }
-                    };
-
-                    match Self::search_for(&base, &target) {
-                        Some(path) => path,
-                        None => {
-                            tracing::warn!(
-                                "Could not find diffuse texture. Reverting to base color."
-                            );
-                            continue;
-                        }
-                    }
-                };
-
-                let data = image::open(&path)?;
-
-                let index = texture_data.len();
-                texture_indices.insert(diffuse_texture.file_path.clone(), index);
-                texture_data.push(data);
+        let mtl_materials = match obj_mtl::load_materials(&file_path) {
+            Ok(materials) => materials,
+            Err(obj_mtl::Error::Io(ref e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::warn!("Could not find {}", file_path.display());
+                Box::new([])
             }
-
-            (texture_data, texture_indices)
+            Err(e) => return Err(e.into()),
         };
 
-        // create materials
-        let mut materials = Vec::<renderer::MaterialUBO>::with_capacity(mtl_materials.len() + 1);
-        // add default material
-        materials.push(renderer::MaterialUBO {
+        let (texture_count, material_count) = {
+            let mut count = 0;
+            let mut seen = HashSet::<&str>::new();
+            for material in mtl_materials.iter() {
+                if let Some(texture) = &material.diffuse.texture {
+                    if seen.insert(&texture.file_path) {
+                        count += 1;
+                    }
+                }
+            }
+
+            (count, mtl_materials.len() as u64)
+        };
+
+        let shape_count: u64 = objf.get_shapes().map(|_| 1).sum();
+
+        // TODO: one is added to account for the plane, default texture, and default material.
+        // However, this is very unsafe. add bounds checks and return errors instead of crashing
+        // or printing validation error info.
+        let mut renderer = renderer::Renderer::new(
+            debug_enabled,
+            display_handle,
+            shape_count + 1,
+            texture_count + 1,
+            material_count + 1,
+        )?;
+
+        let mut texture_name_to_index = HashMap::<Box<str>, usize>::new();
+        let default_texture_index = {
+            let image_data =
+                image::load_from_memory_with_format(DEFAULT_IMAGE, image::ImageFormat::Png)?;
+            renderer.create_image(image_data)?
+        };
+        for material in mtl_materials.iter() {
+            if let Some(diffuse_texture) = &material.diffuse.texture {
+                // PathBuf::from_str is infallable
+                let path = {
+                    let base = model_path.with_file_name("");
+                    // PathBuf::from_str is infallible
+                    let target = PathBuf::from_str(&diffuse_texture.file_path).unwrap();
+
+                    Self::search_for(&base, &target).ok_or(Error::CouldNotFindFile)?
+                };
+                let texture_data = image::open(path).inspect_err(|e| tracing::error!("{e}"))?;
+                let texture_handle = renderer.create_image(texture_data)?;
+                let name = diffuse_texture.file_path.clone();
+                texture_name_to_index.insert(name, texture_handle);
+            }
+        }
+
+        let mut material_name_to_offset = HashMap::<Box<str>, u32>::new();
+        let default_material_offset = renderer.add_material(renderer::MaterialUBO {
             flags: 0,
             texture_index: 0,
             _pad2: [0; 8],
             base_color: [0.8, 0.2, 0.2, 1.0],
-        });
-        let mut name_to_material_index = HashMap::<Box<str>, usize>::new();
-        for material in mtl_materials.into_iter() {
-            if name_to_material_index.contains_key(&material.name) {
-                continue;
-            }
-
-            let (color, texture) = (
-                material.diffuse.color.as_ref(),
-                material.diffuse.texture.as_ref(),
-            );
-            let (color, texture, flags) = match (color, texture) {
-                (Some(c), Some(t)) => {
-                    if let Some(&idx) = texture_name_to_index.get(&t.file_path) {
-                        ([c[0], c[1], c[2], 1.0], idx as u32, 1u32)
-                    } else {
-                        tracing::warn!(
-                            "Texture '{}' not found in loaded textures. Falling back to base color.",
-                            t.file_path
-                        );
-                        ([c[0], c[1], c[2], 1.0], 0u32, 0u32)
-                    }
-                }
-                (Some(c), None) => ([c[0], c[1], c[2], 1.0], 0u32, 0u32),
-                (None, Some(t)) => {
-                    if let Some(&idx) = texture_name_to_index.get(&t.file_path) {
-                        ([0.0, 0.0, 0.0, 0.0], idx as u32, 1u32)
-                    } else {
-                        tracing::warn!(
-                            "Texture '{}' not found in loaded textures. Disabling texture flag.",
-                            t.file_path
-                        );
-                        ([1.0, 1.0, 1.0, 1.0], 0u32, 0u32)
-                    }
-                }
-                (None, None) => ([1.0, 1.0, 1.0, 1.0], 0u32, 0u32),
+        })?;
+        for material in mtl_materials.iter() {
+            let (texture_index, flags) = if let Some(diffuse_texture) = &material.diffuse.texture {
+                let name = diffuse_texture.file_path.clone();
+                (*texture_name_to_index.get(&name).unwrap() as u32, 1)
+            } else {
+                (0, 0)
             };
 
-            let idx = materials.len();
-            materials.push(MaterialUBO {
+            let base_color = if let Some(color) = material.diffuse.color {
+                [color[0], color[1], color[2], 1.0]
+            } else {
+                [0.0f32; 4]
+            };
+
+            let material_offset = renderer.add_material(renderer::MaterialUBO {
                 flags,
-                base_color: color,
-                texture_index: texture,
-                _pad2: [0; 8],
-            });
-            name_to_material_index.insert(material.name, idx);
+                texture_index,
+                _pad2: [0u8; 8],
+                base_color,
+            })?;
+
+            let name = material.name.clone();
+            material_name_to_offset.insert(name, material_offset);
         }
 
-        let (model_transform, plane_transform, mesh_data) = {
-            // vertex_data, index_data, material_index, model_transform_index
-            let mut mesh_data = Vec::<(Vec<ShaderVertVertex>, Vec<u32>, u32)>::new();
-
-            let plane_transform = math::AffineTransform {
-                position: Vec3::ZERO.sub(WORLD_UP).scaled(0.5),
-                orientation: Quat::IDENTITY,
-                scalar: Vec3::new(1000.0, 1000.0, 1000.0),
-            };
-
-            let plane_vertex_buffer_data = {
-                const F: Vec3<f32> = WORLD_FORWARDS;
-                const B: Vec3<f32> = Vec3::ZERO.sub(WORLD_FORWARDS);
-                const R: Vec3<f32> = WORLD_RIGHT;
-                const L: Vec3<f32> = Vec3::ZERO.sub(WORLD_RIGHT);
-
-                const FR: Vec3<f32> = F.add(R);
-                const FL: Vec3<f32> = F.add(L);
-                const BR: Vec3<f32> = B.add(R);
-                const BL: Vec3<f32> = B.add(L);
-
-                vec![
-                    renderer::ShaderVertVertex {
-                        position: FL.into_arr(),
-                        tex_coord: [1.0, 0.0],
-                        normal: WORLD_UP.into_arr(),
-                    },
-                    renderer::ShaderVertVertex {
-                        position: FR.into_arr(),
-                        tex_coord: [0.0, 0.0],
-                        normal: WORLD_UP.into_arr(),
-                    },
-                    renderer::ShaderVertVertex {
-                        position: BR.into_arr(),
-                        tex_coord: [0.0, 1.0],
-                        normal: WORLD_UP.into_arr(),
-                    },
-                    renderer::ShaderVertVertex {
-                        position: BL.into_arr(),
-                        tex_coord: [1.0, 1.0],
-                        normal: WORLD_UP.into_arr(),
-                    },
-                ]
-            };
-            let plane_index_buffer_data = vec![0, 1, 2, 2, 3, 0];
-
-            // 0 is the index of the default material
-            mesh_data.push((plane_vertex_buffer_data, plane_index_buffer_data, 0));
-
-            use obj_mtl::*;
-            let objf = ObjScene::from_file(model_path)?;
-            for shape in objf.get_shapes() {
-                let mut vertices = Vec::<ShaderVertVertex>::new();
-                let mut indices = Vec::<u32>::new();
-                let mut vertex_map = HashMap::<VtnIndex, u32>::new();
-
-                let material_idx: u32 = if shape.materials.len() > 0 {
-                    if shape.materials.len() != 1 {
-                        tracing::warn!("Multiple materials per shape not supported");
-                    }
-
-                    let mat = shape.materials.first().unwrap();
-                    let idx = name_to_material_index.get(mat).unwrap_or_else(|| {
-                        tracing::warn!("Could not find {} material. Defaulting to 0", mat);
-                        &0
-                    });
-                    *idx as u32
-                } else {
-                    0
-                };
-
-                // Build a triangle list (fan triangulation for polygons/quads).
-                let mut triangles = Vec::<(VtnIndex, VtnIndex, VtnIndex)>::with_capacity(64);
-                for primitive in shape.get_primitives() {
-                    match primitive {
-                        Primitive::Triangle { v0, v1, v2 } => triangles.push((*v0, *v1, *v2)),
-                        Primitive::Polygon(poly) => {
-                            if poly.len() < 3 {
-                                continue;
-                            }
-                            let v0 = poly[0];
-                            for i in 1..(poly.len() - 1) {
-                                triangles.push((v0, poly[i], poly[i + 1]));
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-
-                for (v0, v1, v2) in triangles {
-                    let derived_normal = if settings.derive_normals {
-                        match (v0.vn, v1.vn, v2.vn) {
-                            (None, None, None) => {
-                                let p0 = &objf.vs[v0.v];
-                                let p0 = Vec3::new(p0.x as f32, p0.y as f32, p0.z as f32);
-                                let p1 = &objf.vs[v1.v];
-                                let p1 = Vec3::new(p1.x as f32, p1.y as f32, p1.z as f32);
-                                let p2 = &objf.vs[v2.v];
-                                let p2 = Vec3::new(p2.x as f32, p2.y as f32, p2.z as f32);
-
-                                let face_normal = p1.sub(p0).cross(p2.sub(p0));
-
-                                Some(face_normal.into_arr())
-                            }
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    };
-                    let derived_normal = match derived_normal {
-                        Some(n) => n,
-                        None => [0.0, 0.0, 0.0],
-                    };
-
-                    for v in [v0, v1, v2] {
-                        let index = if let Some(&i) = vertex_map.get(&v) {
-                            i
-                        } else {
-                            let position = [
-                                objf.vs[v.v].x as f32,
-                                objf.vs[v.v].y as f32,
-                                objf.vs[v.v].z as f32,
-                            ];
-
-                            let tex_coord = if let Some(i) = v.vt {
-                                [objf.vts[i].u as f32, 1.0 - objf.vts[i].v as f32]
-                            } else {
-                                [0.0, 0.0]
-                            };
-
-                            let normal = if let Some(i) = v.vn {
-                                [
-                                    objf.vns[i].x as f32,
-                                    objf.vns[i].y as f32,
-                                    objf.vns[i].z as f32,
-                                ]
-                            } else {
-                                derived_normal
-                            };
-
-                            let i = vertices.len() as u32;
-                            vertices.push(ShaderVertVertex {
-                                position,
-                                tex_coord,
-                                normal,
-                            });
-                            vertex_map.insert(v, i);
-                            i
-                        };
-
-                        indices.push(index);
-                    }
-                }
-
-                mesh_data.push((vertices, indices, material_idx));
-            }
-
-            let model_transform = {
-                let mut min = [f32::MAX; 3];
-                let mut max = [f32::MIN; 3];
-                for (vertices, _, _) in mesh_data.iter() {
-                    for v in vertices.iter() {
-                        for i in 0..3 {
-                            min[i] = min[i].min(v.position[i]);
-                            max[i] = max[i].max(v.position[i]);
-                        }
-                    }
-                }
-                let min = Vec3::new(min[0], min[1], min[2]);
-                let max = Vec3::new(max[0], max[1], max[2]);
-
-                let model_scale = (max.x() - min.x())
-                    .max(max.y() - min.y())
-                    .max(max.z() - min.z());
-                let model_scale = 1.0 / model_scale;
-
-                let model_pos = {
-                    let min_normalized = min.scaled(model_scale);
-                    let min_reduced = min_normalized.scaled_nonuniform(WORLD_UP);
-                    let plane_reduced = plane_transform.position.scaled_nonuniform(WORLD_UP);
-
-                    plane_reduced.sub(min_reduced)
-                };
-
-                math::AffineTransform {
-                    position: model_pos,
-                    orientation: Quat::IDENTITY,
-                    scalar: Vec3::new(model_scale, model_scale, model_scale),
-                }
-            };
-
-            (model_transform, plane_transform, mesh_data)
+        let plane_transform = math::AffineTransform {
+            position: Vec3::ZERO.sub(ENGINE_UP).scaled(0.5),
+            orientation: Quat::IDENTITY,
+            scalar: Vec3::new(1.0, 1.0, 1.0),
         };
 
-        let mut mesh_ubo_buffer_data: Box<[(math::AffineTransform, u32)]> = mesh_data
-            .iter()
-            .map(|(_, _, material_index)| (model_transform, *material_index))
-            .collect();
-        mesh_ubo_buffer_data[0] = (plane_transform, 0);
+        let plane_vertex_buffer_data = {
+            const F: Vec3<f32> = ENGINE_FORWARDS;
+            const B: Vec3<f32> = Vec3::ZERO.sub(ENGINE_FORWARDS);
+            const R: Vec3<f32> = ENGINE_RIGHT;
+            const L: Vec3<f32> = Vec3::ZERO.sub(ENGINE_RIGHT);
 
-        let renderer = renderer::Renderer::new(
-            debug_enabled,
-            display_handle,
-            mesh_ubo_buffer_data.len() as u64,
-            &texture_data,
-            &materials,
-        )?;
+            const FR: Vec3<f32> = F.add(R);
+            const FL: Vec3<f32> = F.add(L);
+            const BR: Vec3<f32> = B.add(R);
+            const BL: Vec3<f32> = B.add(L);
 
-        let mut draw_infos = Vec::<(vulkan::VertexBV, vulkan::IndexBV, u32)>::new();
-        for (vb_data, ib_data, mesh_idx) in mesh_data.into_iter() {
-            if vb_data.len() == 0 || ib_data.len() == 0 {
-                continue;
+            vec![
+                renderer::ShaderVertVertex {
+                    position: FL.into_arr(),
+                    tex_coord: [1.0, 0.0],
+                    normal: ENGINE_UP.into_arr(),
+                },
+                renderer::ShaderVertVertex {
+                    position: FR.into_arr(),
+                    tex_coord: [0.0, 0.0],
+                    normal: ENGINE_UP.into_arr(),
+                },
+                renderer::ShaderVertVertex {
+                    position: BR.into_arr(),
+                    tex_coord: [0.0, 1.0],
+                    normal: ENGINE_UP.into_arr(),
+                },
+                renderer::ShaderVertVertex {
+                    position: BL.into_arr(),
+                    tex_coord: [1.0, 1.0],
+                    normal: ENGINE_UP.into_arr(),
+                },
+            ]
+        };
+        let plane_index_buffer_data = vec![0, 1, 2, 2, 3, 0];
+
+        let mut model_draw_info_data =
+            Vec::<(Vec<ShaderVertVertex>, Vec<u32>, u32)>::with_capacity(32);
+
+        for shape in objf.get_shapes() {
+            let mut vertices = Vec::<ShaderVertVertex>::new();
+            let mut indices = Vec::<u32>::new();
+            let mut vertex_map = HashMap::<obj_mtl::VtnIndex, u32>::new();
+
+            let material_offset = if shape.materials.len() == 0 {
+                default_material_offset
+            } else if shape.materials.len() == 1 {
+                *material_name_to_offset
+                    .get(&shape.materials[0])
+                    .ok_or(Error::InvalidMaterialIndex)?
+            } else {
+                return Err(Error::MultipleMaterialsPerShape);
+            };
+
+            // Build a triangle list
+            let mut triangles =
+                Vec::<(obj_mtl::VtnIndex, obj_mtl::VtnIndex, obj_mtl::VtnIndex)>::with_capacity(64);
+            for primitive in shape.get_primitives() {
+                match primitive {
+                    obj_mtl::Primitive::Triangle { v0, v1, v2 } => triangles.push((*v0, *v1, *v2)),
+                    obj_mtl::Primitive::Polygon(poly) => {
+                        if poly.len() < 3 {
+                            continue;
+                        }
+                        let v0 = poly[0];
+                        for i in 1..(poly.len() - 1) {
+                            triangles.push((v0, poly[i], poly[i + 1]));
+                        }
+                    }
+                    _ => {}
+                }
             }
-            let vb_data_u8 = unsafe {
+
+            for (v0, v1, v2) in triangles {
+                let derived_normal = if settings.derive_normals {
+                    match (v0.vn, v1.vn, v2.vn) {
+                        (None, None, None) => {
+                            let p0 = &objf.vs[v0.v];
+                            let p0 = Vec3::new(p0.x as f32, p0.y as f32, p0.z as f32);
+                            let p1 = &objf.vs[v1.v];
+                            let p1 = Vec3::new(p1.x as f32, p1.y as f32, p1.z as f32);
+                            let p2 = &objf.vs[v2.v];
+                            let p2 = Vec3::new(p2.x as f32, p2.y as f32, p2.z as f32);
+
+                            let face_normal = p1.sub(p0).cross(p2.sub(p0));
+
+                            Some(face_normal.into_arr())
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                let derived_normal = match derived_normal {
+                    Some(n) => n,
+                    None => [0.0, 0.0, 0.0],
+                };
+
+                for v in [v0, v1, v2] {
+                    let index = if let Some(&i) = vertex_map.get(&v) {
+                        i
+                    } else {
+                        let position = [
+                            objf.vs[v.v].x as f32,
+                            objf.vs[v.v].y as f32,
+                            objf.vs[v.v].z as f32,
+                        ];
+
+                        let tex_coord = if let Some(i) = v.vt {
+                            [objf.vts[i].u as f32, 1.0 - objf.vts[i].v as f32]
+                        } else {
+                            [0.0, 0.0]
+                        };
+
+                        let normal = if let Some(i) = v.vn {
+                            [
+                                objf.vns[i].x as f32,
+                                objf.vns[i].y as f32,
+                                objf.vns[i].z as f32,
+                            ]
+                        } else {
+                            derived_normal
+                        };
+
+                        let i = vertices.len() as u32;
+                        vertices.push(ShaderVertVertex {
+                            position,
+                            tex_coord,
+                            normal,
+                        });
+                        vertex_map.insert(v, i);
+                        i
+                    };
+
+                    indices.push(index);
+                }
+            }
+
+            model_draw_info_data.push((vertices, indices, material_offset as u32));
+        }
+
+        let model_transform = {
+            let mut min = [f32::MAX; 3];
+            let mut max = [f32::MIN; 3];
+            for (vertices, _, _) in model_draw_info_data.iter() {
+                for v in vertices.iter() {
+                    for i in 0..3 {
+                        min[i] = min[i].min(v.position[i]);
+                        max[i] = max[i].max(v.position[i]);
+                    }
+                }
+            }
+            let min = Vec3::new(min[0], min[1], min[2]);
+            let max = Vec3::new(max[0], max[1], max[2]);
+            let center = max.add(min).scaled(0.5);
+
+            let model_scale = max.sub(min);
+            let model_scale = model_scale.x().max(model_scale.y()).max(model_scale.z());
+            let model_scale = 1.0 / model_scale;
+
+            let model_pos = Vec3::ZERO.sub(center.scaled(model_scale));
+
+            math::AffineTransform {
+                position: model_pos,
+                orientation: Quat::IDENTITY,
+                scalar: Vec3::new(model_scale, model_scale, model_scale),
+            }
+        };
+
+        let plane_vertex_buffer = {
+            let data = unsafe {
                 std::slice::from_raw_parts(
-                    vb_data.as_ptr() as *const u8,
-                    vb_data.len() * std::mem::size_of::<renderer::ShaderVertVertex>(),
+                    plane_vertex_buffer_data.as_ptr() as *const u8,
+                    plane_vertex_buffer_data.len()
+                        * std::mem::size_of::<renderer::ShaderVertVertex>(),
                 )
             };
+            renderer.create_vertex_buffer(data, plane_vertex_buffer_data.len() as u32)?
+        };
 
-            let vb = renderer.create_vertex_buffer(&vb_data_u8, vb_data.len() as u32)?;
-
-            let ib_data_u8 = unsafe {
+        let plane_index_buffer = {
+            let data = unsafe {
                 std::slice::from_raw_parts(
-                    ib_data.as_ptr() as *const u8,
-                    ib_data.len() * std::mem::size_of::<u32>(),
+                    plane_index_buffer_data.as_ptr() as *const u8,
+                    plane_index_buffer_data.len() * std::mem::size_of::<u32>(),
                 )
             };
-
-            let ib = renderer.create_index_buffer(
-                ib_data_u8,
+            renderer.create_index_buffer(
+                data,
                 vk::IndexType::UINT32,
-                ib_data.len() as u32,
+                plane_index_buffer_data.len() as u32,
+                0,
+            )?
+        };
+
+        let plane_mesh_ubo_offset = renderer.add_model_data(plane_transform.as_mat4(), 0)?;
+
+        let mut model_draw_infos = Vec::<(VertexBV, IndexBV, u32)>::with_capacity(16);
+        for (vertex_data, index_data, material_offset) in model_draw_info_data {
+            let vb_data = unsafe {
+                std::slice::from_raw_parts(
+                    vertex_data.as_ptr() as *const u8,
+                    vertex_data.len() * std::mem::size_of::<renderer::ShaderVertVertex>(),
+                )
+            };
+            let vb = renderer.create_vertex_buffer(vb_data, vertex_data.len() as u32)?;
+
+            let ib_data = unsafe {
+                std::slice::from_raw_parts(
+                    index_data.as_ptr() as *const u8,
+                    index_data.len() * std::mem::size_of::<u32>(),
+                )
+            };
+            let ib = renderer.create_index_buffer(
+                ib_data,
+                vk::IndexType::UINT32,
+                index_data.len() as u32,
                 0,
             )?;
 
-            draw_infos.push((vb, ib, mesh_idx))
-        }
-
-        for (i, (transform, material_index)) in mesh_ubo_buffer_data.iter().enumerate() {
-            let model_transform = if i != 0 {
-                transform
+            let material_index = material_offset / renderer.material_buffer_element_size as u32;
+            let offset = renderer.add_model_data(
+                model_transform
                     .as_mat4()
-                    .mul(&settings.model_to_world.as_mat4(1.0))
-            } else {
-                transform.as_mat4()
-            };
-            let ubo_data = renderer::MeshUBO {
-                model: model_transform.into_2d_arr(),
-                material_index: *material_index,
-            };
-            let src = &ubo_data;
-            let offset = i as u64 * renderer.model_transform_buffer_element_size;
-            unsafe {
-                let dst = renderer
-                    .model_transform_buffer
-                    .map_memory(offset, renderer.model_transform_buffer_element_size)
-                    .inspect_err(|e| tracing::error!("{e}"))
-                    .unwrap();
+                    .mul(&settings.model_to_world.into_mat4(1.0)),
+                material_index,
+            )?;
 
-                std::ptr::copy_nonoverlapping(src, dst as *mut renderer::MeshUBO, 1);
-
-                renderer.model_transform_buffer.unmap()
-            }
+            model_draw_infos.push((vb, ib, offset));
         }
 
         let mut binding_map = HashMap::new();
@@ -471,23 +435,20 @@ impl Application {
             binding_map.insert(binding.command, index);
         }
 
-        // causes blank screen
-        let mut orbit_camera = Camera::orthographic(1.0, 1.0, 10.0);
+        let mut orbit_camera = Camera::orthographic(1.25, 1.25, 10.0);
         orbit_camera
             .transform
-            .translate_global(Vec3::ZERO.sub(WORLD_FORWARDS.scaled(2.0)));
-        orbit_camera.look_at(model_transform.position, WORLD_UP);
+            .translate_global(Vec3::ZERO.sub(ENGINE_FORWARDS));
+        orbit_camera.look_at(Vec3::ZERO, ENGINE_UP);
 
         let mut fps_camera = Camera::perspective(settings.fov_y);
         fps_camera
             .transform
-            .translate_global(Vec3::ZERO.sub(WORLD_FORWARDS));
-        fps_camera.look_at(model_transform.position, WORLD_UP);
-
-        let last = std::time::Instant::now();
+            .translate_global(Vec3::ZERO.sub(ENGINE_FORWARDS));
+        fps_camera.look_at(Vec3::ZERO, ENGINE_UP);
 
         Ok(Self {
-            last,
+            last: std::time::Instant::now(),
             window_name,
             settings,
             binding_map,
@@ -500,12 +461,22 @@ impl Application {
             orbit_camera,
             orbit_controller: OrbitCameraController::new(model_transform.position),
             windows: std::collections::HashMap::new(),
-            draw_infos: draw_infos.into_boxed_slice(),
-            exiting: false,
-            _model_transform: model_transform,
-            global_light_direction: Vec3::ZERO.sub(WORLD_UP).add(WORLD_RIGHT.scaled(0.2)),
+
+            default_texture_index,
+
+            plane_vertex_buffer,
+            plane_index_buffer,
+            plane_material: 0,
+            plane_transform,
+            plane_mesh_ubo_offset,
+
+            model_draw_infos,
+            model_transform,
+
+            global_light_direction: Vec3::ZERO.sub(ENGINE_UP).add(ENGINE_RIGHT.scaled(0.2)),
             global_light_color: Vec4::new(1.0, 1.0, 1.0, 1.0),
             global_ambient_light: 0.1,
+            exiting: false,
         })
     }
     fn meets_requirements(&self, binding_index: usize) -> Option<bool> {
@@ -571,14 +542,14 @@ impl Application {
 
         let mut offset = Vec3::ZERO;
         // camera should move at 2 units per second
-        const SPEED: f32 = 2.000;
+        const SPEED: f32 = 2.0;
         let dirs = [
-            (Command::MoveForward, WORLD_FORWARDS),
-            (Command::MoveBackward, Vec3::ZERO.sub(WORLD_FORWARDS)),
-            (Command::MoveRight, WORLD_RIGHT),
-            (Command::MoveLeft, Vec3::ZERO.sub(WORLD_RIGHT)),
-            (Command::MoveUp, WORLD_UP),
-            (Command::MoveDown, Vec3::ZERO.sub(WORLD_UP)),
+            (Command::MoveForward, ENGINE_FORWARDS),
+            (Command::MoveBackward, Vec3::ZERO.sub(ENGINE_FORWARDS)),
+            (Command::MoveRight, ENGINE_RIGHT),
+            (Command::MoveLeft, Vec3::ZERO.sub(ENGINE_RIGHT)),
+            (Command::MoveUp, ENGINE_UP),
+            (Command::MoveDown, Vec3::ZERO.sub(ENGINE_UP)),
         ];
         for (cmd, dir) in dirs.iter() {
             let binding_index = match self.binding_map.get(cmd) {
@@ -594,7 +565,7 @@ impl Application {
         match self.camera_in_use {
             CameraInUse::Fps => self.fps_controller.r#move(offset),
             CameraInUse::Orbit => {
-                offset.scale_assign_nonuniform(WORLD_FORWARDS);
+                offset.scale_assign_nonuniform(ENGINE_FORWARDS);
                 offset.scale_assign(SPEED);
                 let z = offset.x() + offset.y() + offset.z();
                 self.orbit_controller.r#move(z);
@@ -748,11 +719,7 @@ impl Application {
                         );
                     }
 
-                    let itr = match &self.camera_in_use {
-                        CameraInUse::Fps => self.draw_infos.iter().skip(0),
-                        CameraInUse::Orbit => self.draw_infos.iter().skip(1),
-                    };
-                    for (vb, ib, mesh_idx) in itr {
+                    for (vb, ib, mesh_offset) in self.model_draw_infos.iter() {
                         {
                             let sets = [self.renderer.descriptor_sets[1]];
                             self.renderer.device.cmd_bind_descriptor_sets(
@@ -761,8 +728,7 @@ impl Application {
                                 self.renderer.pipeline_layout.handle,
                                 1,
                                 &sets,
-                                &[*mesh_idx
-                                    * self.renderer.model_transform_buffer_element_size as u32],
+                                &[*mesh_offset],
                             );
                         }
                         vb.bind(cmd);
@@ -828,6 +794,7 @@ impl ApplicationHandler for Application {
             let aspect_ratio = w / h;
 
             self.fps_camera.set_aspect_ratio(aspect_ratio);
+            self.orbit_camera.set_aspect_ratio(aspect_ratio);
         };
 
         self.renderer

@@ -144,6 +144,10 @@ impl Vec3<f32> {
             self.x() * other.y() - self.y() * other.x(),
         )
     }
+    #[inline]
+    pub const fn sum(&self) -> f32 {
+        self.x() + self.y() + self.z()
+    }
 }
 
 impl<T: std::fmt::Display + Copy> std::fmt::Display for Vec3<T> {

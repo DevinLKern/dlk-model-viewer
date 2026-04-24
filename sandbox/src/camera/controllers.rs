@@ -2,7 +2,7 @@ use math::{Quat, Vec2, Vec3, Zero};
 
 use crate::{
     Camera,
-    constants::{WORLD_FORWARDS, WORLD_RIGHT, WORLD_UP},
+    constants::{ENGINE_FORWARDS, ENGINE_RIGHT, ENGINE_UP},
 };
 
 pub trait CameraController {
@@ -40,15 +40,16 @@ impl FpsCameraController {
 
 impl CameraController for FpsCameraController {
     fn update(&mut self, camera: &mut Camera, sensitivity: f32, dt: f32) {
-        self.yaw += -sensitivity * self.rotation_delta.x() * dt;
-        self.pitch += -sensitivity * self.rotation_delta.y() * dt;
+        const SS: f32 = 0.0004;
+        self.yaw += -sensitivity * self.rotation_delta.x() * SS;
+        self.pitch += -sensitivity * self.rotation_delta.y() * SS;
 
-        let q_yaw = Quat::unit_from_angle_axis(self.yaw, WORLD_UP);
+        let q_yaw = Quat::unit_from_angle_axis(self.yaw, ENGINE_UP);
 
         const LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.001;
         self.pitch = self.pitch.clamp(-LIMIT, LIMIT);
 
-        let right = q_yaw.rotate_vec(WORLD_RIGHT);
+        let right = q_yaw.rotate_vec(ENGINE_RIGHT);
         let q_pitch = Quat::unit_from_angle_axis(self.pitch, right);
         camera.transform.orientation = q_pitch.mul(q_yaw);
         camera.transform.translate_local(self.movement.scaled(dt));
@@ -98,12 +99,13 @@ impl OrbitCameraController {
 
 impl CameraController for OrbitCameraController {
     fn update(&mut self, camera: &mut Camera, sensitivity: f32, dt: f32) {
-        let dx = self.rotation_delta.x() * sensitivity * dt;
-        let dy = self.rotation_delta.y() * sensitivity * dt;
+        const SS: f32 = 0.0004;
+        let dx = self.rotation_delta.x() * sensitivity * SS;
+        let dy = self.rotation_delta.y() * sensitivity * SS;
         self.rotation_delta = Vec2::ZERO;
 
-        let up = camera.transform.orientation.rotate_vec(WORLD_UP);
-        let right = camera.transform.orientation.rotate_vec(WORLD_RIGHT);
+        let up = camera.transform.orientation.rotate_vec(ENGINE_UP);
+        let right = camera.transform.orientation.rotate_vec(ENGINE_RIGHT);
         let q_yaw = Quat::unit_from_angle_axis(dx, up);
         let q_pitch = Quat::unit_from_angle_axis(dy, right);
         let rotation = q_yaw.mul(q_pitch);
@@ -116,7 +118,7 @@ impl CameraController for OrbitCameraController {
         let allowed_dr = radius - new_radius;
         camera
             .transform
-            .translate_local(WORLD_FORWARDS.scaled(allowed_dr));
+            .translate_local(ENGINE_FORWARDS.scaled(allowed_dr));
         self.delta_radius = 0.0;
 
         let zoom = camera.get_zoom();
