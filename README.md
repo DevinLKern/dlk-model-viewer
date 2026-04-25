@@ -86,6 +86,12 @@ Open an OBJ model:
 dlk-model-viewer model.obj
 ```
 
+By default, `files/default_settings.yaml` is used for configuration. You can optionally specify a custom settings file:
+
+```bash
+dlk-model-viewer --settings custom_settings.yaml model.obj
+```
+
 ---
 
 ## Nemo File Manager Integration
@@ -104,51 +110,18 @@ With the following contents:
 [Nemo Action]
 Name=View obj model
 Comment=Open obj model with dlk-model-viewer
-Exec=dlk-objviewer -settings settings.json %F
+Exec=dlk-model-viewer --settings custom_settings.yaml %F
 Icon-Name=applications-graphics
 Selection=s
 Extensions=obj;
 ```
-
-If your `.obj` files use a different coordinate system convention, you may want to modify the flags:
-
-```
--f +z -u +y -r +x
-```
-
-to match your coordinate system. 
-If you don't want to derive missing normals just set --derive-normals to false. 
-If you want to set the mouse sensitivity just set --mouse-sensitivity to whatever you prefer. 
+ 
 
 ---
 
 ## Settings
 
-### Bindings
-Bindings are defined in the settings file under the `"bindings"` section. Each binding consists of the following fields:
-
-- **`command`**  
-  The command that will be executed.  
-  Examples: `move_forward`, `move_left`
-
-- **`input`**  
-  The key or button that activates the command.  
-  Examples: `w`, `a`, `s`, `d`
-
-- **`event`**  
-  Specifies when the command will be executed.  
-  Examples: `press`, `hold`, `release`
-
-- **`requires`** *(optional)*  
-  Defines an additional requirement that must be met for the command to execute. This typically references another binding.
-
-#### Example
-To require **Shift + Click** to move the camera forward:
-
-1. Add a condition to the `move_forward` binding:
-   ```yaml
-   "requires": "move_forward_requirement"
----
+See SETTINGS.md
 
 ## License
 

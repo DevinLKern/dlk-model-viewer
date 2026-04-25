@@ -49,7 +49,7 @@ bindings:
     event: press
 
 options:
-  default_camera: "fps"
+  default_camera: "orbit"
   fov_y: 65.0
   mouse_sensitivity: 75.0
   derive_normals: true

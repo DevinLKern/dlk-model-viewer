@@ -234,7 +234,7 @@ impl ObjScene {
                         primitive,
                     ));
                 }
-                _ => {},
+                _ => {}
             }
         }
 

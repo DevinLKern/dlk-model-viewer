@@ -33,7 +33,7 @@ use math::Vec3;
 use math::Vec4;
 use math::{Quat, Zero};
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 enum CameraInUse {
     Fps,
     Orbit,
@@ -447,6 +447,8 @@ impl Application {
             .translate_global(Vec3::ZERO.sub(ENGINE_FORWARDS));
         fps_camera.look_at(Vec3::ZERO, ENGINE_UP);
 
+        let camera_in_use = settings.default_camera.clone();
+
         Ok(Self {
             last: std::time::Instant::now(),
             window_name,
@@ -455,7 +457,7 @@ impl Application {
             input_manager: InputManager::new(),
             toggled: HashSet::<Input>::new(),
             renderer,
-            camera_in_use: CameraInUse::Orbit,
+            camera_in_use,
             fps_camera,
             fps_controller: FpsCameraController::new(),
             orbit_camera,
@@ -591,20 +593,21 @@ impl Application {
             }
         }
 
-        let (dx, dy) = self
-            .binding_map
-            .get(&Command::Rotate)
-            .and_then(|idx| self.meets_requirements(*idx))
-            .filter(|&ok| ok)
-            .map(|_| {
-                (
-                    self.input_manager.mouse_delta.0 as f32,
-                    self.input_manager.mouse_delta.1 as f32,
-                )
-            })
-            .unwrap_or((0.0, 0.0));
         if let Some(idx) = self.binding_map.get(&Command::Rotate) {
             if let Some(true) = self.meets_requirements(*idx) {
+                // NOTE: mouse_movement is the only valid input for rotate
+                let (dx, dy) = self
+                    .binding_map
+                    .get(&Command::Rotate)
+                    .and_then(|idx| self.meets_requirements(*idx))
+                    .filter(|&ok| ok)
+                    .map(|_| {
+                        (
+                            self.input_manager.mouse_delta.0 as f32,
+                            self.input_manager.mouse_delta.1 as f32,
+                        )
+                    })
+                    .unwrap_or((0.0, 0.0));
                 match self.camera_in_use {
                     CameraInUse::Fps => self.fps_controller.rotate(dx, dy),
                     CameraInUse::Orbit => self.orbit_controller.rotate(dx, dy),

@@ -24,10 +24,18 @@ impl PerspectiveProjection {
     pub fn projection_matrix(&self) -> Mat4<f32> {
         let n = self.near;
         let f = self.far;
-        const R: f32 = vulkan::VIEW_VOLUME_MAX.scaled_nonuniform(crate::ENGINE_RIGHT).sum();
-        const L: f32 = vulkan::VIEW_VOLUME_MIN.scaled_nonuniform(crate::ENGINE_RIGHT).sum();
-        const T: f32 = vulkan::VIEW_VOLUME_MIN.scaled_nonuniform(crate::ENGINE_UP).sum();
-        const B: f32 = vulkan::VIEW_VOLUME_MAX.scaled_nonuniform(crate::ENGINE_UP).sum();
+        const R: f32 = vulkan::VIEW_VOLUME_MAX
+            .scaled_nonuniform(crate::ENGINE_RIGHT)
+            .sum();
+        const L: f32 = vulkan::VIEW_VOLUME_MIN
+            .scaled_nonuniform(crate::ENGINE_RIGHT)
+            .sum();
+        const T: f32 = vulkan::VIEW_VOLUME_MIN
+            .scaled_nonuniform(crate::ENGINE_UP)
+            .sum();
+        const B: f32 = vulkan::VIEW_VOLUME_MAX
+            .scaled_nonuniform(crate::ENGINE_UP)
+            .sum();
 
         let fov_y = self.fov_y / self.zoom;
         let half_tan = (fov_y.to_radians() / 2.0).tan();

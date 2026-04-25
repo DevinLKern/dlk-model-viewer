@@ -44,12 +44,6 @@ impl Command {
             "use_orbit_camera" => Command::UseOrbitCamera,
             "zoom_in" => Command::ZoomIn,
             "zoom_out" => Command::ZoomOut,
-            // "rotate_forward_pos" => Command::RotateForwardPositive,
-            // "rotate_forward_neg" => Command::RotateForwardNegative,
-            // "rotate_right_pos" => Command::RotateRightPositive,
-            // "rotate_right_neg" => Command::RotateRightNegative,
-            // "rotate_up_pos" => Command::RotateUpPositive,
-            // "rotate_up_neg" => Command::RotateUpNegative,
             _ => return None,
         };
 
@@ -57,7 +51,7 @@ impl Command {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Event {
     Hold,
     Toggle,
@@ -97,7 +91,7 @@ pub struct Settings {
     pub derive_normals: bool,
     pub model_to_world: math::Mat3<f32>,
     pub bindings: Box<[Binding]>,
-    pub _default_camera: CameraInUse,
+    pub default_camera: CameraInUse,
 }
 
 impl Settings {
@@ -196,6 +190,26 @@ impl Settings {
                 None
             };
 
+            match (command, input, event) {
+                (Command::Rotate, Input::MouseMotion, Event::Movement) => {}
+                (Command::Rotate, _, _) => {
+                    return Err(Error::ConfigFileInvalid(
+                        "rotate command only supports mouse_moved",
+                    ));
+                }
+                (_, Input::MouseMotion, _) => {
+                    return Err(Error::ConfigFileInvalid(
+                        "only rotate command supports mouse_moved",
+                    ));
+                }
+                (_, _, Event::Movement) => {
+                    return Err(Error::ConfigFileInvalid(
+                        "only rotate command supports movement event",
+                    ));
+                }
+                _ => {}
+            }
+
             bindings.push(Binding {
                 command,
                 input,
@@ -215,6 +229,9 @@ impl Settings {
             .ok_or(Error::ConfigFileInvalid("fov_y not found"))?
             .as_f64()
             .ok_or(Error::ConfigFileInvalid("expected fov_y to be a float"))?;
+        if fov_y < 30.0 || 120.0 < fov_y {
+            return Err(Error::ConfigFileInvalid("fov_y must be between 30 and 120"));
+        }
 
         let mouse_sensitivity = options
             .get(&Yaml::String(String::from("mouse_sensitivity")))
@@ -229,7 +246,7 @@ impl Settings {
             .ok_or(Error::ConfigFileInvalid("derive_normals not found"))?
             .as_bool()
             .ok_or(Error::ConfigFileInvalid(
-                "expected derive normals to be true",
+                "expected derive normals to be a bool",
             ))?;
 
         let str_to_vec = |s: &str| -> Option<math::Vec3<f32>> {
@@ -306,7 +323,7 @@ impl Settings {
         };
 
         Ok(Settings {
-            _default_camera: default_camera,
+            default_camera: default_camera,
             fov_y: fov_y as f32,
             mouse_sensitivity: mouse_sensitivity / 10.0,
             derive_normals,
