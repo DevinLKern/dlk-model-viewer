@@ -73,6 +73,7 @@ struct Application {
 }
 
 const DEFAULT_IMAGE: &[u8] = include_bytes!("../../files/images/default.png");
+const DEFAULT_SETTINGS: &str = include_str!("../../files/default_settings.yaml");
 
 impl Application {
     fn search_for(base: &Path, target: &Path) -> Option<PathBuf> {
@@ -105,7 +106,7 @@ impl Application {
         let mtl_materials = match obj_mtl::load_materials(&file_path) {
             Ok(materials) => materials,
             Err(obj_mtl::Error::Io(ref e)) if e.kind() == std::io::ErrorKind::NotFound => {
-                tracing::warn!("Could not find {}", file_path.display());
+                println!("INFO: Could not find {}", file_path.display());
                 Box::new([])
             }
             Err(e) => return Err(e.into()),
@@ -846,11 +847,19 @@ impl ApplicationHandler for Application {
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
-        .with_file(true)
-        .with_line_number(true)
-        .init();
+    {
+        const LEVEL: tracing::Level = if cfg!(debug_assertions) {
+            tracing::Level::DEBUG
+        } else {
+            tracing::Level::ERROR
+        };
+
+        tracing_subscriber::fmt()
+            .with_max_level(LEVEL)
+            .with_file(true)
+            .with_line_number(true)
+            .init();
+    }
 
     let args: Box<[String]> = std::env::args().collect();
     let name = format!(
@@ -882,6 +891,26 @@ fn main() -> Result<()> {
         std::path::PathBuf::from(args[args.len() - 1].clone())
     };
 
+    let settings_dir = if let Some(dirs) = directories::ProjectDirs::from("", "", &name) {
+        dirs.config_dir().to_path_buf()
+    } else {
+        println!("Could not find config directory!");
+        return Ok(());
+    };
+
+    // ensure that default_settings.yaml exists
+    {
+        let settings_path = settings_dir.join("default_settings.yaml");
+
+        if let Some(parent) = settings_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        if !settings_path.exists() {
+            std::fs::write(settings_path, DEFAULT_SETTINGS)?;
+        }
+    }
+
     let settings =
         {
             let arg_idx = args.iter().enumerate().find_map(|(idx, arg)| {
@@ -891,21 +920,15 @@ fn main() -> Result<()> {
             let path_str = if let Some(idx) = arg_idx {
                 args.get(idx + 1)
             } else {
-                Some(&String::from_str("files/default_settings.yaml").unwrap())
+                Some(&String::from_str("default_settings.yaml").unwrap())
             };
 
             if let Some(str) = path_str {
-                let path = match std::path::PathBuf::from_str(str) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        println!("Could not load settings. Error info: {e}");
-                        return Ok(());
-                    }
-                };
+                let path = settings_dir.join(str);
 
                 Settings::new(&path, &args)?
             } else {
-                println!("Settings file not present");
+                println!("Settings file not present!");
                 return Ok(());
             }
         };
@@ -913,14 +936,14 @@ fn main() -> Result<()> {
     let event_loop = EventLoop::new().inspect_err(|e| tracing::error!("{e}"))?;
 
     let mut app = {
-        let debug_enabled = cfg!(debug_assertions);
+        const DEBUG_ENABLED: bool = cfg!(debug_assertions);
         let owned_display_handle = event_loop.owned_display_handle();
         let display_handle = owned_display_handle.display_handle()?;
         Application::new(
             name.into_boxed_str(),
             settings,
             model_path.as_path(),
-            debug_enabled,
+            DEBUG_ENABLED,
             &display_handle,
         )?
     };

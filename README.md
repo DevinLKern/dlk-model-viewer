@@ -86,11 +86,13 @@ Open an OBJ model:
 dlk-model-viewer model.obj
 ```
 
-By default, `files/default_settings.yaml` is used for configuration. You can optionally specify a custom settings file:
+By default, `~/.config/dlk-model-viewer/default_settings.yaml` is used for configuration. You can optionally specify a custom settings file:
 
 ```bash
 dlk-model-viewer --settings custom_settings.yaml model.obj
 ```
+
+If you do this, the program will search for custom_settings in ~/.config/dlk-model-viewer. Please note that default_settings.yaml will be created automatically when the program runs.
 
 ---
 
