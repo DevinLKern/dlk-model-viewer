@@ -6,7 +6,8 @@ const uint MATERIAL_FLAG_TEXTURED_BIT = (1 << 0);
 
 // set 1 is for objects that are update every object
 layout(std140, set = 1, binding = 0) uniform MeshUBO {
-    mat4 model;
+    mat4 model_matrix;
+    mat4 normal_matrix;
     uint material_index;
 } mesh;
 
@@ -16,7 +17,6 @@ layout(std140, set = 2, binding = 0) uniform GlobalLightUBO {
     vec4 color;
     float ambient;
 } world_light;
-
 
 layout (set = 2, binding = 1) uniform sampler2D global_textures[];
 
@@ -40,8 +40,8 @@ layout (location = 0) out vec4 f_color;
 
 
 void main() {
-    // This only works when the scale is uniform. Right now it is.
-    vec3 normal_world_space = normalize(mat3(mesh.model) * v_normal);
+    // mat3 normal_matrix = transpose(inverse(mat3(mesh.model_matrix)));
+    vec3 normal_world_space = normalize(mat3(mesh.normal_matrix) * v_normal);
     float light_intensity = world_light.ambient + max(0.0, dot(normal_world_space, -world_light.direction));
     
     MaterialUBO mat = materials[nonuniformEXT(mesh.material_index)];

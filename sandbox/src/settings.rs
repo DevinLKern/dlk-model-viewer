@@ -1,6 +1,7 @@
 use yaml_rust2::YamlLoader;
 
-use crate::{CameraInUse, ENGINE_FORWARDS, ENGINE_RIGHT, ENGINE_UP, Input, Result, result::Error};
+use crate::{CameraInUse, Input, Result, result::Error};
+use crate::{ENGINE_FORWARDS, ENGINE_UP, ENGINE_RIGHT};
 
 use std::{
     collections::HashMap,
@@ -320,6 +321,8 @@ impl Settings {
                 math::Mat3::from_cols(ENGINE_RIGHT, ENGINE_UP, ENGINE_FORWARDS);
 
             from_model.mul(&INTO_WORLD)
+
+            // from_model
         };
 
         Ok(Settings {

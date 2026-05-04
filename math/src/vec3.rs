@@ -56,16 +56,17 @@ impl<T: Zero + Copy> Vec3<T> {
     pub const fn as_vec4(&self) -> Vec4<T> {
         Vec4::new(self.x(), self.y(), self.z(), T::ZERO)
     }
-    #[inline]
-    pub const fn into_arr(self) -> [T; 3] {
-        [self.x(), self.y(), self.z()]
-    }
+}
+impl<T: Copy> Vec3<T> {
     #[inline]
     pub const fn as_arr(&self) -> [T; 3] {
-        [self.x(), self.y(), self.z()]
+        self.0
+    }
+    #[inline]
+    pub const fn into_arr(self) -> [T; 3] {
+        self.0
     }
 }
-
 impl Vec3<f32> {
     #[inline]
     pub const fn length_squared(&self) -> f32 {

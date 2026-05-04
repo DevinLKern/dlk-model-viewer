@@ -870,7 +870,15 @@ impl Renderer {
         material_index: u32,
     ) -> Result<u32> {
         let data = crate::MeshUBO {
-            model: model_matrix.into_2d_arr(),
+            model_matrix: model_matrix.as_2d_arr(),
+            normal_matrix: model_matrix
+                .as_mat3()
+                .transposed()
+                .inverse()
+                .unwrap()
+                .into_mat4(1.0)
+                .as_2d_arr(),
+            // _pad2: [0; 12],
             material_index,
         };
         let write_offset = self.model_transform_buffer_offset as u64;

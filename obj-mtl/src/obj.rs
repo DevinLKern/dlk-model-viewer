@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+#[derive(Copy, Clone)]
 pub struct Vertex {
     pub x: f64,
     pub y: f64,
@@ -15,6 +16,7 @@ pub struct VertexTexture {
     pub w: Option<f64>,
 }
 
+#[derive(Copy, Clone)]
 pub struct VertexNormal {
     pub x: f64,
     pub y: f64,

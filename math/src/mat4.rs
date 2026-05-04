@@ -1,3 +1,4 @@
+use crate::Mat3;
 use crate::traits::{Identity, One, Zero};
 use crate::vec3::Vec3;
 use crate::vec4::Vec4;
@@ -95,7 +96,15 @@ impl<T: Copy> Mat4<T> {
     pub const fn c3(&self) -> Vec4<T> {
         self.0[3]
     }
-
+    #[inline]
+    pub fn as_2d_arr(&self) -> [[T; 4]; 4] {
+        [
+            self.c0().into_arr(),
+            self.c1().into_arr(),
+            self.c2().into_arr(),
+            self.c3().into_arr(),
+        ]
+    }
     #[inline]
     pub fn into_2d_arr(self) -> [[T; 4]; 4] {
         [
@@ -104,6 +113,14 @@ impl<T: Copy> Mat4<T> {
             self.c2().into_arr(),
             self.c3().into_arr(),
         ]
+    }
+    #[inline]
+    pub const fn as_mat3(&self) -> Mat3<T> {
+        Mat3::from_cols(
+            self.c0().into_vec3(),
+            self.c1().into_vec3(),
+            self.c2().into_vec3(),
+        )
     }
 }
 

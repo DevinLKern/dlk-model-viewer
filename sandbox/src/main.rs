@@ -33,6 +33,8 @@ use math::Vec3;
 use math::Vec4;
 use math::{Quat, Zero};
 
+include!(concat!(env!("OUT_DIR"), "/arrow.rs"));
+
 #[derive(Debug, Copy, Clone)]
 enum CameraInUse {
     Fps,
@@ -62,6 +64,17 @@ struct Application {
     plane_material: u32,
     plane_transform: math::AffineTransform,
     plane_mesh_ubo_offset: u32,
+
+    arrow_vertex_buffer: vulkan::VertexBV,
+    red_material_index: u32,
+    red_arrow_transform: math::AffineTransform,
+    red_arrow_mesh_ubo_offset: u32,
+    green_material_index: u32,
+    green_arrow_transform: math::AffineTransform,
+    green_arrow_mesh_ubo_offset: u32,
+    blue_material_index: u32,
+    blue_arrow_transform: math::AffineTransform,
+    blue_arrow_mesh_ubo_offset: u32,
 
     model_draw_infos: Vec<(vulkan::VertexBV, vulkan::IndexBV, u32)>,
     model_transform: math::AffineTransform,
@@ -134,9 +147,9 @@ impl Application {
         let mut renderer = renderer::Renderer::new(
             debug_enabled,
             display_handle,
-            shape_count + 1,
+            shape_count + 4,
             texture_count + 1,
-            material_count + 1,
+            material_count + 4,
         )?;
 
         let mut texture_name_to_index = HashMap::<Box<str>, usize>::new();
@@ -155,9 +168,12 @@ impl Application {
 
                     Self::search_for(&base, &target).ok_or(Error::CouldNotFindFile)?
                 };
+                let name = diffuse_texture.file_path.clone();
+                if texture_name_to_index.contains_key(&name) {
+                    continue;
+                }
                 let texture_data = image::open(path).inspect_err(|e| tracing::error!("{e}"))?;
                 let texture_handle = renderer.create_image(texture_data)?;
-                let name = diffuse_texture.file_path.clone();
                 texture_name_to_index.insert(name, texture_handle);
             }
         }
@@ -200,7 +216,7 @@ impl Application {
             scalar: Vec3::new(1.0, 1.0, 1.0),
         };
 
-        let plane_vertex_buffer_data = {
+        const PLANE_VERTEX_BUFFER_DATA: &[renderer::ShaderVertVertex] = {
             const F: Vec3<f32> = ENGINE_FORWARDS;
             const B: Vec3<f32> = Vec3::ZERO.sub(ENGINE_FORWARDS);
             const R: Vec3<f32> = ENGINE_RIGHT;
@@ -211,7 +227,7 @@ impl Application {
             const BR: Vec3<f32> = B.add(R);
             const BL: Vec3<f32> = B.add(L);
 
-            vec![
+            &[
                 renderer::ShaderVertVertex {
                     position: FL.into_arr(),
                     tex_coord: [1.0, 0.0],
@@ -234,7 +250,7 @@ impl Application {
                 },
             ]
         };
-        let plane_index_buffer_data = vec![0, 1, 2, 2, 3, 0];
+        let plane_index_buffer_data = [0, 1, 2, 2, 3, 0];
 
         let mut model_draw_info_data =
             Vec::<(Vec<ShaderVertVertex>, Vec<u32>, u32)>::with_capacity(32);
@@ -355,6 +371,7 @@ impl Application {
             let min = Vec3::new(min[0], min[1], min[2]);
             let max = Vec3::new(max[0], max[1], max[2]);
             let center = max.add(min).scaled(0.5);
+            let center = settings.model_to_world.mul_vec(center);
 
             let model_scale = max.sub(min);
             let model_scale = model_scale.x().max(model_scale.y()).max(model_scale.z());
@@ -372,12 +389,12 @@ impl Application {
         let plane_vertex_buffer = {
             let data = unsafe {
                 std::slice::from_raw_parts(
-                    plane_vertex_buffer_data.as_ptr() as *const u8,
-                    plane_vertex_buffer_data.len()
+                    PLANE_VERTEX_BUFFER_DATA.as_ptr() as *const u8,
+                    PLANE_VERTEX_BUFFER_DATA.len()
                         * std::mem::size_of::<renderer::ShaderVertVertex>(),
                 )
             };
-            renderer.create_vertex_buffer(data, plane_vertex_buffer_data.len() as u32)?
+            renderer.create_vertex_buffer(data, PLANE_VERTEX_BUFFER_DATA.len() as u32)?
         };
 
         let plane_index_buffer = {
@@ -396,6 +413,98 @@ impl Application {
         };
 
         let plane_mesh_ubo_offset = renderer.add_model_data(plane_transform.as_mat4(), 0)?;
+
+        let arrow_vertex_buffer = {
+            let arrow_vb_data: Box<[renderer::ShaderVertVertex]> = crate::ARROW_VERTICES
+                .iter()
+                .zip(crate::ARROW_NORMALS.iter())
+                .map(|(pos, normal)| renderer::ShaderVertVertex {
+                    position: *pos,
+                    tex_coord: [0.0, 0.0],
+                    normal: *normal,
+                })
+                .collect();
+
+            let data = unsafe {
+                std::slice::from_raw_parts(
+                    arrow_vb_data.as_ptr() as *const u8,
+                    arrow_vb_data.len() * std::mem::size_of::<renderer::ShaderVertVertex>(),
+                )
+            };
+
+            renderer.create_vertex_buffer(data, arrow_vb_data.len() as u32)?
+        };
+
+        const ARROW_SCALAR: f32 = 0.05;
+
+        let red_material_offset = renderer.add_material(renderer::MaterialUBO {
+            flags: 0,
+            texture_index: 0,
+            _pad2: [0; 8],
+            base_color: [1.0, 0.0, 0.0, 1.0],
+        })?;
+        let red_arrow_transform = math::AffineTransform {
+            position: Vec3::ZERO,
+            orientation: Quat::unit_from_angle_axis(
+                -std::f32::consts::FRAC_PI_2,
+                Vec3::new(0.0, 0.0, 1.0),
+            ),
+            scalar: Vec3::new(ARROW_SCALAR, 0.15, ARROW_SCALAR),
+        };
+        let red_material_index = red_material_offset / renderer.material_buffer_element_size;
+        let red_arrow_mesh_ubo_offset = renderer.add_model_data(
+            settings
+                .model_to_world
+                .as_mat4(1.0)
+                .mul(&red_arrow_transform.as_mat4()),
+            red_material_index,
+        )?;
+
+        let green_material_offset = renderer.add_material(renderer::MaterialUBO {
+            flags: 0,
+            texture_index: 0,
+            _pad2: [0; 8],
+            base_color: [0.0, 1.0, 0.0, 1.0],
+        })?;
+        let green_arrow_transform = math::AffineTransform {
+            position: Vec3::ZERO,
+            orientation: Quat::unit_from_angle_axis(
+                -std::f32::consts::FRAC_PI_2,
+                Vec3::new(0.0, 1.0, 0.0),
+            ),
+            scalar: Vec3::new(ARROW_SCALAR, 0.15, ARROW_SCALAR),
+        };
+        let green_material_index = green_material_offset / renderer.material_buffer_element_size;
+        let green_arrow_mesh_ubo_offset = renderer.add_model_data(
+            settings
+                .model_to_world
+                .as_mat4(1.0)
+                .mul(&green_arrow_transform.as_mat4()),
+            green_material_index,
+        )?;
+
+        let blue_material_offset = renderer.add_material(renderer::MaterialUBO {
+            flags: 0,
+            texture_index: 0,
+            _pad2: [0; 8],
+            base_color: [0.0, 0.0, 1.0, 1.0],
+        })?;
+        let blue_arrow_transform = math::AffineTransform {
+            position: Vec3::ZERO,
+            orientation: Quat::unit_from_angle_axis(
+                std::f32::consts::FRAC_PI_2,
+                Vec3::new(1.0, 0.0, 0.0),
+            ),
+            scalar: Vec3::new(ARROW_SCALAR, 0.15, ARROW_SCALAR),
+        };
+        let blue_material_index = blue_material_offset / renderer.material_buffer_element_size;
+        let blue_arrow_mesh_ubo_offset = renderer.add_model_data(
+            settings
+                .model_to_world
+                .as_mat4(1.0)
+                .mul(&blue_arrow_transform.as_mat4()),
+            blue_material_index,
+        )?;
 
         let mut model_draw_infos = Vec::<(VertexBV, IndexBV, u32)>::with_capacity(16);
         for (vertex_data, index_data, material_offset) in model_draw_info_data {
@@ -472,6 +581,17 @@ impl Application {
             plane_material: 0,
             plane_transform,
             plane_mesh_ubo_offset,
+
+            arrow_vertex_buffer,
+            red_material_index,
+            red_arrow_transform,
+            red_arrow_mesh_ubo_offset,
+            green_material_index,
+            green_arrow_transform,
+            green_arrow_mesh_ubo_offset,
+            blue_material_index,
+            blue_arrow_transform,
+            blue_arrow_mesh_ubo_offset,
 
             model_draw_infos,
             model_transform,
@@ -680,15 +800,15 @@ impl Application {
                 match self.camera_in_use {
                     CameraInUse::Fps => {
                         let camera_ubo = renderer::CameraUBO {
-                            view: self.fps_camera.view_matrix().into_2d_arr(),
-                            proj: self.fps_camera.projection_matrix().into_2d_arr(),
+                            view_matrix: self.fps_camera.view_matrix().into_2d_arr(),
+                            proj_matrix: self.fps_camera.projection_matrix().into_2d_arr(),
                         };
                         context.update_camera(camera_ubo)?;
                     }
                     CameraInUse::Orbit => {
                         let camera_ubo = renderer::CameraUBO {
-                            view: self.orbit_camera.view_matrix().into_2d_arr(),
-                            proj: self.orbit_camera.projection_matrix().into_2d_arr(),
+                            view_matrix: self.orbit_camera.view_matrix().into_2d_arr(),
+                            proj_matrix: self.orbit_camera.projection_matrix().into_2d_arr(),
                         };
                         context.update_camera(camera_ubo)?;
                     }
@@ -723,6 +843,46 @@ impl Application {
                         );
                     }
 
+                    if let CameraInUse::Orbit = self.camera_in_use {
+                        let sets = [self.renderer.descriptor_sets[1]];
+                        self.renderer.device.cmd_bind_descriptor_sets(
+                            cmd,
+                            self.renderer.pipeline_layout.bind_point,
+                            self.renderer.pipeline_layout.handle,
+                            1,
+                            &sets,
+                            &[self.red_arrow_mesh_ubo_offset],
+                        );
+
+                        self.arrow_vertex_buffer.bind(cmd);
+                        self.arrow_vertex_buffer.draw(cmd);
+
+                        let sets = [self.renderer.descriptor_sets[1]];
+                        self.renderer.device.cmd_bind_descriptor_sets(
+                            cmd,
+                            self.renderer.pipeline_layout.bind_point,
+                            self.renderer.pipeline_layout.handle,
+                            1,
+                            &sets,
+                            &[self.green_arrow_mesh_ubo_offset],
+                        );
+
+                        self.arrow_vertex_buffer.bind(cmd);
+                        self.arrow_vertex_buffer.draw(cmd);
+
+                        let sets = [self.renderer.descriptor_sets[1]];
+                        self.renderer.device.cmd_bind_descriptor_sets(
+                            cmd,
+                            self.renderer.pipeline_layout.bind_point,
+                            self.renderer.pipeline_layout.handle,
+                            1,
+                            &sets,
+                            &[self.blue_arrow_mesh_ubo_offset],
+                        );
+
+                        self.arrow_vertex_buffer.bind(cmd);
+                        self.arrow_vertex_buffer.draw(cmd);
+                    }
                     for (vb, ib, mesh_offset) in self.model_draw_infos.iter() {
                         {
                             let sets = [self.renderer.descriptor_sets[1]];

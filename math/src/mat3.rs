@@ -80,6 +80,14 @@ where
     pub const fn r2(&self) -> Vec3<T> {
         Vec3::new(self.c0().z(), self.c1().z(), self.c2().z())
     }
+    #[inline]
+    pub const fn as_2d_arr(&self) -> [[T; 3]; 3] {
+        [
+            self.c0().into_arr(),
+            self.c1().into_arr(),
+            self.c2().into_arr(),
+        ]
+    }
 }
 
 impl<T> Mat3<T> {

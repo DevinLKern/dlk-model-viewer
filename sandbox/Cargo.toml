@@ -24,3 +24,6 @@ tracing-subscriber = "0.3.22"
 tracing-appender = "0.2.4"
 yaml-rust2 = "0.11.0"
 directories = "6.0"
+
+[build-dependencies]
+obj-mtl = { path = "../obj-mtl" }

@@ -1,4 +1,4 @@
-use crate::traits::Zero;
+use crate::{Vec3, traits::Zero};
 
 #[allow(dead_code)]
 #[repr(transparent)]
@@ -47,8 +47,12 @@ where
         self.0[3]
     }
     #[inline]
-    pub fn as_arr(&self) -> [T; 4] {
+    pub const fn as_arr(&self) -> [T; 4] {
         self.0
+    }
+    #[inline]
+    pub const fn into_vec3(self) -> Vec3<T> {
+        Vec3::new(self.x(), self.y(), self.z())
     }
 }
 
