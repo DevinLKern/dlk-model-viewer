@@ -106,15 +106,15 @@ impl std::fmt::Display for Buffer {
     }
 }
 
-pub struct VertexBV {
-    pub buffer: Rc<Buffer>,
+pub struct VertexBuffer {
+    pub buffer: Buffer,
     pub vertex_count: u32,
     pub instance_count: u32,
     pub first_binding: u32,
     pub offset: u64,
 }
 
-impl VertexBV {
+impl VertexBuffer {
     pub unsafe fn bind(&self, cmd: vk::CommandBuffer) {
         let buffers = [self.buffer.handle];
         let offsets = [self.offset];
@@ -134,8 +134,8 @@ impl VertexBV {
     }
 }
 
-pub struct IndexBV {
-    pub buffer: Rc<Buffer>,
+pub struct IndexBuffer {
+    pub buffer: Buffer,
     pub offset: vk::DeviceSize,
     pub index_count: u32,
     pub instance_count: u32,
@@ -145,7 +145,7 @@ pub struct IndexBV {
     pub index_type: vk::IndexType,
 }
 
-impl IndexBV {
+impl IndexBuffer {
     pub unsafe fn bind(&self, cmd: vk::CommandBuffer) {
         unsafe {
             self.buffer.device.cmd_bind_index_buffer(

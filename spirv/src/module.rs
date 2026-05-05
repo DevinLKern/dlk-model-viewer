@@ -122,6 +122,10 @@ impl TypeInfo {
 
                 Some(element_size * element_count)
             }
+            TypeInfo::RuntimeArray { .. } => {
+                println!("WARNING: runtime array!");
+                Some(0)
+            }
             _ => None,
         }
     }

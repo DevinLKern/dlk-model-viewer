@@ -4,16 +4,22 @@
 
 const uint MATERIAL_FLAG_TEXTURED_BIT = (1 << 0);
 
-// set 1 is for objects that are update every object
-layout(std140, set = 1, binding = 0) uniform MeshUBO {
+struct InstanceData {
     mat4 model_matrix;
     mat4 normal_matrix;
     uint material_index;
-} mesh;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+};
 
-// set 2 is for objects that are updated irregularly
+layout(std430, set = 1, binding = 0) buffer InstanceBuffer {
+    InstanceData arr [];
+} instances;
+
+// irregular
 layout(std140, set = 2, binding = 0) uniform GlobalLightUBO {
-    vec3 direction;
+    vec4 direction;
     vec4 color;
     float ambient;
 } world_light;
@@ -26,25 +32,24 @@ struct MaterialUBO {
     vec4 base_color;
 };
 
-#define MAX_MATERIALS 32
-
 layout(std140, set = 2, binding = 2) buffer MaterialsUBO {
-    MaterialUBO materials [MAX_MATERIALS];
-};
+    MaterialUBO arr [];
+} materials;
 
 // layout (location = 0) in vec3 vColor;
 layout (location = 0) in vec2 v_tex_coord;
-layout (location = 1) in vec3 v_normal;
+layout (location = 1) in vec3 v_normal_world_space;
+layout (location = 2) flat in uint v_material_index;
 
 layout (location = 0) out vec4 f_color;
 
 
 void main() {
-    // mat3 normal_matrix = transpose(inverse(mat3(mesh.model_matrix)));
-    vec3 normal_world_space = normalize(mat3(mesh.normal_matrix) * v_normal);
-    float light_intensity = world_light.ambient + max(0.0, dot(normal_world_space, -world_light.direction));
+    // mat3 normal_matrix = transpose(inverse(mat3(data.model_matrix)));
+    vec3 L = vec3(world_light.direction);
+    float light_intensity = world_light.ambient + max(0.0, dot(v_normal_world_space, -normalize(L)));
     
-    MaterialUBO mat = materials[nonuniformEXT(mesh.material_index)];
+    MaterialUBO mat = materials.arr[nonuniformEXT(v_material_index)];
     
     if ((mat.flags & MATERIAL_FLAG_TEXTURED_BIT) != 0) {
         f_color = texture(global_textures[nonuniformEXT(mat.texture_index)], v_tex_coord) * light_intensity;

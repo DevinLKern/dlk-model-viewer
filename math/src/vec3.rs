@@ -96,14 +96,18 @@ impl Vec3<f32> {
         *self = self.scaled_nonuniform(s)
     }
     #[inline]
-    pub fn normalized(mut self) -> Self {
+    pub fn normalize(&mut self) {
         let l = self.length(); // NOTE: len is not const
 
         if l != 0.0 {
             self.scale_assign(1.0 / l);
         }
-
-        self
+    }
+    #[inline]
+    pub fn normalized(&self) -> Self {
+        let mut s = *self;
+        s.normalize();
+        s
     }
     #[inline]
     pub const fn add(&self, other: Self) -> Self {

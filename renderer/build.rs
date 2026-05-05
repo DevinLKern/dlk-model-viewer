@@ -53,6 +53,9 @@ fn get_type_name(type_info: &spirv::TypeInfo) -> String {
             format!("[{}; {}]", element_type_name, element_count)
         }
         TypeInfo::Struct { name, .. } => name.to_string(),
+        TypeInfo::RuntimeArray { .. } => {
+            "()".into()
+        }
         _ => panic!("Type not supported! {:?}", type_info),
     }
 }
@@ -92,7 +95,10 @@ fn type_info_to_rust(type_info: &spirv::TypeInfo) -> String {
             res.push_str("}");
             res
         }
-        _ => panic!("{:?} not supported!", type_info),
+        _ => {
+            println!("WARNING: {:?} not supported!", type_info);
+            "()".into()
+        },
     }
 }
 

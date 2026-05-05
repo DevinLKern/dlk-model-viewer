@@ -68,8 +68,8 @@ pub struct Renderer {
     pub descriptor_sets: Box<[vk::DescriptorSet]>,
 
     pub model_transform_buffer: vulkan::Buffer,
-    pub model_transform_buffer_offset: u32,
-    pub model_transform_buffer_element_size: u64,
+    model_transform_index: u64,
+    model_transform_buffer_element_size: u64,
 
     global_light_buffer: vulkan::Buffer,
 
@@ -107,18 +107,20 @@ impl Renderer {
 
         let (model_transform_buffer, model_transform_buffer_element_size) = {
             let element_size = {
-                let ubo_size = std::mem::size_of::<crate::MeshUBO>();
+                let ubo_size = std::mem::size_of::<crate::InstanceData>();
 
-                let properties = unsafe { device.get_physical_device_properties() };
+                // let properties = unsafe { device.get_physical_device_properties() };
 
-                ubo_size.next_multiple_of(
-                    properties.limits.min_uniform_buffer_offset_alignment as usize,
-                )
+                // ubo_size.next_multiple_of(
+                //     properties.limits.min_storage_buffer_offset_alignment as usize,
+                // );
+                
+                ubo_size
             };
 
             let model_transform_buffer_create_info = vulkan::BufferCreateInfo {
                 size: element_size as u64 * model_transform_capacity,
-                usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
+                usage: vk::BufferUsageFlags::STORAGE_BUFFER,
                 memory_property_flags: vk::MemoryPropertyFlags::HOST_VISIBLE
                     | vk::MemoryPropertyFlags::HOST_COHERENT,
             };
@@ -184,7 +186,7 @@ impl Renderer {
             // SET 1 - per obj
             &[vk::DescriptorSetLayoutBinding {
                 binding: 0,
-                descriptor_type: vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
+                descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
                 descriptor_count: 1,
                 stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                 p_immutable_samplers: std::ptr::null(),
@@ -377,7 +379,7 @@ impl Renderer {
             let per_obj_descriptor_set_info = vk::DescriptorBufferInfo {
                 buffer: model_transform_buffer.handle,
                 offset: 0,
-                range: model_transform_buffer_element_size as u64,
+                range: model_transform_buffer_element_size as u64 * model_transform_capacity,
             };
             let global_light_buffer_info = vk::DescriptorBufferInfo {
                 buffer: global_light_buffer.handle,
@@ -397,7 +399,7 @@ impl Renderer {
                     dst_set: descriptor_sets[1],
                     dst_binding: 0,
                     descriptor_count: 1,
-                    descriptor_type: vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
+                    descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
                     p_buffer_info: &per_obj_descriptor_set_info,
                     ..Default::default()
                 },
@@ -433,7 +435,7 @@ impl Renderer {
             descriptor_sets: descriptor_sets.into_boxed_slice(),
 
             model_transform_buffer,
-            model_transform_buffer_offset: 0,
+            model_transform_index: 0,
             model_transform_buffer_element_size: model_transform_buffer_element_size as u64,
 
             global_light_buffer,
@@ -461,8 +463,7 @@ impl Renderer {
         color: math::Vec4<f32>,
     ) -> Result<()> {
         let ubo = crate::GlobalLightUBO {
-            direction: dir.as_arr(),
-            _pad1: [0; 4],
+            direction: dir.normalized().into_vec4().into_arr(),
             color: color.as_arr(),
             ambient,
         };
@@ -512,7 +513,7 @@ impl Renderer {
         &self,
         data: &[u8],
         vertex_count: u32,
-    ) -> vulkan::Result<vulkan::VertexBV> {
+    ) -> vulkan::Result<vulkan::VertexBuffer> {
         let buffer = {
             let buffer_create_info = vulkan::BufferCreateInfo {
                 size: data.len() as u64,
@@ -524,8 +525,6 @@ impl Renderer {
             vulkan::Buffer::new(self.device.clone(), &buffer_create_info)?
         };
 
-        let buffer = Rc::new(buffer);
-
         unsafe {
             let dst = buffer.map_memory(buffer.offset, buffer.size)?;
 
@@ -534,7 +533,7 @@ impl Renderer {
             buffer.unmap();
         }
 
-        let view = vulkan::VertexBV {
+        let view = vulkan::VertexBuffer {
             buffer,
             vertex_count,
             instance_count: 1,
@@ -550,7 +549,7 @@ impl Renderer {
         index_type: vk::IndexType,
         index_count: u32,
         first_index: u32,
-    ) -> result::Result<vulkan::IndexBV> {
+    ) -> result::Result<vulkan::IndexBuffer> {
         let buffer = {
             let buffer_create_info = vulkan::buffer::BufferCreateInfo {
                 size: data.len() as u64,
@@ -562,8 +561,6 @@ impl Renderer {
             vulkan::Buffer::new(self.device.clone(), &buffer_create_info)?
         };
 
-        let buffer = Rc::new(buffer);
-
         unsafe {
             let dst = buffer.map_memory(buffer.offset, buffer.size)?;
 
@@ -572,7 +569,7 @@ impl Renderer {
             buffer.unmap();
         }
 
-        let view = vulkan::IndexBV {
+        let view = vulkan::IndexBuffer {
             buffer,
             offset: 0,
             index_count,
@@ -864,12 +861,12 @@ impl Renderer {
         self.material_buffer_offset += self.material_buffer_element_size;
         Ok(res)
     }
-    pub fn add_model_data(
+    pub fn add_instance(
         &mut self,
         model_matrix: math::Mat4<f32>,
         material_index: u32,
     ) -> Result<u32> {
-        let data = crate::MeshUBO {
+        let data = crate::InstanceData {
             model_matrix: model_matrix.as_2d_arr(),
             normal_matrix: model_matrix
                 .as_mat3()
@@ -878,11 +875,13 @@ impl Renderer {
                 .unwrap()
                 .into_mat4(1.0)
                 .as_2d_arr(),
-            // _pad2: [0; 12],
             material_index,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
         };
-        let write_offset = self.model_transform_buffer_offset as u64;
-        let write_size = self.model_transform_buffer_element_size as u64;
+        let write_offset = self.model_transform_index * self.model_transform_buffer_element_size;
+        let write_size = self.model_transform_buffer_element_size;
         let requested_end = write_offset + write_size;
         if requested_end > self.model_transform_buffer.size {
             return Err(Error::BufferCapacityExceeded {
@@ -897,11 +896,11 @@ impl Renderer {
                 .model_transform_buffer
                 .map_memory(write_offset, write_size)?;
             let src = &data;
-            std::ptr::copy_nonoverlapping(src, dst as *mut crate::MeshUBO, 1);
+            std::ptr::copy_nonoverlapping(src, dst as *mut crate::InstanceData, 1);
             self.model_transform_buffer.unmap();
         }
-        let res = self.model_transform_buffer_offset;
-        self.model_transform_buffer_offset += self.model_transform_buffer_element_size as u32;
+        let res = self.model_transform_index;
+        self.model_transform_index += 1;
         Ok(res as u32)
     }
 }

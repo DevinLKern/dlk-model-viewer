@@ -12,7 +12,7 @@ use result::{Error, Result};
 use settings::{Command, Event, Settings};
 
 use ash::vk;
-use vulkan::{IndexBV, VertexBV};
+use vulkan::{IndexBuffer, VertexBuffer};
 
 use std::collections::HashSet;
 use std::str::FromStr;
@@ -59,24 +59,24 @@ struct Application {
 
     default_texture_index: usize,
 
-    plane_vertex_buffer: vulkan::VertexBV,
-    plane_index_buffer: vulkan::IndexBV,
+    plane_vertex_buffer: vulkan::VertexBuffer,
+    plane_index_buffer: vulkan::IndexBuffer,
     plane_material: u32,
     plane_transform: math::AffineTransform,
-    plane_mesh_ubo_offset: u32,
+    plane_instance_index: u32,
 
-    arrow_vertex_buffer: vulkan::VertexBV,
+    arrow_vertex_buffer: vulkan::VertexBuffer,
     red_material_index: u32,
     red_arrow_transform: math::AffineTransform,
-    red_arrow_mesh_ubo_offset: u32,
+    red_arrow_instance_index: u32,
     green_material_index: u32,
     green_arrow_transform: math::AffineTransform,
-    green_arrow_mesh_ubo_offset: u32,
+    green_arrow_instance_index: u32,
     blue_material_index: u32,
     blue_arrow_transform: math::AffineTransform,
-    blue_arrow_mesh_ubo_offset: u32,
+    blue_arrow_instance_index: u32,
 
-    model_draw_infos: Vec<(vulkan::VertexBV, vulkan::IndexBV, u32)>,
+    model_draw_infos: Vec<(vulkan::VertexBuffer, vulkan::IndexBuffer, u32)>,
     model_transform: math::AffineTransform,
 
     global_light_direction: Vec3<f32>,
@@ -354,7 +354,7 @@ impl Application {
                 }
             }
 
-            model_draw_info_data.push((vertices, indices, material_offset as u32));
+            model_draw_info_data.push((vertices, indices, material_offset));
         }
 
         let model_transform = {
@@ -412,7 +412,7 @@ impl Application {
             )?
         };
 
-        let plane_mesh_ubo_offset = renderer.add_model_data(plane_transform.as_mat4(), 0)?;
+        let plane_instance_index = renderer.add_instance(plane_transform.as_mat4(), 0)?;
 
         let arrow_vertex_buffer = {
             let arrow_vb_data: Box<[renderer::ShaderVertVertex]> = crate::ARROW_VERTICES
@@ -435,7 +435,7 @@ impl Application {
             renderer.create_vertex_buffer(data, arrow_vb_data.len() as u32)?
         };
 
-        const ARROW_SCALAR: f32 = 0.05;
+        const ARROW_SCALAR: Vec3<f32> = Vec3::new(0.05, 0.1, 0.05);
 
         let red_material_offset = renderer.add_material(renderer::MaterialUBO {
             flags: 0,
@@ -449,10 +449,10 @@ impl Application {
                 -std::f32::consts::FRAC_PI_2,
                 Vec3::new(0.0, 0.0, 1.0),
             ),
-            scalar: Vec3::new(ARROW_SCALAR, 0.15, ARROW_SCALAR),
+            scalar: ARROW_SCALAR,
         };
         let red_material_index = red_material_offset / renderer.material_buffer_element_size;
-        let red_arrow_mesh_ubo_offset = renderer.add_model_data(
+        let red_arrow_instance_index = renderer.add_instance(
             settings
                 .model_to_world
                 .as_mat4(1.0)
@@ -472,10 +472,10 @@ impl Application {
                 -std::f32::consts::FRAC_PI_2,
                 Vec3::new(0.0, 1.0, 0.0),
             ),
-            scalar: Vec3::new(ARROW_SCALAR, 0.15, ARROW_SCALAR),
+            scalar: ARROW_SCALAR,
         };
         let green_material_index = green_material_offset / renderer.material_buffer_element_size;
-        let green_arrow_mesh_ubo_offset = renderer.add_model_data(
+        let green_arrow_instance_index = renderer.add_instance(
             settings
                 .model_to_world
                 .as_mat4(1.0)
@@ -495,10 +495,10 @@ impl Application {
                 std::f32::consts::FRAC_PI_2,
                 Vec3::new(1.0, 0.0, 0.0),
             ),
-            scalar: Vec3::new(ARROW_SCALAR, 0.15, ARROW_SCALAR),
+            scalar: ARROW_SCALAR,
         };
         let blue_material_index = blue_material_offset / renderer.material_buffer_element_size;
-        let blue_arrow_mesh_ubo_offset = renderer.add_model_data(
+        let blue_arrow_instance_index = renderer.add_instance(
             settings
                 .model_to_world
                 .as_mat4(1.0)
@@ -506,7 +506,7 @@ impl Application {
             blue_material_index,
         )?;
 
-        let mut model_draw_infos = Vec::<(VertexBV, IndexBV, u32)>::with_capacity(16);
+        let mut model_draw_infos = Vec::<(VertexBuffer, IndexBuffer, u32)>::with_capacity(16);
         for (vertex_data, index_data, material_offset) in model_draw_info_data {
             let vb_data = unsafe {
                 std::slice::from_raw_parts(
@@ -530,14 +530,14 @@ impl Application {
             )?;
 
             let material_index = material_offset / renderer.material_buffer_element_size as u32;
-            let offset = renderer.add_model_data(
+            let instance_index = renderer.add_instance(
                 model_transform
                     .as_mat4()
                     .mul(&settings.model_to_world.into_mat4(1.0)),
                 material_index,
             )?;
 
-            model_draw_infos.push((vb, ib, offset));
+            model_draw_infos.push((vb, ib, instance_index));
         }
 
         let mut binding_map = HashMap::new();
@@ -580,18 +580,18 @@ impl Application {
             plane_index_buffer,
             plane_material: 0,
             plane_transform,
-            plane_mesh_ubo_offset,
+            plane_instance_index,
 
             arrow_vertex_buffer,
             red_material_index,
             red_arrow_transform,
-            red_arrow_mesh_ubo_offset,
+            red_arrow_instance_index,
             green_material_index,
             green_arrow_transform,
-            green_arrow_mesh_ubo_offset,
+            green_arrow_instance_index,
             blue_material_index,
             blue_arrow_transform,
-            blue_arrow_mesh_ubo_offset,
+            blue_arrow_instance_index,
 
             model_draw_infos,
             model_transform,
@@ -851,39 +851,17 @@ impl Application {
                             self.renderer.pipeline_layout.handle,
                             1,
                             &sets,
-                            &[self.red_arrow_mesh_ubo_offset],
+                            &[],
                         );
 
-                        self.arrow_vertex_buffer.bind(cmd);
-                        self.arrow_vertex_buffer.draw(cmd);
-
-                        let sets = [self.renderer.descriptor_sets[1]];
-                        self.renderer.device.cmd_bind_descriptor_sets(
-                            cmd,
-                            self.renderer.pipeline_layout.bind_point,
-                            self.renderer.pipeline_layout.handle,
-                            1,
-                            &sets,
-                            &[self.green_arrow_mesh_ubo_offset],
-                        );
-
-                        self.arrow_vertex_buffer.bind(cmd);
-                        self.arrow_vertex_buffer.draw(cmd);
-
-                        let sets = [self.renderer.descriptor_sets[1]];
-                        self.renderer.device.cmd_bind_descriptor_sets(
-                            cmd,
-                            self.renderer.pipeline_layout.bind_point,
-                            self.renderer.pipeline_layout.handle,
-                            1,
-                            &sets,
-                            &[self.blue_arrow_mesh_ubo_offset],
-                        );
-
-                        self.arrow_vertex_buffer.bind(cmd);
-                        self.arrow_vertex_buffer.draw(cmd);
+                        let buffers = [self.arrow_vertex_buffer.buffer.handle];
+                        let offsets = [0];
+                        self.renderer.device
+                            .cmd_bind_vertex_buffers(cmd, 0, &buffers, &offsets);
+                        self.renderer.device.cmd_draw(cmd, self.arrow_vertex_buffer.vertex_count, 3, 0, self.red_arrow_instance_index);
                     }
-                    for (vb, ib, mesh_offset) in self.model_draw_infos.iter() {
+
+                    for (vb, ib, instance_index) in self.model_draw_infos.iter() {
                         {
                             let sets = [self.renderer.descriptor_sets[1]];
                             self.renderer.device.cmd_bind_descriptor_sets(
@@ -892,12 +870,16 @@ impl Application {
                                 self.renderer.pipeline_layout.handle,
                                 1,
                                 &sets,
-                                &[*mesh_offset],
+                                &[],
                             );
                         }
-                        vb.bind(cmd);
-                        ib.bind(cmd);
-                        ib.draw(cmd);
+                        let buffers = [vb.buffer.handle];
+                        let offsets = [0];
+                        self.renderer.device
+                            .cmd_bind_vertex_buffers(cmd, 0, &buffers, &offsets);
+
+                        self.renderer.device.cmd_bind_index_buffer(cmd, ib.buffer.handle, 0, vk::IndexType::UINT32);
+                        self.renderer.device.cmd_draw_indexed(cmd, ib.index_count, 1, 0, 0, *instance_index);
                     }
                 };
 

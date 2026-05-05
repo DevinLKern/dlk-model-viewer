@@ -439,7 +439,7 @@ impl Device {
     }
 
     #[inline]
-    pub(crate) unsafe fn cmd_draw_indexed(
+    pub unsafe fn cmd_draw_indexed(
         &self,
         command_buffer: vk::CommandBuffer,
         index_count: u32,
@@ -461,7 +461,7 @@ impl Device {
     }
 
     #[inline]
-    pub(crate) unsafe fn cmd_draw(
+    pub unsafe fn cmd_draw(
         &self,
         command_buffer: vk::CommandBuffer,
         vertex_count: u32,
