@@ -1,3 +1,4 @@
+use crate::traits::One;
 use crate::traits::Zero;
 use crate::vec4::Vec4;
 
@@ -8,13 +9,20 @@ pub struct Vec3<T>(pub(crate) [T; 3]);
 
 impl<T> Vec3<T> {
     #[inline]
-    pub const fn new(a: T, b: T, c: T) -> Self {
-        Self([a, b, c])
+    pub const fn new(x: T, y: T, z: T) -> Self {
+        Self([x, y, z])
     }
 }
 
 impl<T: Zero> Zero for Vec3<T> {
     const ZERO: Self = Self::new(T::ZERO, T::ZERO, T::ZERO);
+}
+
+#[allow(dead_code)]
+impl<T: Zero + One> Vec3<T> {
+    pub const X: Self = Self::new(T::ONE, T::ZERO, T::ZERO);
+    pub const Y: Self = Self::new(T::ZERO, T::ONE, T::ZERO);
+    pub const Z: Self = Self::new(T::ZERO, T::ZERO, T::ONE);
 }
 
 impl<T: Copy> Vec3<T> {
@@ -153,6 +161,26 @@ impl Vec3<f32> {
     pub const fn sum(&self) -> f32 {
         self.x() + self.y() + self.z()
     }
+    #[inline]
+    pub const fn min(&self, other: Self) -> Self {
+        Self::new(
+            self.x().min(other.x()),
+            self.y().min(other.y()),
+            self.z().min(other.z()),
+        )
+    }
+    #[inline]
+    pub const fn max(&self, other: Self) -> Self {
+        Self::new(
+            self.x().max(other.x()),
+            self.y().max(other.y()),
+            self.z().max(other.z()),
+        )
+    }
+    #[inline]
+    pub const fn abs(&self) -> Self {
+        Self::new(self.x().abs(), self.y().abs(), self.z().abs())
+    }
 }
 
 impl<T: std::fmt::Display + Copy> std::fmt::Display for Vec3<T> {
@@ -175,7 +203,7 @@ mod tests {
     use crate::vec3::Vec3;
 
     #[test]
-    fn add1() {
+    fn add() {
         let mut a = Vec3::<f32>::new(1.0, 5.0, 9.0);
         let b = Vec3::<f32>::new(17.0, 33.0, 65.0);
         let c = Vec3::<f32>::new(18.0, 38.0, 74.0);
@@ -184,9 +212,8 @@ mod tests {
         a.add_assign(b);
         assert_eq!(a, c);
     }
-
     #[test]
-    fn sub1() {
+    fn sub() {
         let a = Vec3::<f32>::new(1.0, 5.0, 9.0);
         let b = Vec3::<f32>::new(17.0, 33.0, 65.0);
         let mut c = Vec3::<f32>::new(18.0, 38.0, 74.0);
@@ -196,7 +223,7 @@ mod tests {
         assert_eq!(c, a);
     }
     #[test]
-    fn scale1() {
+    fn scale() {
         let mut v = Vec3::<f32>::new(1.0, 17.0, 65.0);
         let s1 = 0.5;
         let v1 = Vec3::<f32>::new(0.5, 8.5, 32.5);
@@ -214,7 +241,7 @@ mod tests {
         assert_eq!(v, v2);
     }
     #[test]
-    fn dot1() {
+    fn dot() {
         let a = Vec3::<f32>::new(1.0, 5.0, 9.0);
         let b = Vec3::<f32>::new(17.0, 33.0, 65.0);
         let c: f32 = 767.0;
@@ -222,15 +249,13 @@ mod tests {
         assert_eq!(a.dot(b), c);
     }
     #[test]
-    fn cross1() {
+    fn cross() {
         let a = Vec3::<f32>::new(1.0, 5.0, 9.0);
         let b = Vec3::<f32>::new(17.0, 33.0, 65.0);
         let c = Vec3::<f32>::new(28.0, 88.0, -52.0);
 
         assert_eq!(a.cross(b), c);
-    }
-    #[test]
-    fn cross2() {
+
         let a = Vec3::<f32>::new(1.0, 5.0, 9.0);
         let b = Vec3::<f32>::new(17.0, 33.0, 65.0);
         let c = Vec3::<f32>::new(125.0, 257.0, 513.0);
@@ -241,7 +266,7 @@ mod tests {
         assert_eq!(a.cross(b).cross(c), d);
     }
     #[test]
-    fn normalize1() {
+    fn normalize() {
         let a = Vec3::<f32>::new(44.0, 55.0, 66.0);
         let b = Vec3::<f32>::new(0.45584232, 0.5698029, 0.6837635);
 

@@ -13,20 +13,20 @@ where
     T: Copy,
 {
     #[inline]
-    pub const fn from_rows(x: Vec4<T>, y: Vec4<T>, z: Vec4<T>, w: Vec4<T>) -> Self {
+    pub const fn from_rows(r0: Vec4<T>, r1: Vec4<T>, r2: Vec4<T>, r3: Vec4<T>) -> Self {
         Self([
-            Vec4::new(x.x(), y.x(), z.x(), w.x()),
-            Vec4::new(x.y(), y.y(), z.y(), w.y()),
-            Vec4::new(x.z(), y.z(), z.z(), w.z()),
-            Vec4::new(x.w(), y.w(), z.w(), w.w()),
+            Vec4::new(r0.x(), r1.x(), r2.x(), r3.x()),
+            Vec4::new(r0.y(), r1.y(), r2.y(), r3.y()),
+            Vec4::new(r0.z(), r1.z(), r2.z(), r3.z()),
+            Vec4::new(r0.w(), r1.w(), r2.w(), r3.w()),
         ])
     }
 }
 
 impl<T> Mat4<T> {
     #[inline]
-    pub const fn from_cols(r0: Vec4<T>, r1: Vec4<T>, r2: Vec4<T>, r3: Vec4<T>) -> Self {
-        Self([r0, r1, r2, r3])
+    pub const fn from_cols(c0: Vec4<T>, c1: Vec4<T>, c2: Vec4<T>, c3: Vec4<T>) -> Self {
+        Self([c0, c1, c2, c3])
     }
 }
 

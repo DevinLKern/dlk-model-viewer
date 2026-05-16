@@ -5,7 +5,7 @@ mod result;
 mod settings;
 
 use camera::{Camera, controllers::*};
-use constants::{ENGINE_FORWARDS, ENGINE_RIGHT, ENGINE_UP};
+use constants::*;
 use input_manager::{Input, InputEvent, InputManager};
 use renderer::ShaderVertVertex;
 use result::{Error, Result};
@@ -28,10 +28,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
-use math::Identity;
-use math::Vec3;
-use math::Vec4;
-use math::{Quat, Zero};
+use math::{Identity, Quat, Vec3, Vec4, Zero};
 
 include!(concat!(env!("OUT_DIR"), "/arrow.rs"));
 
@@ -255,6 +252,8 @@ impl Application {
         let mut model_draw_info_data =
             Vec::<(Vec<ShaderVertVertex>, Vec<u32>, u32)>::with_capacity(32);
 
+        let model_to_engine = crate::TO_ENGINE.mul(&settings.from_model);
+
         for shape in objf.get_shapes() {
             let mut vertices = Vec::<ShaderVertVertex>::new();
             let mut indices = Vec::<u32>::new();
@@ -302,7 +301,7 @@ impl Application {
 
                             let face_normal = p1.sub(p0).cross(p2.sub(p0));
 
-                            Some(face_normal.into_arr())
+                            Some(face_normal)
                         }
                         _ => None,
                     }
@@ -311,18 +310,20 @@ impl Application {
                 };
                 let derived_normal = match derived_normal {
                     Some(n) => n,
-                    None => [0.0, 0.0, 0.0],
+                    None => Vec3::new(0.0, 0.0, 0.0),
                 };
 
                 for v in [v0, v1, v2] {
                     let index = if let Some(&i) = vertex_map.get(&v) {
                         i
                     } else {
-                        let position = [
-                            objf.vs[v.v].x as f32,
-                            objf.vs[v.v].y as f32,
-                            objf.vs[v.v].z as f32,
-                        ];
+                        let position = model_to_engine
+                            .mul_vec(Vec3::new(
+                                objf.vs[v.v].x as f32,
+                                objf.vs[v.v].y as f32,
+                                objf.vs[v.v].z as f32,
+                            ))
+                            .into_arr();
 
                         let tex_coord = if let Some(i) = v.vt {
                             [objf.vts[i].u as f32, 1.0 - objf.vts[i].v as f32]
@@ -331,14 +332,16 @@ impl Application {
                         };
 
                         let normal = if let Some(i) = v.vn {
-                            [
+                            Vec3::new(
                                 objf.vns[i].x as f32,
                                 objf.vns[i].y as f32,
                                 objf.vns[i].z as f32,
-                            ]
+                            )
                         } else {
                             derived_normal
                         };
+
+                        let normal = model_to_engine.mul_vec(normal).into_arr();
 
                         let i = vertices.len() as u32;
                         vertices.push(ShaderVertVertex {
@@ -357,6 +360,8 @@ impl Application {
             model_draw_info_data.push((vertices, indices, material_offset));
         }
 
+        let model_position = Vec3::ZERO;
+
         let model_transform = {
             let mut min = [f32::MAX; 3];
             let mut max = [f32::MIN; 3];
@@ -371,13 +376,12 @@ impl Application {
             let min = Vec3::new(min[0], min[1], min[2]);
             let max = Vec3::new(max[0], max[1], max[2]);
             let center = max.add(min).scaled(0.5);
-            let center = settings.model_to_world.mul_vec(center);
 
             let model_scale = max.sub(min);
             let model_scale = model_scale.x().max(model_scale.y()).max(model_scale.z());
             let model_scale = 1.0 / model_scale;
 
-            let model_pos = Vec3::ZERO.sub(center.scaled(model_scale));
+            let model_pos = model_position.sub(center.scaled(model_scale));
 
             math::AffineTransform {
                 position: model_pos,
@@ -443,45 +447,30 @@ impl Application {
             _pad2: [0; 8],
             base_color: [1.0, 0.0, 0.0, 1.0],
         })?;
+        // should point in the +X direction
         let red_arrow_transform = math::AffineTransform {
             position: Vec3::ZERO,
-            orientation: Quat::unit_from_angle_axis(
-                -std::f32::consts::FRAC_PI_2,
-                Vec3::new(0.0, 0.0, 1.0),
-            ),
+            orientation: Quat::unit_from_angle_axis(std::f32::consts::FRAC_PI_2, Vec3::Z),
             scalar: ARROW_SCALAR,
         };
         let red_material_index = red_material_offset / renderer.material_buffer_element_size;
-        let red_arrow_instance_index = renderer.add_instance(
-            settings
-                .model_to_world
-                .as_mat4(1.0)
-                .mul(&red_arrow_transform.as_mat4()),
-            red_material_index,
-        )?;
-
+        let red_arrow_instance_index =
+            renderer.add_instance(red_arrow_transform.as_mat4(), red_material_index)?;
         let green_material_offset = renderer.add_material(renderer::MaterialUBO {
             flags: 0,
             texture_index: 0,
             _pad2: [0; 8],
             base_color: [0.0, 1.0, 0.0, 1.0],
         })?;
+        // should point in the +Y direction
         let green_arrow_transform = math::AffineTransform {
             position: Vec3::ZERO,
-            orientation: Quat::unit_from_angle_axis(
-                -std::f32::consts::FRAC_PI_2,
-                Vec3::new(0.0, 1.0, 0.0),
-            ),
+            orientation: Quat::unit_from_angle_axis(std::f32::consts::PI, Vec3::X),
             scalar: ARROW_SCALAR,
         };
         let green_material_index = green_material_offset / renderer.material_buffer_element_size;
-        let green_arrow_instance_index = renderer.add_instance(
-            settings
-                .model_to_world
-                .as_mat4(1.0)
-                .mul(&green_arrow_transform.as_mat4()),
-            green_material_index,
-        )?;
+        let green_arrow_instance_index =
+            renderer.add_instance(green_arrow_transform.as_mat4(), green_material_index)?;
 
         let blue_material_offset = renderer.add_material(renderer::MaterialUBO {
             flags: 0,
@@ -489,22 +478,15 @@ impl Application {
             _pad2: [0; 8],
             base_color: [0.0, 0.0, 1.0, 1.0],
         })?;
+        // should point in the +Z direction
         let blue_arrow_transform = math::AffineTransform {
             position: Vec3::ZERO,
-            orientation: Quat::unit_from_angle_axis(
-                std::f32::consts::FRAC_PI_2,
-                Vec3::new(1.0, 0.0, 0.0),
-            ),
+            orientation: Quat::unit_from_angle_axis(std::f32::consts::FRAC_PI_2, Vec3::X),
             scalar: ARROW_SCALAR,
         };
         let blue_material_index = blue_material_offset / renderer.material_buffer_element_size;
-        let blue_arrow_instance_index = renderer.add_instance(
-            settings
-                .model_to_world
-                .as_mat4(1.0)
-                .mul(&blue_arrow_transform.as_mat4()),
-            blue_material_index,
-        )?;
+        let blue_arrow_instance_index =
+            renderer.add_instance(blue_arrow_transform.as_mat4(), blue_material_index)?;
 
         let mut model_draw_infos = Vec::<(VertexBuffer, IndexBuffer, u32)>::with_capacity(16);
         for (vertex_data, index_data, material_offset) in model_draw_info_data {
@@ -530,12 +512,8 @@ impl Application {
             )?;
 
             let material_index = material_offset / renderer.material_buffer_element_size as u32;
-            let instance_index = renderer.add_instance(
-                model_transform
-                    .as_mat4()
-                    .mul(&settings.model_to_world.into_mat4(1.0)),
-                material_index,
-            )?;
+            let instance_index =
+                renderer.add_instance(model_transform.as_mat4(), material_index)?;
 
             model_draw_infos.push((vb, ib, instance_index));
         }
@@ -545,17 +523,29 @@ impl Application {
             binding_map.insert(binding.command, index);
         }
 
-        let mut orbit_camera = Camera::orthographic(1.25, 1.25, 10.0);
-        orbit_camera
-            .transform
-            .translate_global(Vec3::ZERO.sub(ENGINE_FORWARDS));
-        orbit_camera.look_at(Vec3::ZERO, ENGINE_UP);
+        let (orbit_camera, orbit_controller) = {
+            let mut controller = OrbitCameraController::new(model_position);
+            let mut camera = Camera::orthographic(1.25, 1.25, 100.0);
 
-        let mut fps_camera = Camera::perspective(settings.fov_y);
-        fps_camera
-            .transform
-            .translate_global(Vec3::ZERO.sub(ENGINE_FORWARDS));
-        fps_camera.look_at(Vec3::ZERO, ENGINE_UP);
+            camera
+                .transform
+                .translate_global(model_position.add(ENGINE_FORWARDS));
+            controller.update(&mut camera, 0.0, 0.0);
+
+            (camera, controller)
+        };
+
+        let (fps_camera, fps_controller) = {
+            let mut controller = FpsCameraController::new();
+            let mut camera = Camera::perspective(settings.fov_y);
+
+            controller.r#move(model_position.sub(ENGINE_FORWARDS));
+            controller.update(&mut camera, 1.0, 1.0);
+
+            (camera, controller)
+        };
+
+        let global_light_direction = Vec3::ZERO.sub(ENGINE_UP).add(ENGINE_RIGHT.scaled(0.2));
 
         let camera_in_use = settings.default_camera.clone();
 
@@ -569,9 +559,9 @@ impl Application {
             renderer,
             camera_in_use,
             fps_camera,
-            fps_controller: FpsCameraController::new(),
+            fps_controller,
             orbit_camera,
-            orbit_controller: OrbitCameraController::new(model_transform.position),
+            orbit_controller,
             windows: std::collections::HashMap::new(),
 
             default_texture_index,
@@ -596,7 +586,7 @@ impl Application {
             model_draw_infos,
             model_transform,
 
-            global_light_direction: Vec3::ZERO.sub(ENGINE_UP).add(ENGINE_RIGHT.scaled(0.2)),
+            global_light_direction,
             global_light_color: Vec4::new(1.0, 1.0, 1.0, 1.0),
             global_ambient_light: 0.1,
             exiting: false,
@@ -666,7 +656,7 @@ impl Application {
         let mut offset = Vec3::ZERO;
         // camera should move at 2 units per second
         const SPEED: f32 = 2.0;
-        let dirs = [
+        const DIRS: &[(Command, Vec3<f32>)] = &[
             (Command::MoveForward, ENGINE_FORWARDS),
             (Command::MoveBackward, Vec3::ZERO.sub(ENGINE_FORWARDS)),
             (Command::MoveRight, ENGINE_RIGHT),
@@ -674,7 +664,7 @@ impl Application {
             (Command::MoveUp, ENGINE_UP),
             (Command::MoveDown, Vec3::ZERO.sub(ENGINE_UP)),
         ];
-        for (cmd, dir) in dirs.iter() {
+        for (cmd, dir) in DIRS {
             let binding_index = match self.binding_map.get(cmd) {
                 Some(x) => x,
                 _ => continue,
@@ -686,13 +676,8 @@ impl Application {
         }
         offset = offset.normalized();
         match self.camera_in_use {
-            CameraInUse::Fps => self.fps_controller.r#move(offset),
-            CameraInUse::Orbit => {
-                offset.scale_assign_nonuniform(ENGINE_FORWARDS);
-                offset.scale_assign(SPEED);
-                let z = offset.x() + offset.y() + offset.z();
-                self.orbit_controller.r#move(z);
-            }
+            CameraInUse::Fps => self.fps_controller.r#move(offset.scaled(SPEED)),
+            CameraInUse::Orbit => {}
         }
 
         const DZ: f32 = 0.25;
@@ -724,8 +709,8 @@ impl Application {
                     .filter(|&ok| ok)
                     .map(|_| {
                         (
-                            self.input_manager.mouse_delta.0 as f32,
-                            self.input_manager.mouse_delta.1 as f32,
+                            self.input_manager.mouse_delta.0,
+                            self.input_manager.mouse_delta.1,
                         )
                     })
                     .unwrap_or((0.0, 0.0));
@@ -737,17 +722,17 @@ impl Application {
         }
 
         let now = std::time::Instant::now();
-        let elapsed = (now - self.last).as_secs_f32();
+        let elapsed = (now - self.last).as_secs_f64();
         self.last = now;
         match self.camera_in_use {
             CameraInUse::Fps => self.fps_controller.update(
                 &mut self.fps_camera,
-                self.settings.mouse_sensitivity as f32,
+                self.settings.mouse_sensitivity,
                 elapsed,
             ),
             CameraInUse::Orbit => self.orbit_controller.update(
                 &mut self.orbit_camera,
-                self.settings.mouse_sensitivity as f32,
+                self.settings.mouse_sensitivity,
                 elapsed,
             ),
         }
@@ -856,9 +841,16 @@ impl Application {
 
                         let buffers = [self.arrow_vertex_buffer.buffer.handle];
                         let offsets = [0];
-                        self.renderer.device
+                        self.renderer
+                            .device
                             .cmd_bind_vertex_buffers(cmd, 0, &buffers, &offsets);
-                        self.renderer.device.cmd_draw(cmd, self.arrow_vertex_buffer.vertex_count, 3, 0, self.red_arrow_instance_index);
+                        self.renderer.device.cmd_draw(
+                            cmd,
+                            self.arrow_vertex_buffer.vertex_count,
+                            3,
+                            0,
+                            self.red_arrow_instance_index,
+                        );
                     }
 
                     for (vb, ib, instance_index) in self.model_draw_infos.iter() {
@@ -875,11 +867,24 @@ impl Application {
                         }
                         let buffers = [vb.buffer.handle];
                         let offsets = [0];
-                        self.renderer.device
+                        self.renderer
+                            .device
                             .cmd_bind_vertex_buffers(cmd, 0, &buffers, &offsets);
 
-                        self.renderer.device.cmd_bind_index_buffer(cmd, ib.buffer.handle, 0, vk::IndexType::UINT32);
-                        self.renderer.device.cmd_draw_indexed(cmd, ib.index_count, 1, 0, 0, *instance_index);
+                        self.renderer.device.cmd_bind_index_buffer(
+                            cmd,
+                            ib.buffer.handle,
+                            0,
+                            vk::IndexType::UINT32,
+                        );
+                        self.renderer.device.cmd_draw_indexed(
+                            cmd,
+                            ib.index_count,
+                            1,
+                            0,
+                            0,
+                            *instance_index,
+                        );
                     }
                 };
 
@@ -1024,7 +1029,9 @@ fn main() -> Result<()> {
 
     if let Some(_) = args.iter().find(|s| s.as_str() == "--help") {
         println!("Options:");
-        println!("    --settings. Defaults to files/default_settings.yaml.");
+        println!(
+            "    --settings. This is an optional argument. Defaults to files/default_settings.yaml when unspecified."
+        );
         return Ok(());
     }
 
@@ -1076,6 +1083,8 @@ fn main() -> Result<()> {
         };
 
     let event_loop = EventLoop::new().inspect_err(|e| tracing::error!("{e}"))?;
+
+    let name = model_path.display().to_string();
 
     let mut app = {
         const DEBUG_ENABLED: bool = cfg!(debug_assertions);

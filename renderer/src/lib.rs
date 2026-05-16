@@ -114,7 +114,7 @@ impl Renderer {
                 // ubo_size.next_multiple_of(
                 //     properties.limits.min_storage_buffer_offset_alignment as usize,
                 // );
-                
+
                 ubo_size
             };
 

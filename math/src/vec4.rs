@@ -7,8 +7,8 @@ pub struct Vec4<T>(pub(crate) [T; 4]);
 
 impl<T> Vec4<T> {
     #[inline]
-    pub const fn new(a: T, b: T, c: T, d: T) -> Self {
-        Self([a, b, c, d])
+    pub const fn new(x: T, y: T, z: T, w: T) -> Self {
+        Self([x, y, z, w])
     }
 }
 

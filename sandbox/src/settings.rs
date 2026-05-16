@@ -1,7 +1,6 @@
 use yaml_rust2::YamlLoader;
 
 use crate::{CameraInUse, Input, Result, result::Error};
-use crate::{ENGINE_FORWARDS, ENGINE_UP, ENGINE_RIGHT};
 
 use std::{
     collections::HashMap,
@@ -90,7 +89,7 @@ pub struct Settings {
     pub fov_y: f32,
     pub mouse_sensitivity: f64,
     pub derive_normals: bool,
-    pub model_to_world: math::Mat3<f32>,
+    pub from_model: math::Mat3<f32>,
     pub bindings: Box<[Binding]>,
     pub default_camera: CameraInUse,
 }
@@ -251,13 +250,15 @@ impl Settings {
             ))?;
 
         let str_to_vec = |s: &str| -> Option<math::Vec3<f32>> {
+            use math::{Vec3, Zero};
+
             let v = match s {
-                "+x" => math::Vec3::new(1.0, 0.0, 0.0),
-                "-x" => math::Vec3::new(-1.0, 0.0, 0.0),
-                "+y" => math::Vec3::new(0.0, 1.0, 0.0),
-                "-y" => math::Vec3::new(0.0, -1.0, 0.0),
-                "+z" => math::Vec3::new(0.0, 0.0, 1.0),
-                "-z" => math::Vec3::new(0.0, 0.0, -1.0),
+                "+x" => Vec3::X,
+                "-x" => Vec3::ZERO.sub(Vec3::X),
+                "+y" => Vec3::Y,
+                "-y" => Vec3::ZERO.sub(Vec3::Y),
+                "+z" => Vec3::Z,
+                "-z" => Vec3::ZERO.sub(Vec3::Z),
                 _ => return None,
             };
 
@@ -311,26 +312,23 @@ impl Settings {
             ));
         }
 
-        let model_to_world = {
-            let to_model = math::Mat3::<f32>::from_cols(model_right, model_up, model_forward);
+        // The transpose is equivalent to the inverse of a matrix when the matrix is orthonormal.
+        let from_model =
+            math::Mat3::<f32>::from_cols(model_right, model_up, model_forward).transposed();
 
-            // The transpose is equivalent to the inverse of a matrix when the matrix is orthonormal.
-            let from_model = to_model.transposed();
+        // let model_to_world = {
+        //     const INTO_WORLD: math::Mat3<f32> =
+        //         math::Mat3::from_cols(ENGINE_RIGHT, ENGINE_UP, ENGINE_FORWARDS);
 
-            const INTO_WORLD: math::Mat3<f32> =
-                math::Mat3::from_cols(ENGINE_RIGHT, ENGINE_UP, ENGINE_FORWARDS);
-
-            from_model.mul(&INTO_WORLD)
-
-            // from_model
-        };
+        //     INTO_WORLD.mul(&from_model)
+        // };
 
         Ok(Settings {
             default_camera: default_camera,
             fov_y: fov_y as f32,
-            mouse_sensitivity: mouse_sensitivity / 10.0,
+            mouse_sensitivity: mouse_sensitivity / 50000.0,
             derive_normals,
-            model_to_world,
+            from_model,
             bindings: bindings.into_boxed_slice(),
         })
     }

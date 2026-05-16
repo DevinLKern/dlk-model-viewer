@@ -10,8 +10,8 @@ pub struct Vec2<T>(pub(crate) [T; 2]);
 
 impl<T> Vec2<T> {
     #[inline]
-    pub const fn new(a: T, b: T) -> Self {
-        Self([a, b])
+    pub const fn new(x: T, y: T) -> Self {
+        Self([x, y])
     }
 }
 

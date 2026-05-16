@@ -438,48 +438,6 @@ impl Device {
         }
     }
 
-    #[inline]
-    pub unsafe fn cmd_draw_indexed(
-        &self,
-        command_buffer: vk::CommandBuffer,
-        index_count: u32,
-        instance_count: u32,
-        first_index: u32,
-        vertex_offset: i32,
-        first_instance: u32,
-    ) {
-        unsafe {
-            self.device.cmd_draw_indexed(
-                command_buffer,
-                index_count,
-                instance_count,
-                first_index,
-                vertex_offset,
-                first_instance,
-            )
-        }
-    }
-
-    #[inline]
-    pub unsafe fn cmd_draw(
-        &self,
-        command_buffer: vk::CommandBuffer,
-        vertex_count: u32,
-        instance_count: u32,
-        first_vertex: u32,
-        first_instance: u32,
-    ) {
-        unsafe {
-            self.device.cmd_draw(
-                command_buffer,
-                vertex_count,
-                instance_count,
-                first_vertex,
-                first_instance,
-            )
-        };
-    }
-
     vk_delegate_create!(allocate_memory, MemoryAllocateInfo, DeviceMemory);
     vk_delegate_destroy!(free_memory, DeviceMemory);
     vk_delegate_create!(create_buffer, BufferCreateInfo, Buffer);
@@ -551,6 +509,10 @@ impl Device {
     vk_delegate_forward!(map_memory, (memory: DeviceMemory, offset: DeviceSize, size: DeviceSize, flags: MemoryMapFlags), VkResult<*mut std::ffi::c_void>);
     vk_delegate_forward!(unmap_memory, (memory: DeviceMemory), ());
     vk_delegate_forward!(cmd_bind_descriptor_sets,(buffer: CommandBuffer, bind_point: PipelineBindPoint, layout: PipelineLayout, first_set: u32, sets: &[DescriptorSet], dynamic_offsets: &[u32]), ());
+    vk_delegate_forward!(cmd_draw_indirect, (cmd: CommandBuffer, buffer: Buffer, offset: u64, draw_count: u32, stride: u32), ());
+    vk_delegate_forward!(cmd_draw_indexed_indirect, (cmd: CommandBuffer, buffer: Buffer, offset: u64, draw_count: u32, stride: u32), ());
+    vk_delegate_forward!(cmd_draw_indexed, (cmd: CommandBuffer, index_count: u32, instance_count: u32, first_index: u32, vertex_offset: i32, first_instance: u32), ());
+    vk_delegate_forward!(cmd_draw, (cmd: vk::CommandBuffer, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32), ());
 }
 
 impl Drop for Device {

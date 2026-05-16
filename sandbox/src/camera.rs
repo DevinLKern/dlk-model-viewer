@@ -20,9 +20,8 @@ pub struct Camera {
     pub transform: RigidTransform,
 }
 
-// #[allow(unused)]
 impl Camera {
-    pub fn orthographic(width: f32, height: f32, depth: f32) -> Self {
+    pub const fn orthographic(width: f32, height: f32, depth: f32) -> Self {
         debug_assert!(width != 0.0);
         debug_assert!(height != 0.0);
         debug_assert!(depth != 0.0);
@@ -63,18 +62,13 @@ impl Camera {
     pub fn view_matrix(&self) -> Mat4<f32> {
         self.transform.inv().into_mat4()
     }
-    // #[inline]
-    // pub fn view_projection(&self) -> Mat4<f32> {
-    //     self.view_matrix().mul(&self.projection_matrix())
-    // }
     #[inline]
     pub fn look_at(&mut self, target: Vec3<f32>, up: Vec3<f32>) {
         let f = target.sub(self.transform.position).normalized();
-        let r = f.cross(up);
+        let r = f.cross(up).normalized();
         let u = r.cross(f);
 
         self.transform.orientation = Quat::from_basis(r, u, Vec3::ZERO.sub(f));
-        // self.transform.orientation = Quat::from_basis(r, u, f);
     }
     pub fn set_zoom(&mut self, new_zoom: f32) {
         debug_assert!(new_zoom > 0.0);

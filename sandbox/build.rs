@@ -56,5 +56,4 @@ fn main() {
         }
     }
     writeln!(w, "];").unwrap();
-
 }

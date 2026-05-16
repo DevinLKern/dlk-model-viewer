@@ -1,7 +1,7 @@
 use crate::{Mat4, Quat, Vec3, Vec4};
 
 #[allow(dead_code)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct AffineTransform {
     pub position: Vec3<f32>,
     pub orientation: Quat,
@@ -53,6 +53,8 @@ impl AffineTransform {
         let r = self.get_rotation_matrix();
         let s = self.get_scaling_matrix();
 
+        // translate, then rotate, then scale
+        // s.mul(&r).mul(&t)
         t.mul(&r).mul(&s)
     }
 }

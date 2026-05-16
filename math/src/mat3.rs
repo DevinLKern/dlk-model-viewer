@@ -323,11 +323,6 @@ mod test {
             Vec3::new(0.0, 3.0, 1.0),
             Vec3::new(4.0, 2.0, 0.0),
         );
-        // let c = Mat3::from_rows(
-        //     Vec3::new(19.0, 20.0, 21.0),
-        //     Vec3::new(22.0, 23.0, 24.0),
-        //     Vec3::new(25.0, 26.0, 27.0),
-        // );
 
         assert_eq!(a.inverse(), None);
 
@@ -337,5 +332,32 @@ mod test {
             Vec3::new(6.0, -5.0, -1.5),
         );
         assert_eq!(b.inverse(), Some(r2));
+    }
+    #[test]
+    fn mul_vec() {
+        let a = Mat3::from_rows(
+            Vec3::new(1.0, 2.0, 3.0),
+            Vec3::new(4.0, 5.0, 6.0),
+            Vec3::new(7.0, 8.0, 9.0),
+        );
+        let b = Mat3::from_rows(
+            Vec3::new(10.0, 11.0, 12.0),
+            Vec3::new(13.0, 14.0, 15.0),
+            Vec3::new(16.0, 17.0, 18.0),
+        );
+        let c = Mat3::from_rows(
+            Vec3::new(19.0, 20.0, 21.0),
+            Vec3::new(22.0, 23.0, 24.0),
+            Vec3::new(25.0, 26.0, 27.0),
+        );
+
+        let v = Vec3::new(28.0, 29.0, 30.0);
+        let v1 = c.mul_vec(v);
+        let v1 = b.mul_vec(v1);
+        let v1 = a.mul_vec(v1);
+
+        let v2 = a.mul(&b).mul(&c).mul_vec(v);
+
+        assert_eq!(v1, v2);
     }
 }
