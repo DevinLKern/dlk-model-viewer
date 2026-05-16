@@ -62,6 +62,7 @@ struct Application {
     plane_transform: math::AffineTransform,
     plane_instance_index: u32,
 
+    arrow_index_buffer: vulkan::IndexBuffer,
     arrow_vertex_buffer: vulkan::VertexBuffer,
     red_material_index: u32,
     red_arrow_transform: math::AffineTransform,
@@ -439,6 +440,22 @@ impl Application {
             renderer.create_vertex_buffer(data, arrow_vb_data.len() as u32)?
         };
 
+        let arrow_index_buffer = {
+            let data = unsafe {
+                std::slice::from_raw_parts(
+                    crate::ARROW_INDICES.as_ptr() as *const u8,
+                    crate::ARROW_INDICES.len() * std::mem::size_of::<u32>(),
+                )
+            };
+
+            renderer.create_index_buffer(
+                data,
+                vk::IndexType::UINT32,
+                crate::ARROW_INDICES.len() as u32,
+                0,
+            )?
+        };
+
         const ARROW_SCALAR: Vec3<f32> = Vec3::new(0.05, 0.1, 0.05);
 
         let red_material_offset = renderer.add_material(renderer::MaterialUBO {
@@ -572,6 +589,7 @@ impl Application {
             plane_transform,
             plane_instance_index,
 
+            arrow_index_buffer,
             arrow_vertex_buffer,
             red_material_index,
             red_arrow_transform,
@@ -844,10 +862,17 @@ impl Application {
                         self.renderer
                             .device
                             .cmd_bind_vertex_buffers(cmd, 0, &buffers, &offsets);
-                        self.renderer.device.cmd_draw(
+                        self.renderer.device.cmd_bind_index_buffer(
                             cmd,
-                            self.arrow_vertex_buffer.vertex_count,
+                            self.arrow_index_buffer.buffer.handle,
+                            0,
+                            vk::IndexType::UINT32,
+                        );
+                        self.renderer.device.cmd_draw_indexed(
+                            cmd,
+                            crate::ARROW_INDICES.len() as u32,
                             3,
+                            0,
                             0,
                             self.red_arrow_instance_index,
                         );

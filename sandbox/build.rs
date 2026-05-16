@@ -1,6 +1,6 @@
 use std::{io::BufWriter, io::Write, path::PathBuf, str::FromStr};
 
-use obj_mtl::Primitive;
+use obj_mtl::{Primitive, Vertex, VertexNormal};
 
 fn main() {
     println!("cargo:rerun-if-changed=../files/models/arrow.obj");
@@ -21,39 +21,44 @@ fn main() {
 
     let arrow_shape = arrow_shapes.next().unwrap();
 
-    writeln!(w, "#[allow(unused)]").unwrap();
-    writeln!(w, "const ARROW_VERTICES: &[[f32; 3]] = &[").unwrap();
+    // (position, normal)
+    let mut vertices = Vec::<(Vertex, VertexNormal)>::new();
+    let mut indices = std::collections::HashMap::<obj_mtl::VtnIndex, usize>::new();
+
     let triangles = arrow_shape.get_primitives().filter_map(|p| match p {
         &Primitive::Triangle { v0, v1, v2 } => Some((v0, v1, v2)),
         _ => None,
     });
+    writeln!(w, "#[allow(unused)]").unwrap();
+    writeln!(w, "const ARROW_INDICES: &[u32] = &[").unwrap();
     for (v0, v1, v2) in triangles {
-        let a = [
-            arrow_data.vs[v0.v],
-            arrow_data.vs[v1.v],
-            arrow_data.vs[v2.v],
-        ];
-        for v in a {
-            writeln!(w, "    [{:?}, {:?}, {:?}],", v.x, v.y, v.z).unwrap();
+        let verts = [v0, v1, v2];
+        for v in verts {
+            let index = indices.entry(v).or_insert_with(|| {
+                let pos = arrow_data.vs[v.v];
+                let nor = arrow_data.vns[v.vn.unwrap()];
+                let index = vertices.len();
+                vertices.push((pos, nor));
+                index
+            });
+            writeln!(w, "    {},", index).unwrap();
         }
     }
     writeln!(w, "];").unwrap();
 
     writeln!(w, "#[allow(unused)]").unwrap();
+    writeln!(w, "const ARROW_VERTICES: &[[f32; 3]] = &[").unwrap();
+    for v in vertices.iter() {
+        let pos = v.0;
+        writeln!(w, "    [{:?}, {:?}, {:?}],", pos.x, pos.y, pos.z).unwrap();
+    }
+    writeln!(w, "];").unwrap();
+
+    writeln!(w, "#[allow(unused)]").unwrap();
     writeln!(w, "const ARROW_NORMALS: &[[f32; 3]] = &[").unwrap();
-    let triangles = arrow_shape.get_primitives().filter_map(|p| match p {
-        &Primitive::Triangle { v0, v1, v2 } => Some((v0, v1, v2)),
-        _ => None,
-    });
-    for (v0, v1, v2) in triangles {
-        let a = [
-            arrow_data.vns[v0.vn.unwrap()],
-            arrow_data.vns[v1.vn.unwrap()],
-            arrow_data.vns[v2.vn.unwrap()],
-        ];
-        for v in a {
-            writeln!(w, "    [{:?}, {:?}, {:?}],", v.x, v.y, v.z).unwrap();
-        }
+    for v in vertices {
+        let nor = v.1;
+        writeln!(w, "    [{:?}, {:?}, {:?}],", nor.x, nor.y, nor.z).unwrap();
     }
     writeln!(w, "];").unwrap();
 }
