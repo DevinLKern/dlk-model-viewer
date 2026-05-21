@@ -76,8 +76,8 @@ pub struct Renderer {
     textures: Vec<vulkan::Image>,
 
     material_buffer: vulkan::Buffer,
-    material_buffer_offset: u32,
-    pub material_buffer_element_size: u32,
+    material_buffer_offset: u64,
+    pub material_buffer_element_size: u64,
 
     repeat_sampler: vk::Sampler,
 }
@@ -171,7 +171,7 @@ impl Renderer {
 
             let buffer = vulkan::Buffer::new(device.clone(), &buffer_create_info)?;
 
-            (buffer, element_size as u32)
+            (buffer, element_size as u64)
         };
 
         let ds_layout_bindings: &[&[vk::DescriptorSetLayoutBinding]] = &[
@@ -639,6 +639,21 @@ impl Renderer {
 
         Ok(buffer)
     }
+    pub fn create_indirect_buffer(&self, size: u64) -> Result<vulkan::Buffer> {
+        let buffer = {
+            let create_info = vulkan::BufferCreateInfo {
+                size,
+                usage: vk::BufferUsageFlags::INDIRECT_BUFFER,
+                memory_property_flags: vk::MemoryPropertyFlags::HOST_VISIBLE
+                    | vk::MemoryPropertyFlags::HOST_COHERENT,
+            };
+
+            vulkan::Buffer::new(self.device.clone(), &create_info)
+                .inspect_err(|e| tracing::error!("{}", e))?
+        };
+
+        Ok(buffer)
+    }
     pub fn update_dynamic_uniform_buffer(
         &self,
         data: *const u8,
@@ -838,10 +853,10 @@ impl Renderer {
         self.textures.push(image);
         Ok(idx)
     }
-    pub fn add_material(&mut self, material_data: crate::MaterialUBO) -> Result<u32> {
+    pub fn add_material(&mut self, material_data: crate::MaterialUBO) -> Result<u64> {
         let data = material_data;
-        let write_offset = self.material_buffer_offset as u64;
-        let write_size = self.material_buffer_element_size as u64;
+        let write_offset = self.material_buffer_offset;
+        let write_size = self.material_buffer_element_size;
         let requested_end = write_offset + write_size;
         if requested_end > self.material_buffer.size {
             return Err(Error::BufferCapacityExceeded {
@@ -857,7 +872,7 @@ impl Renderer {
             std::ptr::copy_nonoverlapping(src, dst as *mut crate::MaterialUBO, 1);
             self.material_buffer.unmap();
         }
-        let res = self.material_buffer_offset;
+        let res = self.material_buffer_offset / self.material_buffer_element_size;
         self.material_buffer_offset += self.material_buffer_element_size;
         Ok(res)
     }

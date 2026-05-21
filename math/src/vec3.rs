@@ -27,6 +27,10 @@ impl<T: Zero + One> Vec3<T> {
 
 impl<T: Copy> Vec3<T> {
     #[inline]
+    pub const fn scalar(s: T) -> Self {
+        Self::new(s, s, s)
+    }
+    #[inline]
     pub const fn x(&self) -> T {
         self.0[0]
     }

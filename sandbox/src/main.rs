@@ -28,7 +28,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
-use math::{Identity, Quat, Vec3, Vec4, Zero};
+use math::{AffineTransform, Identity, Quat, Vec3, Vec4, Zero};
 
 include!(concat!(env!("OUT_DIR"), "/arrow.rs"));
 
@@ -53,30 +53,12 @@ struct Application {
     orbit_controller: OrbitCameraController,
     windows: HashMap<WindowId, (renderer::RenderContext, Window)>,
     renderer: renderer::Renderer,
-
     default_texture_index: usize,
-
-    plane_vertex_buffer: vulkan::VertexBuffer,
-    plane_index_buffer: vulkan::IndexBuffer,
-    plane_material: u32,
-    plane_transform: math::AffineTransform,
-    plane_instance_index: u32,
-
-    arrow_index_buffer: vulkan::IndexBuffer,
-    arrow_vertex_buffer: vulkan::VertexBuffer,
-    red_material_index: u32,
-    red_arrow_transform: math::AffineTransform,
-    red_arrow_instance_index: u32,
-    green_material_index: u32,
-    green_arrow_transform: math::AffineTransform,
-    green_arrow_instance_index: u32,
-    blue_material_index: u32,
-    blue_arrow_transform: math::AffineTransform,
-    blue_arrow_instance_index: u32,
-
-    model_draw_infos: Vec<(vulkan::VertexBuffer, vulkan::IndexBuffer, u32)>,
+    vertex_buffer: vulkan::VertexBuffer,
+    index_buffer: vulkan::IndexBuffer,
+    draw_command_count: u32,
+    indirect_command_buffer: vulkan::Buffer,
     model_transform: math::AffineTransform,
-
     global_light_direction: Vec3<f32>,
     global_light_color: Vec4<f32>,
     global_ambient_light: f32,
@@ -176,8 +158,8 @@ impl Application {
             }
         }
 
-        let mut material_name_to_offset = HashMap::<Box<str>, u32>::new();
-        let default_material_offset = renderer.add_material(renderer::MaterialUBO {
+        let mut material_name_to_index = HashMap::<Box<str>, u64>::new();
+        let default_material_index = renderer.add_material(renderer::MaterialUBO {
             flags: 0,
             texture_index: 0,
             _pad2: [0; 8],
@@ -194,27 +176,30 @@ impl Application {
             let base_color = if let Some(color) = material.diffuse.color {
                 [color[0], color[1], color[2], 1.0]
             } else {
-                [0.0f32; 4]
+                [0.0; 4]
             };
 
-            let material_offset = renderer.add_material(renderer::MaterialUBO {
+            let material_index = renderer.add_material(renderer::MaterialUBO {
                 flags,
                 texture_index,
-                _pad2: [0u8; 8],
+                _pad2: [0; 8],
                 base_color,
             })?;
 
             let name = material.name.clone();
-            material_name_to_offset.insert(name, material_offset);
+            material_name_to_index.insert(name, material_index);
         }
 
-        let plane_transform = math::AffineTransform {
-            position: Vec3::ZERO.sub(ENGINE_UP).scaled(0.5),
-            orientation: Quat::IDENTITY,
-            scalar: Vec3::new(1.0, 1.0, 1.0),
-        };
-
-        const PLANE_VERTEX_BUFFER_DATA: &[renderer::ShaderVertVertex] = {
+        let mut vertices = Vec::<ShaderVertVertex>::with_capacity(1024);
+        let mut indices = Vec::<u32>::with_capacity(512);
+        let mut vertex_map = HashMap::<obj_mtl::VtnIndex, usize>::new();
+        // transform, material_index
+        let mut instance_info = Vec::<(AffineTransform, u64)>::with_capacity(32);
+        let mut draw_commands = Vec::<vk::DrawIndexedIndirectCommand>::with_capacity(32);
+        // let mut old_index_len = indices.len();
+        // let mut old_vertex_len = vertices.len();
+        
+        const _PLANE_VERTEX_BUFFER_DATA: &[renderer::ShaderVertVertex] = {
             const F: Vec3<f32> = ENGINE_FORWARDS;
             const B: Vec3<f32> = Vec3::ZERO.sub(ENGINE_FORWARDS);
             const R: Vec3<f32> = ENGINE_RIGHT;
@@ -248,22 +233,105 @@ impl Application {
                 },
             ]
         };
-        let plane_index_buffer_data = [0, 1, 2, 2, 3, 0];
+        const _PLANE_INDEX_BUFFER_DATA: &[u32] = &[0, 1, 2, 2, 3, 0];
 
-        let mut model_draw_info_data =
-            Vec::<(Vec<ShaderVertVertex>, Vec<u32>, u32)>::with_capacity(32);
+        // old_vertex_len = vertices.len();
+        // for vertex in PLANE_VERTEX_BUFFER_DATA {
+        //     vertices.push(*vertex);
+        // }
+        // old_index_len = indices.len();
+        // for index in PLANE_INDEX_BUFFER_DATA {
+        //     indices.push(*index);
+        // }
+        // instance_info.push((
+        //     math::AffineTransform {
+        //         position: Vec3::ZERO.sub(ENGINE_UP).scaled(0.5),
+        //         orientation: Quat::IDENTITY,
+        //         scalar: Vec3::new(1.0, 1.0, 1.0),
+        //     },
+        //     0
+        // ));
 
+        let arrow_iter = crate::ARROW_VERTICES
+            .iter()
+            .zip(crate::ARROW_NORMALS.iter())
+            .map(|(pos, normal)| renderer::ShaderVertVertex {
+                position: *pos,
+                tex_coord: [0.0, 0.0],
+                normal: *normal,
+            });
+        for vertex in arrow_iter {
+            vertices.push(vertex);
+        }
+        let mut old_index_len = indices.len();
+        for index in crate::ARROW_INDICES {
+            indices.push(*index);
+        }
+        let first_instance = instance_info.len() as u32;
+        // red arrow (+X)
+        let red_material_index = renderer.add_material(renderer::MaterialUBO {
+            flags: 0,
+            texture_index: 0,
+            _pad2: [0; 8],
+            base_color: [1.0, 0.1, 0.1, 1.0]
+        })?;
+        instance_info.push((
+            AffineTransform {
+                position: Vec3::ZERO,
+                orientation: Quat::unit_from_angle_axis(std::f32::consts::FRAC_PI_2, Vec3::Z),
+                scalar: ARROW_SCALAR,
+            },
+            red_material_index
+        ));
+        const ARROW_SCALAR: Vec3<f32> = Vec3::new(0.05, 0.1, 0.05);
+        // green arrow (+Y)
+        let green_material_index = renderer.add_material(renderer::MaterialUBO {
+            flags: 0,
+            texture_index: 0,
+            _pad2: [0; 8],
+            base_color: [0.1, 1.0, 0.1, 1.0]
+        })?;
+        instance_info.push((
+            AffineTransform {
+                position: Vec3::ZERO,
+                orientation: Quat::unit_from_angle_axis(std::f32::consts::PI, Vec3::Z),
+                scalar: ARROW_SCALAR,
+            },
+            green_material_index
+        ));
+        // blue arrow (+Z)
+        let blue_material_index = renderer.add_material(renderer::MaterialUBO {
+            flags: 0,
+            texture_index: 0,
+            _pad2: [0; 8],
+            base_color: [0.1, 0.1, 1.0, 1.0]
+        })?;
+        instance_info.push((
+            AffineTransform {
+                position: Vec3::ZERO,
+                orientation: Quat::unit_from_angle_axis(std::f32::consts::FRAC_PI_2, Vec3::X),
+                scalar: ARROW_SCALAR,
+            },
+            blue_material_index
+        ));
+        draw_commands.push(vk::DrawIndexedIndirectCommand {
+            index_count: (indices.len() - old_index_len) as u32,
+            instance_count: 3,
+            first_index: old_index_len as u32,
+            vertex_offset: 0,
+            first_instance,
+        });
+        
         let model_to_engine = crate::TO_ENGINE.mul(&settings.from_model);
 
+        let old_instance_info_len = instance_info.len();
+        let mut model_min = Vec3::scalar(f32::MAX);
+        let mut model_max = Vec3::scalar(f32::MIN);
         for shape in objf.get_shapes() {
-            let mut vertices = Vec::<ShaderVertVertex>::new();
-            let mut indices = Vec::<u32>::new();
-            let mut vertex_map = HashMap::<obj_mtl::VtnIndex, u32>::new();
-
-            let material_offset = if shape.materials.len() == 0 {
-                default_material_offset
+            let material_index = if shape.materials.len() == 0 {
+                default_material_index
             } else if shape.materials.len() == 1 {
-                *material_name_to_offset
+                *material_name_to_index
                     .get(&shape.materials[0])
                     .ok_or(Error::InvalidMaterialIndex)?
             } else {
@@ -288,6 +356,8 @@ impl Application {
                     _ => {}
                 }
             }
+
+            old_index_len = indices.len();
 
             for (v0, v1, v2) in triangles {
                 let derived_normal = if settings.derive_normals {
@@ -323,8 +393,7 @@ impl Application {
                                 objf.vs[v.v].x as f32,
                                 objf.vs[v.v].y as f32,
                                 objf.vs[v.v].z as f32,
-                            ))
-                            .into_arr();
+                            ));
 
                         let tex_coord = if let Some(i) = v.vt {
                             [objf.vts[i].u as f32, 1.0 - objf.vts[i].v as f32]
@@ -344,9 +413,12 @@ impl Application {
 
                         let normal = model_to_engine.mul_vec(normal).into_arr();
 
-                        let i = vertices.len() as u32;
+                        model_min = model_min.min(position);
+                        model_max = model_max.max(position);
+
+                        let i = vertices.len();
                         vertices.push(ShaderVertVertex {
-                            position,
+                            position: position.into_arr(),
                             tex_coord,
                             normal,
                         });
@@ -354,31 +426,30 @@ impl Application {
                         i
                     };
 
-                    indices.push(index);
+                    indices.push(index as u32);
                 }
             }
 
-            model_draw_info_data.push((vertices, indices, material_offset));
+            draw_commands.push(vk::DrawIndexedIndirectCommand {
+                index_count: (indices.len() - old_index_len) as u32,
+                instance_count: 1,
+                first_index: old_index_len as u32,
+                vertex_offset: 0,
+                first_instance: instance_info.len() as u32,
+            });
+            instance_info.push((
+                AffineTransform {
+                    position: Vec3::ZERO,
+                    orientation: Quat::IDENTITY,
+                    scalar: Vec3::scalar(1.0)
+                },
+                material_index
+            ));
         }
-
         let model_position = Vec3::ZERO;
-
         let model_transform = {
-            let mut min = [f32::MAX; 3];
-            let mut max = [f32::MIN; 3];
-            for (vertices, _, _) in model_draw_info_data.iter() {
-                for v in vertices.iter() {
-                    for i in 0..3 {
-                        min[i] = min[i].min(v.position[i]);
-                        max[i] = max[i].max(v.position[i]);
-                    }
-                }
-            }
-            let min = Vec3::new(min[0], min[1], min[2]);
-            let max = Vec3::new(max[0], max[1], max[2]);
-            let center = max.add(min).scaled(0.5);
-
-            let model_scale = max.sub(min);
+            let center = model_max.add(model_min).scaled(0.5);
+            let model_scale = model_max.sub(model_min);
             let model_scale = model_scale.x().max(model_scale.y()).max(model_scale.z());
             let model_scale = 1.0 / model_scale;
 
@@ -387,152 +458,11 @@ impl Application {
             math::AffineTransform {
                 position: model_pos,
                 orientation: Quat::IDENTITY,
-                scalar: Vec3::new(model_scale, model_scale, model_scale),
+                scalar: Vec3::scalar(model_scale),
             }
         };
-
-        let plane_vertex_buffer = {
-            let data = unsafe {
-                std::slice::from_raw_parts(
-                    PLANE_VERTEX_BUFFER_DATA.as_ptr() as *const u8,
-                    PLANE_VERTEX_BUFFER_DATA.len()
-                        * std::mem::size_of::<renderer::ShaderVertVertex>(),
-                )
-            };
-            renderer.create_vertex_buffer(data, PLANE_VERTEX_BUFFER_DATA.len() as u32)?
-        };
-
-        let plane_index_buffer = {
-            let data = unsafe {
-                std::slice::from_raw_parts(
-                    plane_index_buffer_data.as_ptr() as *const u8,
-                    plane_index_buffer_data.len() * std::mem::size_of::<u32>(),
-                )
-            };
-            renderer.create_index_buffer(
-                data,
-                vk::IndexType::UINT32,
-                plane_index_buffer_data.len() as u32,
-                0,
-            )?
-        };
-
-        let plane_instance_index = renderer.add_instance(plane_transform.as_mat4(), 0)?;
-
-        let arrow_vertex_buffer = {
-            let arrow_vb_data: Box<[renderer::ShaderVertVertex]> = crate::ARROW_VERTICES
-                .iter()
-                .zip(crate::ARROW_NORMALS.iter())
-                .map(|(pos, normal)| renderer::ShaderVertVertex {
-                    position: *pos,
-                    tex_coord: [0.0, 0.0],
-                    normal: *normal,
-                })
-                .collect();
-
-            let data = unsafe {
-                std::slice::from_raw_parts(
-                    arrow_vb_data.as_ptr() as *const u8,
-                    arrow_vb_data.len() * std::mem::size_of::<renderer::ShaderVertVertex>(),
-                )
-            };
-
-            renderer.create_vertex_buffer(data, arrow_vb_data.len() as u32)?
-        };
-
-        let arrow_index_buffer = {
-            let data = unsafe {
-                std::slice::from_raw_parts(
-                    crate::ARROW_INDICES.as_ptr() as *const u8,
-                    crate::ARROW_INDICES.len() * std::mem::size_of::<u32>(),
-                )
-            };
-
-            renderer.create_index_buffer(
-                data,
-                vk::IndexType::UINT32,
-                crate::ARROW_INDICES.len() as u32,
-                0,
-            )?
-        };
-
-        const ARROW_SCALAR: Vec3<f32> = Vec3::new(0.05, 0.1, 0.05);
-
-        let red_material_offset = renderer.add_material(renderer::MaterialUBO {
-            flags: 0,
-            texture_index: 0,
-            _pad2: [0; 8],
-            base_color: [1.0, 0.0, 0.0, 1.0],
-        })?;
-        // should point in the +X direction
-        let red_arrow_transform = math::AffineTransform {
-            position: Vec3::ZERO,
-            orientation: Quat::unit_from_angle_axis(std::f32::consts::FRAC_PI_2, Vec3::Z),
-            scalar: ARROW_SCALAR,
-        };
-        let red_material_index = red_material_offset / renderer.material_buffer_element_size;
-        let red_arrow_instance_index =
-            renderer.add_instance(red_arrow_transform.as_mat4(), red_material_index)?;
-        let green_material_offset = renderer.add_material(renderer::MaterialUBO {
-            flags: 0,
-            texture_index: 0,
-            _pad2: [0; 8],
-            base_color: [0.0, 1.0, 0.0, 1.0],
-        })?;
-        // should point in the +Y direction
-        let green_arrow_transform = math::AffineTransform {
-            position: Vec3::ZERO,
-            orientation: Quat::unit_from_angle_axis(std::f32::consts::PI, Vec3::X),
-            scalar: ARROW_SCALAR,
-        };
-        let green_material_index = green_material_offset / renderer.material_buffer_element_size;
-        let green_arrow_instance_index =
-            renderer.add_instance(green_arrow_transform.as_mat4(), green_material_index)?;
-
-        let blue_material_offset = renderer.add_material(renderer::MaterialUBO {
-            flags: 0,
-            texture_index: 0,
-            _pad2: [0; 8],
-            base_color: [0.0, 0.0, 1.0, 1.0],
-        })?;
-        // should point in the +Z direction
-        let blue_arrow_transform = math::AffineTransform {
-            position: Vec3::ZERO,
-            orientation: Quat::unit_from_angle_axis(std::f32::consts::FRAC_PI_2, Vec3::X),
-            scalar: ARROW_SCALAR,
-        };
-        let blue_material_index = blue_material_offset / renderer.material_buffer_element_size;
-        let blue_arrow_instance_index =
-            renderer.add_instance(blue_arrow_transform.as_mat4(), blue_material_index)?;
-
-        let mut model_draw_infos = Vec::<(VertexBuffer, IndexBuffer, u32)>::with_capacity(16);
-        for (vertex_data, index_data, material_offset) in model_draw_info_data {
-            let vb_data = unsafe {
-                std::slice::from_raw_parts(
-                    vertex_data.as_ptr() as *const u8,
-                    vertex_data.len() * std::mem::size_of::<renderer::ShaderVertVertex>(),
-                )
-            };
-            let vb = renderer.create_vertex_buffer(vb_data, vertex_data.len() as u32)?;
-
-            let ib_data = unsafe {
-                std::slice::from_raw_parts(
-                    index_data.as_ptr() as *const u8,
-                    index_data.len() * std::mem::size_of::<u32>(),
-                )
-            };
-            let ib = renderer.create_index_buffer(
-                ib_data,
-                vk::IndexType::UINT32,
-                index_data.len() as u32,
-                0,
-            )?;
-
-            let material_index = material_offset / renderer.material_buffer_element_size as u32;
-            let instance_index =
-                renderer.add_instance(model_transform.as_mat4(), material_index)?;
-
-            model_draw_infos.push((vb, ib, instance_index));
+        for (transform, _material_index) in instance_info.iter_mut().skip(old_instance_info_len) {
+            *transform = model_transform;
         }
 
         let mut binding_map = HashMap::new();
@@ -552,6 +482,37 @@ impl Application {
             (camera, controller)
         };
 
+        let vertex_buffer = {
+            let size = vertices.len() * std::mem::size_of::<ShaderVertVertex>();
+            let data = unsafe {
+                std::slice::from_raw_parts(
+                    vertices.as_ptr() as *const u8,
+                    size
+                )
+            };
+
+            renderer.create_vertex_buffer(data, size as u32)?
+        };
+
+        let index_buffer = {
+            let data = unsafe {
+                std::slice::from_raw_parts(
+                    indices.as_ptr() as *const u8,
+                    indices.len() * std::mem::size_of::<u32>()
+                )
+            };
+            renderer.create_index_buffer(
+                data,
+                vk::IndexType::UINT32,
+                indices.len() as u32,
+                0
+            )?
+        };
+
+        for (transform, material_index) in instance_info {
+            renderer.add_instance(transform.as_mat4(), material_index as u32)?;
+        }
+
         let (fps_camera, fps_controller) = {
             let mut controller = FpsCameraController::new();
             let mut camera = Camera::perspective(settings.fov_y);
@@ -560,6 +521,24 @@ impl Application {
             controller.update(&mut camera, 1.0, 1.0);
 
             (camera, controller)
+        };
+
+        let indirect_command_buffer = {
+            let size = draw_commands.len() * std::mem::size_of::<vk::DrawIndexedIndirectCommand>();
+            let buffer = renderer.create_indirect_buffer(
+                size as u64
+            )?;
+ 
+            let dst = unsafe {
+                let ptr = buffer.map_memory(0, size as u64).map_err(|e| renderer::Error::VulkanError(e.into()))?;
+                std::slice::from_raw_parts_mut(ptr as *mut vk::DrawIndexedIndirectCommand, draw_commands.len())
+            };
+
+            dst.copy_from_slice(&draw_commands);
+
+            unsafe { buffer.unmap(); }
+
+            buffer
         };
 
         let global_light_direction = Vec3::ZERO.sub(ENGINE_UP).add(ENGINE_RIGHT.scaled(0.2));
@@ -579,31 +558,13 @@ impl Application {
             fps_controller,
             orbit_camera,
             orbit_controller,
-            windows: std::collections::HashMap::new(),
-
+            windows: HashMap::new(),
             default_texture_index,
-
-            plane_vertex_buffer,
-            plane_index_buffer,
-            plane_material: 0,
-            plane_transform,
-            plane_instance_index,
-
-            arrow_index_buffer,
-            arrow_vertex_buffer,
-            red_material_index,
-            red_arrow_transform,
-            red_arrow_instance_index,
-            green_material_index,
-            green_arrow_transform,
-            green_arrow_instance_index,
-            blue_material_index,
-            blue_arrow_transform,
-            blue_arrow_instance_index,
-
-            model_draw_infos,
+            indirect_command_buffer,
             model_transform,
-
+            vertex_buffer,
+            index_buffer,
+            draw_command_count: draw_commands.len() as u32,
             global_light_direction,
             global_light_color: Vec4::new(1.0, 1.0, 1.0, 1.0),
             global_ambient_light: 0.1,
@@ -835,6 +796,17 @@ impl Application {
                         );
                     }
                     {
+                        let sets = [self.renderer.descriptor_sets[1]];
+                        self.renderer.device.cmd_bind_descriptor_sets(
+                            cmd,
+                            self.renderer.pipeline_layout.bind_point,
+                            self.renderer.pipeline_layout.handle,
+                            1,
+                            &sets,
+                            &[],
+                        );
+                    }
+                    {
                         let sets = [self.renderer.descriptor_sets[2]];
                         self.renderer.device.cmd_bind_descriptor_sets(
                             cmd,
@@ -846,71 +818,16 @@ impl Application {
                         );
                     }
 
-                    if let CameraInUse::Orbit = self.camera_in_use {
-                        let sets = [self.renderer.descriptor_sets[1]];
-                        self.renderer.device.cmd_bind_descriptor_sets(
-                            cmd,
-                            self.renderer.pipeline_layout.bind_point,
-                            self.renderer.pipeline_layout.handle,
-                            1,
-                            &sets,
-                            &[],
-                        );
+                    self.vertex_buffer.bind(cmd);
+                    self.index_buffer.bind(cmd);
 
-                        let buffers = [self.arrow_vertex_buffer.buffer.handle];
-                        let offsets = [0];
-                        self.renderer
-                            .device
-                            .cmd_bind_vertex_buffers(cmd, 0, &buffers, &offsets);
-                        self.renderer.device.cmd_bind_index_buffer(
-                            cmd,
-                            self.arrow_index_buffer.buffer.handle,
-                            0,
-                            vk::IndexType::UINT32,
-                        );
-                        self.renderer.device.cmd_draw_indexed(
-                            cmd,
-                            crate::ARROW_INDICES.len() as u32,
-                            3,
-                            0,
-                            0,
-                            self.red_arrow_instance_index,
-                        );
-                    }
-
-                    for (vb, ib, instance_index) in self.model_draw_infos.iter() {
-                        {
-                            let sets = [self.renderer.descriptor_sets[1]];
-                            self.renderer.device.cmd_bind_descriptor_sets(
-                                cmd,
-                                self.renderer.pipeline_layout.bind_point,
-                                self.renderer.pipeline_layout.handle,
-                                1,
-                                &sets,
-                                &[],
-                            );
-                        }
-                        let buffers = [vb.buffer.handle];
-                        let offsets = [0];
-                        self.renderer
-                            .device
-                            .cmd_bind_vertex_buffers(cmd, 0, &buffers, &offsets);
-
-                        self.renderer.device.cmd_bind_index_buffer(
-                            cmd,
-                            ib.buffer.handle,
-                            0,
-                            vk::IndexType::UINT32,
-                        );
-                        self.renderer.device.cmd_draw_indexed(
-                            cmd,
-                            ib.index_count,
-                            1,
-                            0,
-                            0,
-                            *instance_index,
-                        );
-                    }
+                    self.renderer.device.cmd_draw_indexed_indirect(
+                        cmd,
+                        self.indirect_command_buffer.handle,
+                        0,
+                        self.draw_command_count,
+                        std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u32
+                    );
                 };
 
                 unsafe { context.draw(record_draw_commands) }?;

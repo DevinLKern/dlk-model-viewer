@@ -174,6 +174,7 @@ impl Device {
 
             let enabled_features = vk::PhysicalDeviceFeatures {
                 sampler_anisotropy: vk::TRUE,
+                multi_draw_indirect: vk::TRUE,
                 ..Default::default()
             };
             let enabled_descriptor_indexing_features =
