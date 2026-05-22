@@ -447,24 +447,21 @@ impl RenderContext {
     }
     pub fn update_camera(&self, camera_ubo: crate::CameraUBO) -> crate::Result<()> {
         let element_size = {
-            let struct_size = std::mem::size_of::<CameraUBO>();
+            let struct_size = std::mem::size_of::<CameraUBO>() as vk::DeviceSize;
 
             let properties = unsafe { self.device.get_physical_device_properties() };
 
-            struct_size
-                .next_multiple_of(properties.limits.min_uniform_buffer_offset_alignment as usize)
+            struct_size.next_multiple_of(
+                properties.limits.min_uniform_buffer_offset_alignment as vk::DeviceSize,
+            )
         };
 
-        let offset = self.index * element_size;
-
-        let src = &camera_ubo;
+        let offset = self.index as vk::DeviceSize * element_size;
 
         unsafe {
-            let dst = self
-                .per_frame_buffer
-                .map_memory(offset as vk::DeviceSize, element_size as vk::DeviceSize)?;
+            let dst = self.per_frame_buffer.map_memory(offset, element_size)? as *mut CameraUBO;
 
-            std::ptr::copy_nonoverlapping(src, dst as *mut CameraUBO, 1);
+            *dst = camera_ubo;
 
             self.per_frame_buffer.unmap();
         }

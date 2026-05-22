@@ -1,4 +1,5 @@
 mod render_context;
+mod resources;
 mod result;
 
 include!(concat!(env!("OUT_DIR"), "/variable_types.rs"));
@@ -6,14 +7,17 @@ include!(concat!(env!("OUT_DIR"), "/shader_paths.rs"));
 include!(concat!(env!("OUT_DIR"), "/entry_points.rs"));
 
 pub use render_context::RenderContext;
+pub use resources::*;
 pub use result::Error;
 pub use result::Result;
 
 use ash::vk;
 use std::rc::Rc;
+use std::u64;
 use vulkan::device::SharedDeviceRef;
 
 use crate::render_context::MAX_FRAME_COUNT;
+const MAX_COMMAND_COUNT: usize = 1024;
 
 unsafe extern "system" fn vulkan_debug_callback(
     message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
@@ -66,20 +70,18 @@ pub struct Renderer {
     per_obj_ds_layout: vk::DescriptorSetLayout,
     other_ds_layout: vk::DescriptorSetLayout,
     pub descriptor_sets: Box<[vk::DescriptorSet]>,
-
     pub model_transform_buffer: vulkan::Buffer,
     model_transform_index: u64,
     model_transform_buffer_element_size: u64,
-
+    pub cmd_count: u32,
+    pub cmd_buffer: vulkan::Buffer,
     global_light_buffer: vulkan::Buffer,
-
     textures: Vec<vulkan::Image>,
-
     material_buffer: vulkan::Buffer,
     material_buffer_offset: u64,
     pub material_buffer_element_size: u64,
-
     repeat_sampler: vk::Sampler,
+    mesh_arenas: slotmap::DenseSlotMap<MeshArenaHandle, MeshArena>,
 }
 
 impl Renderer {
@@ -424,6 +426,18 @@ impl Renderer {
             unsafe { device.update_descriptor_sets(&writes, &[]) };
         }
 
+        let cmd_buffer = {
+            let buffer_create_info = vulkan::BufferCreateInfo {
+                size: (std::mem::size_of::<vk::DrawIndexedIndirectCommand>() * MAX_COMMAND_COUNT)
+                    as u64,
+                usage: vk::BufferUsageFlags::INDIRECT_BUFFER,
+                memory_property_flags: vk::MemoryPropertyFlags::HOST_COHERENT
+                    | vk::MemoryPropertyFlags::HOST_VISIBLE,
+            };
+
+            vulkan::Buffer::new(device.clone(), &buffer_create_info)?
+        };
+
         Ok(Renderer {
             device,
             pipeline_layout,
@@ -433,18 +447,17 @@ impl Renderer {
             per_obj_ds_layout,
             other_ds_layout,
             descriptor_sets: descriptor_sets.into_boxed_slice(),
-
             model_transform_buffer,
             model_transform_index: 0,
             model_transform_buffer_element_size: model_transform_buffer_element_size as u64,
-
             global_light_buffer,
-
             textures,
-
+            mesh_arenas: slotmap::DenseSlotMap::with_key(),
             material_buffer,
             material_buffer_offset: 0,
             material_buffer_element_size,
+            cmd_buffer,
+            cmd_count: 0,
             repeat_sampler,
         })
     }
@@ -508,79 +521,6 @@ impl Renderer {
         }?;
 
         Ok(*command_buffers.get(0).unwrap())
-    }
-    pub fn create_vertex_buffer(
-        &self,
-        data: &[u8],
-        vertex_count: u32,
-    ) -> vulkan::Result<vulkan::VertexBuffer> {
-        let buffer = {
-            let buffer_create_info = vulkan::BufferCreateInfo {
-                size: data.len() as u64,
-                usage: vk::BufferUsageFlags::VERTEX_BUFFER,
-                memory_property_flags: ash::vk::MemoryPropertyFlags::HOST_VISIBLE
-                    | vk::MemoryPropertyFlags::HOST_COHERENT,
-            };
-
-            vulkan::Buffer::new(self.device.clone(), &buffer_create_info)?
-        };
-
-        unsafe {
-            let dst = buffer.map_memory(buffer.offset, buffer.size)?;
-
-            std::ptr::copy_nonoverlapping(data.as_ptr(), dst as *mut u8, data.len());
-
-            buffer.unmap();
-        }
-
-        let view = vulkan::VertexBuffer {
-            buffer,
-            vertex_count,
-            instance_count: 1,
-            first_binding: 0,
-            offset: 0,
-        };
-
-        Ok(view)
-    }
-    pub fn create_index_buffer(
-        &self,
-        data: &[u8],
-        index_type: vk::IndexType,
-        index_count: u32,
-        first_index: u32,
-    ) -> result::Result<vulkan::IndexBuffer> {
-        let buffer = {
-            let buffer_create_info = vulkan::buffer::BufferCreateInfo {
-                size: data.len() as u64,
-                usage: vk::BufferUsageFlags::INDEX_BUFFER,
-                memory_property_flags: vk::MemoryPropertyFlags::HOST_VISIBLE
-                    | vk::MemoryPropertyFlags::HOST_COHERENT,
-            };
-
-            vulkan::Buffer::new(self.device.clone(), &buffer_create_info)?
-        };
-
-        unsafe {
-            let dst = buffer.map_memory(buffer.offset, buffer.size)?;
-
-            std::ptr::copy_nonoverlapping(data.as_ptr(), dst as *mut u8, data.len());
-
-            buffer.unmap();
-        }
-
-        let view = vulkan::IndexBuffer {
-            buffer,
-            offset: 0,
-            index_count,
-            instance_count: 1,
-            first_index,
-            vertex_offset: 0,
-            first_instance: 0,
-            index_type,
-        };
-
-        Ok(view)
     }
     pub fn create_uniform_buffers(
         &self,
@@ -853,7 +793,7 @@ impl Renderer {
         self.textures.push(image);
         Ok(idx)
     }
-    pub fn add_material(&mut self, material_data: crate::MaterialUBO) -> Result<u64> {
+    pub fn add_material(&mut self, material_data: crate::MaterialUBO) -> Result<u32> {
         let data = material_data;
         let write_offset = self.material_buffer_offset;
         let write_size = self.material_buffer_element_size;
@@ -874,7 +814,7 @@ impl Renderer {
         }
         let res = self.material_buffer_offset / self.material_buffer_element_size;
         self.material_buffer_offset += self.material_buffer_element_size;
-        Ok(res)
+        Ok(res as u32)
     }
     pub fn add_instance(
         &mut self,
@@ -917,6 +857,92 @@ impl Renderer {
         let res = self.model_transform_index;
         self.model_transform_index += 1;
         Ok(res as u32)
+    }
+    #[inline]
+    pub fn reset_instance_buffer(&mut self) {
+        self.model_transform_index = 0;
+    }
+    pub fn add_command(&mut self, cmd: vk::DrawIndexedIndirectCommand) -> Result<()> {
+        const SIZE: u64 = std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u64;
+        let offset = self.cmd_count as u64 * SIZE;
+
+        unsafe {
+            let dst =
+                self.cmd_buffer.map_memory(offset, SIZE)? as *mut vk::DrawIndexedIndirectCommand;
+            *dst = cmd;
+            self.cmd_buffer.unmap();
+        }
+
+        self.cmd_count += 1;
+        Ok(())
+    }
+    #[inline]
+    pub fn reset_commands(&mut self) {
+        self.cmd_count = 0;
+    }
+    pub fn create_mesh_arena(
+        &mut self,
+        vertices: &[u8],
+        indices: &[u32],
+    ) -> Result<MeshArenaHandle> {
+        let buffer_size = vertices.len() as u64;
+
+        let vertex_buffer = {
+            let buffer_create_info = vulkan::BufferCreateInfo {
+                size: buffer_size,
+                usage: vk::BufferUsageFlags::VERTEX_BUFFER,
+                memory_property_flags: ash::vk::MemoryPropertyFlags::HOST_VISIBLE
+                    | vk::MemoryPropertyFlags::HOST_COHERENT,
+            };
+
+            vulkan::Buffer::new(self.device.clone(), &buffer_create_info)?
+        };
+
+        unsafe {
+            let src = vertices.as_ptr();
+            let dst = vertex_buffer.map_memory(0, buffer_size)? as *mut u8;
+
+            std::ptr::copy_nonoverlapping(src, dst, buffer_size as usize);
+
+            vertex_buffer.unmap();
+        }
+
+        let buffer_size = (indices.len() * std::mem::size_of::<u32>()) as u64;
+
+        let index_buffer = {
+            let buffer_create_info = vulkan::BufferCreateInfo {
+                size: buffer_size,
+                usage: vk::BufferUsageFlags::INDEX_BUFFER,
+                memory_property_flags: ash::vk::MemoryPropertyFlags::HOST_VISIBLE
+                    | vk::MemoryPropertyFlags::HOST_COHERENT,
+            };
+
+            vulkan::Buffer::new(self.device.clone(), &buffer_create_info)?
+        };
+
+        unsafe {
+            let src = indices.as_ptr();
+            let dst = index_buffer.map_memory(0, buffer_size)? as *mut u32;
+
+            std::ptr::copy_nonoverlapping(src, dst, indices.len());
+
+            index_buffer.unmap();
+        }
+
+        let handle = self.mesh_arenas.insert(MeshArena {
+            vertex_buffer,
+            index_buffer,
+        });
+
+        Ok(handle)
+    }
+    #[inline]
+    pub fn access_mesh_arena(&mut self, handle: MeshArenaHandle) -> Option<&MeshArena> {
+        self.mesh_arenas.get(handle)
+    }
+    #[inline]
+    pub fn destroy_mesh_arena(&mut self, handle: MeshArenaHandle) -> bool {
+        self.mesh_arenas.remove(handle).is_some()
     }
 }
 

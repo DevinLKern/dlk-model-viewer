@@ -12,6 +12,7 @@ ash = "0.38.0"
 ash-window = "0.13.0"
 image = "0.25.9"
 tracing = "0.1.44"
+slotmap = "1.0"
 
 [build-dependencies]
 spirv = { path = "../spirv" }

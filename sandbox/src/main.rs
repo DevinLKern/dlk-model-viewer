@@ -12,7 +12,6 @@ use result::{Error, Result};
 use settings::{Command, Event, Settings};
 
 use ash::vk;
-use vulkan::{IndexBuffer, VertexBuffer};
 
 use std::collections::HashSet;
 use std::str::FromStr;
@@ -54,10 +53,15 @@ struct Application {
     windows: HashMap<WindowId, (renderer::RenderContext, Window)>,
     renderer: renderer::Renderer,
     default_texture_index: usize,
-    vertex_buffer: vulkan::VertexBuffer,
-    index_buffer: vulkan::IndexBuffer,
-    draw_command_count: u32,
-    indirect_command_buffer: vulkan::Buffer,
+    mesh_arena_handle: renderer::MeshArenaHandle,
+    x_arrow_transform: AffineTransform,
+    red_material_index: u32,
+    y_arrow_transform: AffineTransform,
+    green_material_index: u32,
+    z_arrow_transform: AffineTransform,
+    blue_material_index: u32,
+    arrow_submesh: renderer::SubMesh,
+    model_submeshes: Vec<(renderer::SubMesh, u32)>,
     model_transform: math::AffineTransform,
     global_light_direction: Vec3<f32>,
     global_light_color: Vec4<f32>,
@@ -158,7 +162,7 @@ impl Application {
             }
         }
 
-        let mut material_name_to_index = HashMap::<Box<str>, u64>::new();
+        let mut material_name_to_index = HashMap::<Box<str>, u32>::new();
         let default_material_index = renderer.add_material(renderer::MaterialUBO {
             flags: 0,
             texture_index: 0,
@@ -194,11 +198,7 @@ impl Application {
         let mut indices = Vec::<u32>::with_capacity(512);
         let mut vertex_map = HashMap::<obj_mtl::VtnIndex, usize>::new();
         // transform, material_index
-        let mut instance_info = Vec::<(AffineTransform, u64)>::with_capacity(32);
-        let mut draw_commands = Vec::<vk::DrawIndexedIndirectCommand>::with_capacity(32);
-        // let mut old_index_len = indices.len();
-        // let mut old_vertex_len = vertices.len();
-        
+
         const _PLANE_VERTEX_BUFFER_DATA: &[renderer::ShaderVertVertex] = {
             const F: Vec3<f32> = ENGINE_FORWARDS;
             const B: Vec3<f32> = Vec3::ZERO.sub(ENGINE_FORWARDS);
@@ -267,66 +267,55 @@ impl Application {
         for index in crate::ARROW_INDICES {
             indices.push(*index);
         }
-        let first_instance = instance_info.len() as u32;
+
+        const ARROW_SCALAR: Vec3<f32> = Vec3::new(0.05, 0.1, 0.05);
+
         // red arrow (+X)
         let red_material_index = renderer.add_material(renderer::MaterialUBO {
             flags: 0,
             texture_index: 0,
             _pad2: [0; 8],
-            base_color: [1.0, 0.1, 0.1, 1.0]
+            base_color: [1.0, 0.1, 0.1, 1.0],
         })?;
-        instance_info.push((
-            AffineTransform {
-                position: Vec3::ZERO,
-                orientation: Quat::unit_from_angle_axis(std::f32::consts::FRAC_PI_2, Vec3::Z),
-                scalar: ARROW_SCALAR,
-            },
-            red_material_index
-        ));
-        const ARROW_SCALAR: Vec3<f32> = Vec3::new(0.05, 0.1, 0.05);
+        let x_arrow_transform = AffineTransform {
+            position: Vec3::ZERO,
+            orientation: Quat::unit_from_angle_axis(std::f32::consts::FRAC_PI_2, Vec3::Z),
+            scalar: ARROW_SCALAR,
+        };
         // green arrow (+Y)
         let green_material_index = renderer.add_material(renderer::MaterialUBO {
             flags: 0,
             texture_index: 0,
             _pad2: [0; 8],
-            base_color: [0.1, 1.0, 0.1, 1.0]
+            base_color: [0.1, 1.0, 0.1, 1.0],
         })?;
-        instance_info.push((
-            AffineTransform {
-                position: Vec3::ZERO,
-                orientation: Quat::unit_from_angle_axis(std::f32::consts::PI, Vec3::Z),
-                scalar: ARROW_SCALAR,
-            },
-            green_material_index
-        ));
+        let y_arrow_transform = AffineTransform {
+            position: Vec3::ZERO,
+            orientation: Quat::unit_from_angle_axis(std::f32::consts::PI, Vec3::Z),
+            scalar: ARROW_SCALAR,
+        };
         // blue arrow (+Z)
         let blue_material_index = renderer.add_material(renderer::MaterialUBO {
             flags: 0,
             texture_index: 0,
             _pad2: [0; 8],
-            base_color: [0.1, 0.1, 1.0, 1.0]
+            base_color: [0.1, 0.1, 1.0, 1.0],
         })?;
-        instance_info.push((
-            AffineTransform {
-                position: Vec3::ZERO,
-                orientation: Quat::unit_from_angle_axis(std::f32::consts::FRAC_PI_2, Vec3::X),
-                scalar: ARROW_SCALAR,
-            },
-            blue_material_index
-        ));
-        draw_commands.push(vk::DrawIndexedIndirectCommand {
-            index_count: (indices.len() - old_index_len) as u32,
-            instance_count: 3,
-            first_index: old_index_len as u32,
-            vertex_offset: 0,
-            first_instance,
-        });
-        
+        let z_arrow_transform = AffineTransform {
+            position: Vec3::ZERO,
+            orientation: Quat::unit_from_angle_axis(std::f32::consts::FRAC_PI_2, Vec3::X),
+            scalar: ARROW_SCALAR,
+        };
+
+        let arrow_index_count = crate::ARROW_INDICES.len();
+        let arrow_first_index = old_index_len;
+
         let model_to_engine = crate::TO_ENGINE.mul(&settings.from_model);
 
-        let old_instance_info_len = instance_info.len();
         let mut model_min = Vec3::scalar(f32::MAX);
         let mut model_max = Vec3::scalar(f32::MIN);
+        // Vec<(index_count, first_index, material_index)>
+        let mut model_submesh_data = Vec::<(usize, usize, u32)>::new();
         for shape in objf.get_shapes() {
             let material_index = if shape.materials.len() == 0 {
                 default_material_index
@@ -388,12 +377,11 @@ impl Application {
                     let index = if let Some(&i) = vertex_map.get(&v) {
                         i
                     } else {
-                        let position = model_to_engine
-                            .mul_vec(Vec3::new(
-                                objf.vs[v.v].x as f32,
-                                objf.vs[v.v].y as f32,
-                                objf.vs[v.v].z as f32,
-                            ));
+                        let position = model_to_engine.mul_vec(Vec3::new(
+                            objf.vs[v.v].x as f32,
+                            objf.vs[v.v].y as f32,
+                            objf.vs[v.v].z as f32,
+                        ));
 
                         let tex_coord = if let Some(i) = v.vt {
                             [objf.vts[i].u as f32, 1.0 - objf.vts[i].v as f32]
@@ -430,22 +418,10 @@ impl Application {
                 }
             }
 
-            draw_commands.push(vk::DrawIndexedIndirectCommand {
-                index_count: (indices.len() - old_index_len) as u32,
-                instance_count: 1,
-                first_index: old_index_len as u32,
-                vertex_offset: 0,
-                first_instance: instance_info.len() as u32,
-            });
-            instance_info.push((
-                AffineTransform {
-                    position: Vec3::ZERO,
-                    orientation: Quat::IDENTITY,
-                    scalar: Vec3::scalar(1.0)
-                },
-                material_index
-            ));
+            // (index_count, first_index, material_index)
+            model_submesh_data.push((indices.len() - old_index_len, old_index_len, material_index));
         }
+
         let model_position = Vec3::ZERO;
         let model_transform = {
             let center = model_max.add(model_min).scaled(0.5);
@@ -461,9 +437,6 @@ impl Application {
                 scalar: Vec3::scalar(model_scale),
             }
         };
-        for (transform, _material_index) in instance_info.iter_mut().skip(old_instance_info_len) {
-            *transform = model_transform;
-        }
 
         let mut binding_map = HashMap::new();
         for (index, binding) in settings.bindings.iter().enumerate() {
@@ -482,36 +455,35 @@ impl Application {
             (camera, controller)
         };
 
-        let vertex_buffer = {
-            let size = vertices.len() * std::mem::size_of::<ShaderVertVertex>();
-            let data = unsafe {
+        let mesh_arena_handle = {
+            let vertex_buffer_data = unsafe {
                 std::slice::from_raw_parts(
                     vertices.as_ptr() as *const u8,
-                    size
+                    vertices.len() * std::mem::size_of::<ShaderVertVertex>(),
                 )
             };
-
-            renderer.create_vertex_buffer(data, size as u32)?
+            renderer.create_mesh_arena(&vertex_buffer_data, &indices)?
         };
 
-        let index_buffer = {
-            let data = unsafe {
-                std::slice::from_raw_parts(
-                    indices.as_ptr() as *const u8,
-                    indices.len() * std::mem::size_of::<u32>()
+        let arrow_submesh = renderer::SubMesh {
+            geometry: mesh_arena_handle,
+            first_index: arrow_first_index as u32,
+            index_count: arrow_index_count as u32,
+        };
+
+        let model_submeshes = model_submesh_data
+            .into_iter()
+            .map(|(index_count, first_index, material_index)| {
+                (
+                    renderer::SubMesh {
+                        geometry: mesh_arena_handle,
+                        first_index: first_index as u32,
+                        index_count: index_count as u32,
+                    },
+                    material_index,
                 )
-            };
-            renderer.create_index_buffer(
-                data,
-                vk::IndexType::UINT32,
-                indices.len() as u32,
-                0
-            )?
-        };
-
-        for (transform, material_index) in instance_info {
-            renderer.add_instance(transform.as_mat4(), material_index as u32)?;
-        }
+            })
+            .collect();
 
         let (fps_camera, fps_controller) = {
             let mut controller = FpsCameraController::new();
@@ -521,24 +493,6 @@ impl Application {
             controller.update(&mut camera, 1.0, 1.0);
 
             (camera, controller)
-        };
-
-        let indirect_command_buffer = {
-            let size = draw_commands.len() * std::mem::size_of::<vk::DrawIndexedIndirectCommand>();
-            let buffer = renderer.create_indirect_buffer(
-                size as u64
-            )?;
- 
-            let dst = unsafe {
-                let ptr = buffer.map_memory(0, size as u64).map_err(|e| renderer::Error::VulkanError(e.into()))?;
-                std::slice::from_raw_parts_mut(ptr as *mut vk::DrawIndexedIndirectCommand, draw_commands.len())
-            };
-
-            dst.copy_from_slice(&draw_commands);
-
-            unsafe { buffer.unmap(); }
-
-            buffer
         };
 
         let global_light_direction = Vec3::ZERO.sub(ENGINE_UP).add(ENGINE_RIGHT.scaled(0.2));
@@ -560,11 +514,16 @@ impl Application {
             orbit_controller,
             windows: HashMap::new(),
             default_texture_index,
-            indirect_command_buffer,
+            mesh_arena_handle,
+            x_arrow_transform,
+            red_material_index,
+            y_arrow_transform,
+            green_material_index,
+            z_arrow_transform,
+            blue_material_index,
+            arrow_submesh,
+            model_submeshes,
             model_transform,
-            vertex_buffer,
-            index_buffer,
-            draw_command_count: draw_commands.len() as u32,
             global_light_direction,
             global_light_color: Vec4::new(1.0, 1.0, 1.0, 1.0),
             global_ambient_light: 0.1,
@@ -782,6 +741,42 @@ impl Application {
 
                 let temp = context.index as u32 * context.per_frame_buffer_element_size;
 
+                // upload instance data into buffer
+                {
+                    self.renderer.reset_commands();
+                    self.renderer.reset_instance_buffer();
+
+                    let first_instance = self
+                        .renderer
+                        .add_instance(self.x_arrow_transform.as_mat4(), self.red_material_index)?;
+                    self.renderer.add_instance(
+                        self.y_arrow_transform.as_mat4(),
+                        self.green_material_index,
+                    )?;
+                    self.renderer
+                        .add_instance(self.z_arrow_transform.as_mat4(), self.blue_material_index)?;
+                    self.renderer.add_command(vk::DrawIndexedIndirectCommand {
+                        index_count: self.arrow_submesh.index_count,
+                        instance_count: 3,
+                        first_instance,
+                        first_index: self.arrow_submesh.first_index,
+                        vertex_offset: 0,
+                    })?;
+
+                    for (submesh, material_index) in self.model_submeshes.iter() {
+                        let first_instance = self
+                            .renderer
+                            .add_instance(self.model_transform.as_mat4(), *material_index)?;
+                        self.renderer.add_command(vk::DrawIndexedIndirectCommand {
+                            index_count: submesh.index_count,
+                            instance_count: 1,
+                            first_index: submesh.first_index,
+                            vertex_offset: 0,
+                            first_instance,
+                        })?;
+                    }
+                }
+
                 let record_draw_commands = |cmd: vk::CommandBuffer| unsafe {
                     pipeline.bind(cmd);
                     {
@@ -818,15 +813,36 @@ impl Application {
                         );
                     }
 
-                    self.vertex_buffer.bind(cmd);
-                    self.index_buffer.bind(cmd);
+                    let (vb, ib) = {
+                        let mesh_arena = self
+                            .renderer
+                            .access_mesh_arena(self.mesh_arena_handle)
+                            .unwrap();
+                        (
+                            mesh_arena.vertex_buffer.handle,
+                            mesh_arena.index_buffer.handle,
+                        )
+                    };
+
+                    let (buffers, offsets) = {
+                        let b = [vb];
+                        let o = [0];
+
+                        (b, o)
+                    };
+                    self.renderer
+                        .device
+                        .cmd_bind_vertex_buffers(cmd, 0, &buffers, &offsets);
+                    self.renderer
+                        .device
+                        .cmd_bind_index_buffer(cmd, ib, 0, vk::IndexType::UINT32);
 
                     self.renderer.device.cmd_draw_indexed_indirect(
                         cmd,
-                        self.indirect_command_buffer.handle,
+                        self.renderer.cmd_buffer.handle,
                         0,
-                        self.draw_command_count,
-                        std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u32
+                        self.renderer.cmd_count,
+                        std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u32,
                     );
                 };
 
