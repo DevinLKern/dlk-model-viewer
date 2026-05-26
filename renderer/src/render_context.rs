@@ -1,199 +1,332 @@
 use ash::vk;
+use math::Mat4;
 use std::rc::Rc;
 use vulkan::{Pipeline, device::SharedDeviceRef};
 
-use crate::CameraUBO;
+use crate::{CameraUBO, InstanceData};
+
+pub const MAX_FRAME_COUNT: u64 = 3;
+pub const MAX_CAMERA_DATA_COUNT: u64 = 32;
+pub const MAX_INSTANCE_DATA_COUNT: u64 = 128;
+pub const MAX_INDIRECT_COMMAND_DATA_COUNT: u64 = MAX_INSTANCE_DATA_COUNT * 4;
+
+#[allow(dead_code)]
+pub struct FrameData {
+    device: SharedDeviceRef,
+    command_buffer_executed: vk::Fence,
+    image_acquired: vk::Semaphore,
+    render_complete: vk::Semaphore,
+    command_pool: vk::CommandPool,
+    command_buffer: vk::CommandBuffer,
+    descriptor_set: vk::DescriptorSet,
+    camera_data_element_size: u64,
+    camera_data_count: u64,
+    camera_data: vulkan::Buffer,
+    instance_data_element_size: u64,
+    instance_data_count: u64,
+    instance_data: vulkan::Buffer,
+    indirect_command_data_element_size: u64,
+    indirect_command_data_count: u64,
+    indirect_command_data: vulkan::Buffer,
+}
+
+#[allow(unused)]
+impl FrameData {
+    pub fn new(device: SharedDeviceRef, descriptor_set: vk::DescriptorSet) -> crate::Result<Self> {
+        let (camera_data, camera_data_element_size) = {
+            let element_size = {
+                let size = std::mem::size_of::<CameraUBO>() as u64;
+                let properties = unsafe { device.get_physical_device_properties() };
+
+                size.next_multiple_of(properties.limits.min_uniform_buffer_offset_alignment)
+            };
+
+            let buffer_create_info = vulkan::BufferCreateInfo {
+                size: element_size * MAX_CAMERA_DATA_COUNT,
+                usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
+                memory_property_flags: vk::MemoryPropertyFlags::HOST_COHERENT | vk::MemoryPropertyFlags::HOST_VISIBLE
+            };
+            let buffer = vulkan::Buffer::new(device.clone(), &buffer_create_info)?;
+
+            (buffer, element_size)
+        };
+
+        let (instance_data, instance_data_element_size) = {
+            let element_size = {
+                let size = std::mem::size_of::<InstanceData>() as u64;
+                let properties = unsafe { device.get_physical_device_properties() };
+
+                size.next_multiple_of(properties.limits.min_storage_buffer_offset_alignment)
+            };
+
+            let buffer_create_info = vulkan::BufferCreateInfo {
+                size: element_size * MAX_INSTANCE_DATA_COUNT,
+                usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+                memory_property_flags: vk::MemoryPropertyFlags::HOST_COHERENT | vk::MemoryPropertyFlags::HOST_VISIBLE
+            };
+            let buffer = vulkan::Buffer::new(device.clone(), &buffer_create_info)?;
+
+            (buffer, element_size)
+        };
+
+        let (indirect_command_data, indirect_command_data_element_size) = {
+            let element_size = std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u64;
+
+            let buffer_create_info = vulkan::BufferCreateInfo {
+                size: element_size * MAX_INDIRECT_COMMAND_DATA_COUNT,
+                usage: vk::BufferUsageFlags::INDIRECT_BUFFER,
+                memory_property_flags: vk::MemoryPropertyFlags::HOST_COHERENT | vk::MemoryPropertyFlags::HOST_VISIBLE
+            };
+            let buffer = vulkan::Buffer::new(device.clone(), &buffer_create_info)?;
+
+            (buffer, element_size)
+        };
+
+        {
+            let camera_buffer_info = [
+                vk::DescriptorBufferInfo {
+                    buffer: camera_data.handle,
+                    offset: 0,
+                    range: camera_data_element_size,
+                },
+            ];
+            let instance_buffer_info = [
+                vk::DescriptorBufferInfo {
+                    buffer: instance_data.handle,
+                    offset: 0,
+                    range: instance_data.size,
+                }
+            ];
+            let writes = [
+                vk::WriteDescriptorSet {
+                    dst_set: descriptor_set,
+                    dst_binding: 0,
+                    dst_array_element: 0,
+                    descriptor_count: 1,
+                    p_buffer_info: camera_buffer_info.as_ptr(),
+                    descriptor_type: vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
+                    ..Default::default()
+                },
+                vk::WriteDescriptorSet {
+                    dst_set: descriptor_set,
+                    dst_binding: 1,
+                    dst_array_element: 0,
+                    descriptor_count: 1,
+                    p_buffer_info: instance_buffer_info.as_ptr(),
+                    descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+                    ..Default::default()
+                }
+            ];
+            unsafe { device.update_descriptor_sets(&writes, &[]); }
+        }
+
+        let command_buffer_executed = {
+            let create_info = vk::FenceCreateInfo {
+                flags: vk::FenceCreateFlags::SIGNALED,
+                ..Default::default()
+            };
+            unsafe { device.create_fence(&create_info) }?
+        };
+
+        let image_acquired = {
+            let create_info = vk::SemaphoreCreateInfo {
+                ..Default::default()
+            };
+            unsafe { device.create_semaphore(&create_info) }.inspect_err(|_| {
+                unsafe {
+                    device.destroy_fence(command_buffer_executed);
+                }
+            })?
+        };
+
+        let render_complete = {
+            let create_info = vk::SemaphoreCreateInfo {
+                ..Default::default()
+            };
+            unsafe { device.create_semaphore(&create_info) }.inspect_err(|_| {
+                unsafe {
+                    device.destroy_semaphore(image_acquired);
+                    device.destroy_fence(command_buffer_executed);
+                }
+            })?
+        };
+
+        let (command_pool, command_buffer) = {
+            let command_pool = {
+                let create_info = vk::CommandPoolCreateInfo {
+                    queue_family_index: device.get_queue_family_index(),
+                    flags: vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+                    ..Default::default()
+                };
+
+                unsafe { device.create_command_pool(&create_info) }.inspect_err(|_| {
+                    unsafe {
+                        device.destroy_semaphore(render_complete);
+                        device.destroy_semaphore(image_acquired);
+                        device.destroy_fence(command_buffer_executed);
+                    }
+                })?
+            };
+
+            let command_buffer = {
+                let allocate_info = vk::CommandBufferAllocateInfo {
+                    command_pool,
+                    command_buffer_count: 1,
+                    level: vk::CommandBufferLevel::PRIMARY,
+                    ..Default::default()
+                };
+
+                let buffers = unsafe { device.allocate_command_buffers(&allocate_info) }.inspect_err(|_| {
+                    unsafe {
+                        device.destroy_command_pool(command_pool);
+                        device.destroy_semaphore(render_complete);
+                        device.destroy_semaphore(image_acquired);
+                        device.destroy_fence(command_buffer_executed);
+                    }
+                })?;
+                buffers[0]
+            };
+
+            (command_pool, command_buffer)
+        };
+
+        Ok(Self{
+            device,
+            command_buffer_executed,
+            image_acquired,
+            render_complete,
+            command_pool,
+            command_buffer,
+            descriptor_set,
+            camera_data_element_size,
+            camera_data_count: 0,
+            camera_data,
+            instance_data_element_size,
+            instance_data_count: 0,
+            instance_data,
+            indirect_command_data_element_size,
+            indirect_command_data_count: 0,
+            indirect_command_data,
+        })
+    }
+    #[inline]
+    pub fn reset_camera_data(&mut self) {
+        self.camera_data_count = 0;
+    }
+    // returns an OFFSET into the camera_data buffer
+    pub fn add_camera_data(&mut self, data: CameraUBO) -> crate::Result<u64> {
+        let offset = self.camera_data_element_size * self.camera_data_count;
+
+        unsafe {
+            let dst = self.camera_data.map_memory(offset, self.camera_data_element_size)?;
+            let dst = dst as *mut CameraUBO;
+
+            *dst = data;
+
+            self.camera_data.unmap();
+        }
+
+        self.camera_data_count += 1;
+
+        Ok(offset)
+    }
+    #[inline]
+    pub fn reset_instance_data(&mut self) {
+        self.instance_data_count = 0;
+    }
+    // returns an INDEX into the instance_data buffer
+    pub fn add_instance_data(&mut self, model_matrix: Mat4<f32>, material_index: u32) -> crate::Result<u64> {
+        let normal_matrix = model_matrix.as_mat3().transposed().inverse().unwrap().as_mat4(1.0).into_2d_arr();
+        let model_matrix = model_matrix.into_2d_arr();
+        let data = InstanceData { model_matrix, normal_matrix, material_index, _pad0: 0, _pad1: 0, _pad2: 0 };
+
+        let index = self.instance_data_count;
+
+        unsafe {
+            let offset = self.instance_data_element_size * self.instance_data_count;
+            let dst = self.instance_data.map_memory(offset, self.instance_data_element_size)?;
+            let dst = dst as *mut InstanceData;
+
+            *dst = data;
+
+            self.instance_data.unmap();
+        }
+
+        self.instance_data_count += 1;
+
+        Ok(index)
+    }
+    #[inline]
+    pub fn reset_indirect_command_data(&mut self) {
+        self.indirect_command_data_count = 0;
+    }
+    // returns an INDEX into the indirect_command_data buffer
+    pub fn add_indirect_command_data(&mut self, data: vk::DrawIndexedIndirectCommand) -> crate::Result<u64> {
+        let index = self.indirect_command_data_count;
+
+        unsafe {
+            let offset = self.indirect_command_data_element_size * self.indirect_command_data_count;
+            let dst = self.indirect_command_data.map_memory(offset, self.indirect_command_data_element_size)?;
+            let dst = dst as *mut vk::DrawIndexedIndirectCommand;
+
+            *dst = data;
+
+            self.indirect_command_data.unmap();
+        }
+
+        self.indirect_command_data_count += 1;
+
+        Ok(index)
+    }
+    #[inline]
+    pub fn indirect_command_data(&self) -> &vulkan::Buffer {
+        &self.indirect_command_data
+    }
+    #[inline]
+    pub fn indirect_command_data_count(&self) -> u64 {
+        self.indirect_command_data_count
+    }
+    #[inline]
+    pub fn descriptor_set(&self) -> vk::DescriptorSet {
+        self.descriptor_set
+    }
+}
+
+impl Drop for FrameData {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.destroy_command_pool(self.command_pool);
+            self.device.destroy_fence(self.command_buffer_executed);
+            self.device.destroy_semaphore(self.image_acquired);
+            self.device.destroy_semaphore(self.render_complete);
+        }
+    }
+}
 
 #[allow(dead_code)]
 pub struct RenderContext {
-    swapchain: vulkan::Swapchain,
     device: SharedDeviceRef,
-    command_buffer_executed: Box<[vk::Fence]>,
-    image_acquired: Box<[vk::Semaphore]>,
-    render_complete: Box<[vk::Semaphore]>,
-    command_infos: Box<[(vk::CommandPool, vk::CommandBuffer)]>,
+    swapchain: vulkan::Swapchain,
     depth_images: Box<[vulkan::Image]>,
     pipeline: Rc<vulkan::Pipeline>,
-    pub per_frame_buffer_element_size: u32,
-    per_frame_buffer: vulkan::Buffer,
+    descriptor_pool: vk::DescriptorPool,
+    frames: Box<[FrameData]>,
     pub index: usize,
 }
-
-pub const MAX_FRAME_COUNT: usize = 3;
 
 impl RenderContext {
     pub fn new(
         device: SharedDeviceRef,
         pipeline_layout: Rc<vulkan::PipelineLayout>,
         window: &winit::window::Window,
-        per_frame_ds: vk::DescriptorSet,
+        per_frame_ds_layout: vk::DescriptorSetLayout,
     ) -> crate::Result<RenderContext> {
         let swapchain = vulkan::Swapchain::new(device.clone(), window)
             .inspect_err(|e| tracing::error!("{e}"))?;
 
-        let command_buffer_executed = {
-            let mut fences: Vec<vk::Fence> = Vec::with_capacity(MAX_FRAME_COUNT);
-            for _ in 0..MAX_FRAME_COUNT {
-                let fence_create_info = ash::vk::FenceCreateInfo {
-                    flags: vk::FenceCreateFlags::SIGNALED,
-                    ..Default::default()
-                };
-                let fence =
-                    unsafe { device.create_fence(&fence_create_info) }.inspect_err(|e| {
-                        tracing::error!("{e}");
-                        unsafe {
-                            for f in fences.iter() {
-                                device.destroy_fence(*f);
-                            }
-                        }
-                    })?;
-                fences.push(fence);
-            }
-
-            fences.into_boxed_slice()
-        };
-
-        let (per_frame_buffer, per_frame_buffer_element_size) = {
-            let element_size = {
-                let struct_size = std::mem::size_of::<CameraUBO>();
-
-                let properties = unsafe { device.get_physical_device_properties() };
-
-                struct_size.next_multiple_of(
-                    properties.limits.min_uniform_buffer_offset_alignment as usize,
-                )
-            };
-
-            let buffer = {
-                let buffer_size = element_size * MAX_FRAME_COUNT;
-
-                let buffer_create_info = vulkan::BufferCreateInfo {
-                    size: buffer_size as u64,
-                    usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
-                    memory_property_flags: vk::MemoryPropertyFlags::HOST_COHERENT
-                        | vk::MemoryPropertyFlags::HOST_VISIBLE,
-                };
-
-                vulkan::Buffer::new(device.clone(), &buffer_create_info)?
-            };
-
-            let buffer_info = vk::DescriptorBufferInfo {
-                buffer: buffer.handle,
-                offset: 0,
-                range: element_size as u64,
-            };
-
-            let writes = [vk::WriteDescriptorSet {
-                dst_set: per_frame_ds,
-                dst_binding: 0,
-                descriptor_count: 1,
-                descriptor_type: vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
-                p_buffer_info: &buffer_info,
-                ..Default::default()
-            }];
-
-            unsafe {
-                device.update_descriptor_sets(&writes, &[]);
-            }
-
-            (buffer, element_size)
-        };
-
-        let (image_acquired, render_complete) = {
-            let mut semaphores = Vec::with_capacity(swapchain.get_image_count() + MAX_FRAME_COUNT);
-
-            for _ in 0..(swapchain.get_image_count() + MAX_FRAME_COUNT) {
-                let semaphore_create_info = vk::SemaphoreCreateInfo {
-                    ..Default::default()
-                };
-                let semaphore = unsafe { device.create_semaphore(&semaphore_create_info) }
-                    .inspect_err(|e| {
-                        tracing::error!("{}", e);
-                        unsafe {
-                            for s in semaphores.iter() {
-                                device.destroy_semaphore(*s);
-                            }
-                            for fence in command_buffer_executed.iter() {
-                                device.destroy_fence(*fence);
-                            }
-                        }
-                    })?;
-                semaphores.push(semaphore);
-            }
-
-            let completed = semaphores.split_off(MAX_FRAME_COUNT).into_boxed_slice();
-
-            (semaphores.into_boxed_slice(), completed)
-        };
-
-        let command_infos = {
-            let mut infos = Vec::with_capacity(MAX_FRAME_COUNT);
-
-            for _ in 0..MAX_FRAME_COUNT {
-                let pool = {
-                    let pool_create_info = vk::CommandPoolCreateInfo {
-                        flags: vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-                        queue_family_index: device.get_queue_family_index(),
-                        ..Default::default()
-                    };
-
-                    unsafe { device.create_command_pool(&pool_create_info) }.inspect_err(|e| {
-                        tracing::error!("{}", e);
-                        unsafe {
-                            for semaphore in image_acquired.iter() {
-                                device.destroy_semaphore(*semaphore);
-                            }
-                            for semaphore in render_complete.iter() {
-                                device.destroy_semaphore(*semaphore);
-                            }
-                            for fence in command_buffer_executed.iter() {
-                                device.destroy_fence(*fence);
-                            }
-                        }
-                    })?
-                };
-                let buffer = {
-                    let buffer_allocate_info = ash::vk::CommandBufferAllocateInfo {
-                        command_pool: pool,
-                        command_buffer_count: 1,
-                        level: vk::CommandBufferLevel::PRIMARY,
-                        ..Default::default()
-                    };
-
-                    let buffers = unsafe { device.allocate_command_buffers(&buffer_allocate_info) }
-                        .inspect_err(|e| {
-                            tracing::error!("{}", e);
-                            unsafe {
-                                device.destroy_command_pool(pool);
-                                for (pool, buffer) in infos.iter() {
-                                    device.free_command_buffers(*pool, &[*buffer]);
-                                    device.destroy_command_pool(*pool);
-                                }
-                                for semaphore in image_acquired.iter() {
-                                    device.destroy_semaphore(*semaphore);
-                                }
-                                for semaphore in render_complete.iter() {
-                                    device.destroy_semaphore(*semaphore);
-                                }
-                                for fence in command_buffer_executed.iter() {
-                                    device.destroy_fence(*fence);
-                                }
-                            }
-                        })?;
-
-                    buffers[0]
-                };
-
-                infos.push((pool, buffer));
-            }
-
-            infos.into_boxed_slice()
-        };
-
         let depth_stencil_format = device
             .find_viable_depth_stencil_format()
-            .ok_or(vulkan::result::Error::CouldNotDetermineFormat)
-            .inspect_err(|e| tracing::error!("{}", e))?;
+            .ok_or(vulkan::result::Error::CouldNotDetermineFormat)?;
 
         let depth_images = {
             let mut images = Vec::with_capacity(swapchain.get_image_count());
@@ -213,24 +346,7 @@ impl RenderContext {
 
             for _ in 0..swapchain.get_image_count() {
                 let image = vulkan::image::Image::new(device.clone(), &depth_image_create_info)
-                    .inspect_err(|e| {
-                        tracing::error!("{}", e);
-                        unsafe {
-                            for (pool, buffer) in command_infos.iter() {
-                                device.free_command_buffers(*pool, &[*buffer]);
-                                device.destroy_command_pool(*pool);
-                            }
-                            for semaphore in image_acquired.iter() {
-                                device.destroy_semaphore(*semaphore);
-                            }
-                            for semaphore in render_complete.iter() {
-                                device.destroy_semaphore(*semaphore);
-                            }
-                            for fence in command_buffer_executed.iter() {
-                                device.destroy_fence(*fence);
-                            }
-                        }
-                    })?;
+                    .inspect_err(|e| tracing::error!("{}", e))?;
                 images.push(image);
             }
 
@@ -403,17 +519,65 @@ impl RenderContext {
             )?)
         };
 
+         let (descriptor_pool, descriptor_sets) = {
+            let descriptor_pool = {
+                let pool_sizes = [
+                    vk::DescriptorPoolSize {
+                        ty: vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
+                        descriptor_count: MAX_FRAME_COUNT as u32,
+                    },
+                    vk::DescriptorPoolSize {
+                        ty: vk::DescriptorType::STORAGE_BUFFER,
+                        descriptor_count: MAX_FRAME_COUNT as u32,
+                    },
+                ];
+                let create_info = vk::DescriptorPoolCreateInfo {
+                    max_sets: MAX_FRAME_COUNT as u32,
+                    p_pool_sizes: pool_sizes.as_ptr(),
+                    pool_size_count: pool_sizes.len() as u32,
+                    ..Default::default()
+                };
+
+                unsafe { device.create_descriptor_pool(&create_info) }?
+            };
+
+            let descriptor_sets = {
+                let set_layouts = [per_frame_ds_layout; MAX_FRAME_COUNT as usize];
+                let allocate_info = vk::DescriptorSetAllocateInfo {
+                    descriptor_pool,
+                    descriptor_set_count: set_layouts.len() as u32,
+                    p_set_layouts: set_layouts.as_ptr(),
+                    ..Default::default()
+                };
+
+                unsafe { device.allocate_descriptor_sets(&allocate_info) }.inspect_err(|e| {
+                    tracing::error!("{e}");
+                    unsafe {
+                        device.destroy_descriptor_pool(descriptor_pool);
+                    }
+                })?
+            };
+            
+            (descriptor_pool, descriptor_sets)
+        };
+
+        let mut frames = Vec::<FrameData>::with_capacity(MAX_FRAME_COUNT as usize);
+        for descriptor_set in descriptor_sets {
+            let frame = FrameData::new(device.clone(), descriptor_set).inspect_err(|_| {
+                unsafe {
+                    device.destroy_descriptor_pool(descriptor_pool);
+                }
+            })?;
+            frames.push(frame);
+        }
+
         Ok(RenderContext {
             device,
             swapchain,
-            command_buffer_executed,
-            image_acquired,
-            render_complete,
-            command_infos,
+            frames: frames.into_boxed_slice(),
             depth_images,
             pipeline,
-            per_frame_buffer_element_size: per_frame_buffer_element_size as u32,
-            per_frame_buffer,
+            descriptor_pool,
             index: 0,
         })
     }
@@ -424,19 +588,7 @@ impl Drop for RenderContext {
         unsafe {
             let _ = self.device.device_wait_idle();
 
-            for (pool, buffer) in self.command_infos.iter_mut() {
-                self.device.free_command_buffers(*pool, &[*buffer]);
-                self.device.destroy_command_pool(*pool);
-            }
-            for semaphore in self.render_complete.iter_mut() {
-                self.device.destroy_semaphore(*semaphore);
-            }
-            for semaphore in self.image_acquired.iter_mut() {
-                self.device.destroy_semaphore(*semaphore);
-            }
-            for fence in self.command_buffer_executed.iter_mut() {
-                self.device.destroy_fence(*fence);
-            }
+            self.device.destroy_descriptor_pool(self.descriptor_pool);
         }
     }
 }
@@ -445,38 +597,23 @@ impl RenderContext {
     pub fn get_pipeline(&self) -> Rc<vulkan::Pipeline> {
         self.pipeline.clone()
     }
-    pub fn update_camera(&self, camera_ubo: crate::CameraUBO) -> crate::Result<()> {
-        let element_size = {
-            let struct_size = std::mem::size_of::<CameraUBO>() as vk::DeviceSize;
-
-            let properties = unsafe { self.device.get_physical_device_properties() };
-
-            struct_size.next_multiple_of(
-                properties.limits.min_uniform_buffer_offset_alignment as vk::DeviceSize,
-            )
-        };
-
-        let offset = self.index as vk::DeviceSize * element_size;
-
-        unsafe {
-            let dst = self.per_frame_buffer.map_memory(offset, element_size)? as *mut CameraUBO;
-
-            *dst = camera_ubo;
-
-            self.per_frame_buffer.unmap();
-        }
-
-        Ok(())
+    pub fn get_current_frame(&self) -> &FrameData {
+        &self.frames[self.index]
+    }
+    pub fn get_current_frame_mut(&mut self) -> &mut FrameData {
+        &mut self.frames[self.index]
     }
     pub unsafe fn draw<F>(&mut self, record_draw_commands: F) -> vulkan::result::Result<()>
     where
         F: FnOnce(vk::CommandBuffer),
     {
+        let frame = self.get_current_frame();
+        
         // Acquire image
         let (swapchain_image_index, swapchain_image_view) = {
             unsafe {
                 self.device.wait_for_fences(
-                    &[self.command_buffer_executed[self.index]],
+                    &[frame.command_buffer_executed],
                     true,
                     u64::MAX,
                 )?
@@ -484,20 +621,18 @@ impl RenderContext {
 
             let (image_index, _) = unsafe {
                 self.swapchain
-                    .acquire_next_image(self.image_acquired[self.index], vk::Fence::null())?
+                    .acquire_next_image(frame.image_acquired, vk::Fence::null())?
             };
 
             unsafe {
                 self.device
-                    .reset_fences(&[self.command_buffer_executed[self.index]])?
+                    .reset_fences(&[frame.command_buffer_executed])?
             };
             (
                 image_index as usize,
                 self.swapchain.get_image_view(image_index as usize).unwrap(),
             )
         };
-
-        let (_, command_buffer) = self.command_infos.get(self.index).unwrap();
 
         // Begin command buffer
         let begin_info = vk::CommandBufferBeginInfo {
@@ -508,10 +643,10 @@ impl RenderContext {
         unsafe {
             // Reset the command buffer (requires pool/reset capability)
             self.device
-                .reset_command_buffer(*command_buffer, vk::CommandBufferResetFlags::empty())?;
+                .reset_command_buffer(frame.command_buffer, vk::CommandBufferResetFlags::empty())?;
 
             self.device
-                .begin_command_buffer(*command_buffer, &begin_info)?;
+                .begin_command_buffer(frame.command_buffer, &begin_info)?;
         }
 
         {
@@ -558,7 +693,7 @@ impl RenderContext {
             };
             unsafe {
                 self.device
-                    .cmd_pipeline_barrier2(*command_buffer, &dependency_info)
+                    .cmd_pipeline_barrier2(frame.command_buffer, &dependency_info)
             };
         }
 
@@ -619,19 +754,19 @@ impl RenderContext {
             };
             unsafe {
                 self.device
-                    .cmd_begin_rendering(*command_buffer, &rendering_info);
+                    .cmd_begin_rendering(frame.command_buffer, &rendering_info);
 
                 self.device
-                    .cmd_set_viewport(*command_buffer, 0, &[viewport]);
-                self.device.cmd_set_scissor(*command_buffer, 0, &[scissor]);
+                    .cmd_set_viewport(frame.command_buffer, 0, &[viewport]);
+                self.device.cmd_set_scissor(frame.command_buffer, 0, &[scissor]);
             };
         }
 
-        record_draw_commands(*command_buffer);
+        record_draw_commands(frame.command_buffer);
 
         // End rendering & end command buffer
         unsafe {
-            self.device.cmd_end_rendering(*command_buffer);
+            self.device.cmd_end_rendering(frame.command_buffer);
         }
 
         // Barrier to transition for pres
@@ -661,22 +796,22 @@ impl RenderContext {
 
             unsafe {
                 self.device
-                    .cmd_pipeline_barrier2(*command_buffer, &dependency_info)
+                    .cmd_pipeline_barrier2(frame.command_buffer, &dependency_info)
             };
         }
 
         unsafe {
             self.device
-                .end_command_buffer(*command_buffer)
+                .end_command_buffer(frame.command_buffer)
                 .inspect_err(|e| tracing::error!("{}", e))?;
         }
 
         // Submit
         {
             let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-            let wait_semaphores = [self.image_acquired[self.index]];
-            let signal_semaphores = [self.render_complete[self.index]];
-            let command_buffers = [*command_buffer];
+            let wait_semaphores = [frame.image_acquired];
+            let signal_semaphores = [frame.render_complete];
+            let command_buffers = [frame.command_buffer];
 
             let submit_info = vk::SubmitInfo {
                 wait_semaphore_count: wait_semaphores.len() as u32,
@@ -693,7 +828,7 @@ impl RenderContext {
                 self.device.queue_submit(
                     self.device.queue,
                     &[submit_info],
-                    *self.command_buffer_executed.get(self.index).unwrap(),
+                    frame.command_buffer_executed,
                 )?
             };
 

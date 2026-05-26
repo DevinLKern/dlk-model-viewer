@@ -19,7 +19,7 @@ struct InstanceData {
     uint _pad2;
 };
 
-layout(std430, set = 1, binding = 0) buffer InstanceBuffer {
+layout(std430, set = 0, binding = 1) buffer InstanceBuffer {
     InstanceData arr [];
 } instances;
 

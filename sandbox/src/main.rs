@@ -123,15 +123,12 @@ impl Application {
             (count, mtl_materials.len() as u64)
         };
 
-        let shape_count: u64 = objf.get_shapes().map(|_| 1).sum();
-
         // TODO: one is added to account for the plane, default texture, and default material.
         // However, this is very unsafe. add bounds checks and return errors instead of crashing
         // or printing validation error info.
         let mut renderer = renderer::Renderer::new(
             debug_enabled,
             display_handle,
-            shape_count + 4,
             texture_count + 1,
             material_count + 4,
         )?;
@@ -720,42 +717,39 @@ impl Application {
                     .get_mut(window_id)
                     .ok_or(Error::WindowIdInvalid)?;
 
-                match self.camera_in_use {
-                    CameraInUse::Fps => {
-                        let camera_ubo = renderer::CameraUBO {
-                            view_matrix: self.fps_camera.view_matrix().into_2d_arr(),
-                            proj_matrix: self.fps_camera.projection_matrix().into_2d_arr(),
-                        };
-                        context.update_camera(camera_ubo)?;
-                    }
-                    CameraInUse::Orbit => {
-                        let camera_ubo = renderer::CameraUBO {
-                            view_matrix: self.orbit_camera.view_matrix().into_2d_arr(),
-                            proj_matrix: self.orbit_camera.projection_matrix().into_2d_arr(),
-                        };
-                        context.update_camera(camera_ubo)?;
-                    }
-                }
-
-                let pipeline = context.get_pipeline();
-
-                let temp = context.index as u32 * context.per_frame_buffer_element_size;
-
                 // upload instance data into buffer
-                {
-                    self.renderer.reset_commands();
-                    self.renderer.reset_instance_buffer();
+                let (camera_offset, indirect_command_data, indirect_command_data_count, per_frame_descriptor_set) = {
 
-                    let first_instance = self
-                        .renderer
-                        .add_instance(self.x_arrow_transform.as_mat4(), self.red_material_index)?;
-                    self.renderer.add_instance(
+                    let frame = context.get_current_frame_mut();
+                    frame.reset_indirect_command_data();
+                    frame.reset_instance_data();
+                    frame.reset_camera_data();
+                    
+                    let camera_data = match self.camera_in_use {
+                        CameraInUse::Fps => {
+                            renderer::CameraUBO {
+                                view_matrix: self.fps_camera.view_matrix().into_2d_arr(),
+                                proj_matrix: self.fps_camera.projection_matrix().into_2d_arr(),
+                            }
+                        }
+                        CameraInUse::Orbit => {
+                            renderer::CameraUBO {
+                                view_matrix: self.orbit_camera.view_matrix().into_2d_arr(),
+                                proj_matrix: self.orbit_camera.projection_matrix().into_2d_arr(),
+                            }
+                        }
+                    };
+                    let camera_offset = frame.add_camera_data(camera_data)? as u32;
+                    
+                    let first_instance = frame
+                        .add_instance_data(self.x_arrow_transform.as_mat4(), self.red_material_index)? as u32;
+                    frame.add_instance_data(
                         self.y_arrow_transform.as_mat4(),
                         self.green_material_index,
                     )?;
-                    self.renderer
-                        .add_instance(self.z_arrow_transform.as_mat4(), self.blue_material_index)?;
-                    self.renderer.add_command(vk::DrawIndexedIndirectCommand {
+                    frame
+                        .add_instance_data(self.z_arrow_transform.as_mat4(), self.blue_material_index)?;
+                    frame.add_indirect_command_data(vk::DrawIndexedIndirectCommand {
                         index_count: self.arrow_submesh.index_count,
                         instance_count: 3,
                         first_instance,
@@ -764,10 +758,9 @@ impl Application {
                     })?;
 
                     for (submesh, material_index) in self.model_submeshes.iter() {
-                        let first_instance = self
-                            .renderer
-                            .add_instance(self.model_transform.as_mat4(), *material_index)?;
-                        self.renderer.add_command(vk::DrawIndexedIndirectCommand {
+                        let first_instance = frame
+                            .add_instance_data(self.model_transform.as_mat4(), *material_index)? as u32;
+                        frame.add_indirect_command_data(vk::DrawIndexedIndirectCommand {
                             index_count: submesh.index_count,
                             instance_count: 1,
                             first_index: submesh.first_index,
@@ -775,39 +768,32 @@ impl Application {
                             first_instance,
                         })?;
                     }
-                }
+
+                    (camera_offset, frame.indirect_command_data().handle, frame.indirect_command_data_count(), frame.descriptor_set())
+                };
+
+                let pipeline = context.get_pipeline();
 
                 let record_draw_commands = |cmd: vk::CommandBuffer| unsafe {
                     pipeline.bind(cmd);
                     {
-                        let sets = [self.renderer.descriptor_sets[0]];
+                        let sets = [per_frame_descriptor_set];
                         self.renderer.device.cmd_bind_descriptor_sets(
                             cmd,
                             self.renderer.pipeline_layout.bind_point,
                             self.renderer.pipeline_layout.handle,
                             0,
                             &sets,
-                            &[temp],
+                            &[camera_offset],
                         );
                     }
                     {
-                        let sets = [self.renderer.descriptor_sets[1]];
+                        let sets = [self.renderer.other_descriptor_set()];
                         self.renderer.device.cmd_bind_descriptor_sets(
                             cmd,
                             self.renderer.pipeline_layout.bind_point,
                             self.renderer.pipeline_layout.handle,
                             1,
-                            &sets,
-                            &[],
-                        );
-                    }
-                    {
-                        let sets = [self.renderer.descriptor_sets[2]];
-                        self.renderer.device.cmd_bind_descriptor_sets(
-                            cmd,
-                            self.renderer.pipeline_layout.bind_point,
-                            self.renderer.pipeline_layout.handle,
-                            2,
                             &sets,
                             &[],
                         );
@@ -839,9 +825,9 @@ impl Application {
 
                     self.renderer.device.cmd_draw_indexed_indirect(
                         cmd,
-                        self.renderer.cmd_buffer.handle,
+                        indirect_command_data,
                         0,
-                        self.renderer.cmd_count,
+                        indirect_command_data_count as u32,
                         std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u32,
                     );
                 };

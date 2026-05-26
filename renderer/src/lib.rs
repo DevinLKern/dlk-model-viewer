@@ -16,8 +16,6 @@ use std::rc::Rc;
 use std::u64;
 use vulkan::device::SharedDeviceRef;
 
-use crate::render_context::MAX_FRAME_COUNT;
-const MAX_COMMAND_COUNT: usize = 1024;
 
 unsafe extern "system" fn vulkan_debug_callback(
     message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
@@ -64,22 +62,21 @@ pub const MAX_MATERIALS: u32 = 32;
 pub struct Renderer {
     pub device: SharedDeviceRef,
     pub pipeline_layout: Rc<vulkan::PipelineLayout>,
+
     command_pool: vk::CommandPool,
-    descriptor_pool: vk::DescriptorPool,
+    
     per_frame_ds_layout: vk::DescriptorSetLayout,
-    per_obj_ds_layout: vk::DescriptorSetLayout,
     other_ds_layout: vk::DescriptorSetLayout,
-    pub descriptor_sets: Box<[vk::DescriptorSet]>,
-    pub model_transform_buffer: vulkan::Buffer,
-    model_transform_index: u64,
-    model_transform_buffer_element_size: u64,
-    pub cmd_count: u32,
-    pub cmd_buffer: vulkan::Buffer,
+    descriptor_pool: vk::DescriptorPool,
+    other_descriptor_set: vk::DescriptorSet,
+
     global_light_buffer: vulkan::Buffer,
     textures: Vec<vulkan::Image>,
+
+    material_buffer_element_size: u64,
     material_buffer: vulkan::Buffer,
     material_buffer_offset: u64,
-    pub material_buffer_element_size: u64,
+
     repeat_sampler: vk::Sampler,
     mesh_arenas: slotmap::DenseSlotMap<MeshArenaHandle, MeshArena>,
 }
@@ -88,7 +85,6 @@ impl Renderer {
     pub fn new(
         debug_enabled: bool,
         display_handle: &winit::raw_window_handle::DisplayHandle,
-        model_transform_capacity: u64,
         texture_capacity: u64,
         material_capacity: u64,
     ) -> result::Result<Renderer> {
@@ -106,31 +102,6 @@ impl Renderer {
         };
 
         let textures = Vec::<vulkan::Image>::with_capacity(texture_capacity as usize);
-
-        let (model_transform_buffer, model_transform_buffer_element_size) = {
-            let element_size = {
-                let ubo_size = std::mem::size_of::<crate::InstanceData>();
-
-                // let properties = unsafe { device.get_physical_device_properties() };
-
-                // ubo_size.next_multiple_of(
-                //     properties.limits.min_storage_buffer_offset_alignment as usize,
-                // );
-
-                ubo_size
-            };
-
-            let model_transform_buffer_create_info = vulkan::BufferCreateInfo {
-                size: element_size as u64 * model_transform_capacity,
-                usage: vk::BufferUsageFlags::STORAGE_BUFFER,
-                memory_property_flags: vk::MemoryPropertyFlags::HOST_VISIBLE
-                    | vk::MemoryPropertyFlags::HOST_COHERENT,
-            };
-
-            let buffer = vulkan::Buffer::new(device.clone(), &model_transform_buffer_create_info)?;
-
-            (buffer, element_size)
-        };
 
         let global_light_buffer = {
             let element_size = {
@@ -184,17 +155,15 @@ impl Renderer {
                 descriptor_count: 1,
                 stage_flags: vk::ShaderStageFlags::VERTEX,
                 ..Default::default()
-            }],
-            // SET 1 - per obj
-            &[vk::DescriptorSetLayoutBinding {
-                binding: 0,
+            }, vk::DescriptorSetLayoutBinding {
+                binding: 1,
                 descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
                 descriptor_count: 1,
                 stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                 p_immutable_samplers: std::ptr::null(),
                 _marker: std::marker::PhantomData {},
             }],
-            // SET 2 - irregular updates
+            // SET 2 - other
             &[
                 //
                 vk::DescriptorSetLayoutBinding {
@@ -244,14 +213,10 @@ impl Renderer {
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                     descriptor_count: MAX_TEXTURES,
-                },
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
-                    descriptor_count: 2,
-                },
+                }
             ];
             let descrptor_pool_create_info = vk::DescriptorPoolCreateInfo {
-                max_sets: crate::MAX_FRAME_COUNT as u32 + MAX_MATERIALS + 1,
+                max_sets: 2,
                 pool_size_count: pool_sizes.len() as u32,
                 p_pool_sizes: pool_sizes.as_ptr(),
                 ..Default::default()
@@ -286,8 +251,8 @@ impl Renderer {
             )?
         };
 
-        let per_obj_ds_layout = {
-            // 1 == per obj index
+        let other_ds_layout = {
+            // 1 == other index
             let ds_layout_create_info = vk::DescriptorSetLayoutCreateInfo {
                 binding_count: ds_layout_bindings[1].len() as u32,
                 p_bindings: ds_layout_bindings[1].as_ptr(),
@@ -306,29 +271,8 @@ impl Renderer {
             )?
         };
 
-        let other_ds_layout = {
-            // 2 == other index
-            let ds_layout_create_info = vk::DescriptorSetLayoutCreateInfo {
-                binding_count: ds_layout_bindings[2].len() as u32,
-                p_bindings: ds_layout_bindings[2].as_ptr(),
-                ..Default::default()
-            };
-
-            unsafe { device.create_descriptor_set_layout(&ds_layout_create_info) }.inspect_err(
-                |e| {
-                    tracing::error!("{e}");
-                    unsafe {
-                        device.destroy_descriptor_set_layout(per_obj_ds_layout);
-                        device.destroy_descriptor_set_layout(per_frame_ds_layout);
-                        device.destroy_command_pool(command_pool);
-                        device.destroy_descriptor_pool(descriptor_pool);
-                    }
-                },
-            )?
-        };
-
-        let descriptor_sets = {
-            let ds_layouts = [per_frame_ds_layout, per_obj_ds_layout, other_ds_layout];
+        let other_descriptor_set = {
+            let ds_layouts = [other_ds_layout];
             let ds_create_info = vk::DescriptorSetAllocateInfo {
                 descriptor_pool,
                 descriptor_set_count: ds_layouts.len() as u32,
@@ -336,16 +280,17 @@ impl Renderer {
                 ..Default::default()
             };
 
-            unsafe { device.allocate_descriptor_sets(&ds_create_info) }.inspect_err(|e| {
+            let sets = unsafe { device.allocate_descriptor_sets(&ds_create_info) }.inspect_err(|e| {
                 tracing::error!("{e}");
                 unsafe {
-                    device.destroy_descriptor_set_layout(per_obj_ds_layout);
                     device.destroy_descriptor_set_layout(per_frame_ds_layout);
                     device.destroy_descriptor_set_layout(other_ds_layout);
                     device.destroy_command_pool(command_pool);
                     device.destroy_descriptor_pool(descriptor_pool);
                 }
-            })?
+            })?;
+
+            sets[0]
         };
 
         let repeat_sampler = {
@@ -368,7 +313,6 @@ impl Renderer {
             unsafe { device.create_sampler(&sampler_create_info) }.inspect_err(|e| {
                 tracing::error!("{e}");
                 unsafe {
-                    device.destroy_descriptor_set_layout(per_obj_ds_layout);
                     device.destroy_descriptor_set_layout(per_frame_ds_layout);
                     device.destroy_descriptor_set_layout(other_ds_layout);
                     device.destroy_command_pool(command_pool);
@@ -378,11 +322,6 @@ impl Renderer {
         };
 
         {
-            let per_obj_descriptor_set_info = vk::DescriptorBufferInfo {
-                buffer: model_transform_buffer.handle,
-                offset: 0,
-                range: model_transform_buffer_element_size as u64 * model_transform_capacity,
-            };
             let global_light_buffer_info = vk::DescriptorBufferInfo {
                 buffer: global_light_buffer.handle,
                 offset: 0,
@@ -398,15 +337,7 @@ impl Renderer {
             let writes = [
                 // set 0 updated in render_context.rs
                 vk::WriteDescriptorSet {
-                    dst_set: descriptor_sets[1],
-                    dst_binding: 0,
-                    descriptor_count: 1,
-                    descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
-                    p_buffer_info: &per_obj_descriptor_set_info,
-                    ..Default::default()
-                },
-                vk::WriteDescriptorSet {
-                    dst_set: descriptor_sets[2],
+                    dst_set: other_descriptor_set,
                     dst_binding: 0,
                     descriptor_count: 1,
                     descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
@@ -414,7 +345,7 @@ impl Renderer {
                     ..Default::default()
                 },
                 vk::WriteDescriptorSet {
-                    dst_set: descriptor_sets[2],
+                    dst_set: other_descriptor_set,
                     dst_binding: 2,
                     descriptor_count: 1,
                     descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
@@ -426,38 +357,20 @@ impl Renderer {
             unsafe { device.update_descriptor_sets(&writes, &[]) };
         }
 
-        let cmd_buffer = {
-            let buffer_create_info = vulkan::BufferCreateInfo {
-                size: (std::mem::size_of::<vk::DrawIndexedIndirectCommand>() * MAX_COMMAND_COUNT)
-                    as u64,
-                usage: vk::BufferUsageFlags::INDIRECT_BUFFER,
-                memory_property_flags: vk::MemoryPropertyFlags::HOST_COHERENT
-                    | vk::MemoryPropertyFlags::HOST_VISIBLE,
-            };
-
-            vulkan::Buffer::new(device.clone(), &buffer_create_info)?
-        };
-
         Ok(Renderer {
             device,
             pipeline_layout,
             command_pool,
             descriptor_pool,
             per_frame_ds_layout,
-            per_obj_ds_layout,
             other_ds_layout,
-            descriptor_sets: descriptor_sets.into_boxed_slice(),
-            model_transform_buffer,
-            model_transform_index: 0,
-            model_transform_buffer_element_size: model_transform_buffer_element_size as u64,
+            other_descriptor_set,
             global_light_buffer,
             textures,
             mesh_arenas: slotmap::DenseSlotMap::with_key(),
             material_buffer,
             material_buffer_offset: 0,
             material_buffer_element_size,
-            cmd_buffer,
-            cmd_count: 0,
             repeat_sampler,
         })
     }
@@ -466,7 +379,7 @@ impl Renderer {
             self.device.clone(),
             self.pipeline_layout.clone(),
             window,
-            self.descriptor_sets[0],
+            self.per_frame_ds_layout,
         )
     }
     pub fn update_world_light(
@@ -780,7 +693,7 @@ impl Renderer {
             image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
         }];
         let writes = [vk::WriteDescriptorSet {
-            dst_set: self.descriptor_sets[2],
+            dst_set: self.other_descriptor_set,
             dst_binding: 1,
             descriptor_count: image_infos.len() as u32,
             descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
@@ -815,70 +728,6 @@ impl Renderer {
         let res = self.material_buffer_offset / self.material_buffer_element_size;
         self.material_buffer_offset += self.material_buffer_element_size;
         Ok(res as u32)
-    }
-    pub fn add_instance(
-        &mut self,
-        model_matrix: math::Mat4<f32>,
-        material_index: u32,
-    ) -> Result<u32> {
-        let data = crate::InstanceData {
-            model_matrix: model_matrix.as_2d_arr(),
-            normal_matrix: model_matrix
-                .as_mat3()
-                .transposed()
-                .inverse()
-                .unwrap()
-                .into_mat4(1.0)
-                .as_2d_arr(),
-            material_index,
-            _pad0: 0,
-            _pad1: 0,
-            _pad2: 0,
-        };
-        let write_offset = self.model_transform_index * self.model_transform_buffer_element_size;
-        let write_size = self.model_transform_buffer_element_size;
-        let requested_end = write_offset + write_size;
-        if requested_end > self.model_transform_buffer.size {
-            return Err(Error::BufferCapacityExceeded {
-                buffer: "model_transform_buffer",
-                requested_end,
-                capacity: self.model_transform_buffer.size,
-            });
-        }
-
-        unsafe {
-            let dst = self
-                .model_transform_buffer
-                .map_memory(write_offset, write_size)?;
-            let src = &data;
-            std::ptr::copy_nonoverlapping(src, dst as *mut crate::InstanceData, 1);
-            self.model_transform_buffer.unmap();
-        }
-        let res = self.model_transform_index;
-        self.model_transform_index += 1;
-        Ok(res as u32)
-    }
-    #[inline]
-    pub fn reset_instance_buffer(&mut self) {
-        self.model_transform_index = 0;
-    }
-    pub fn add_command(&mut self, cmd: vk::DrawIndexedIndirectCommand) -> Result<()> {
-        const SIZE: u64 = std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u64;
-        let offset = self.cmd_count as u64 * SIZE;
-
-        unsafe {
-            let dst =
-                self.cmd_buffer.map_memory(offset, SIZE)? as *mut vk::DrawIndexedIndirectCommand;
-            *dst = cmd;
-            self.cmd_buffer.unmap();
-        }
-
-        self.cmd_count += 1;
-        Ok(())
-    }
-    #[inline]
-    pub fn reset_commands(&mut self) {
-        self.cmd_count = 0;
     }
     pub fn create_mesh_arena(
         &mut self,
@@ -944,6 +793,10 @@ impl Renderer {
     pub fn destroy_mesh_arena(&mut self, handle: MeshArenaHandle) -> bool {
         self.mesh_arenas.remove(handle).is_some()
     }
+    #[inline]
+    pub fn other_descriptor_set(&self) -> vk::DescriptorSet {
+        self.other_descriptor_set
+    }
 }
 
 impl Drop for Renderer {
@@ -951,8 +804,6 @@ impl Drop for Renderer {
         unsafe {
             let _ = self.device.device_wait_idle();
             self.device.destroy_sampler(self.repeat_sampler);
-            self.device
-                .destroy_descriptor_set_layout(self.per_obj_ds_layout);
             self.device
                 .destroy_descriptor_set_layout(self.per_frame_ds_layout);
             self.device
