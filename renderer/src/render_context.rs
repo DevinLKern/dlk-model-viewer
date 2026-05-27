@@ -44,7 +44,8 @@ impl FrameData {
             let buffer_create_info = vulkan::BufferCreateInfo {
                 size: element_size * MAX_CAMERA_DATA_COUNT,
                 usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
-                memory_property_flags: vk::MemoryPropertyFlags::HOST_COHERENT | vk::MemoryPropertyFlags::HOST_VISIBLE
+                memory_property_flags: vk::MemoryPropertyFlags::HOST_COHERENT
+                    | vk::MemoryPropertyFlags::HOST_VISIBLE,
             };
             let buffer = vulkan::Buffer::new(device.clone(), &buffer_create_info)?;
 
@@ -62,7 +63,8 @@ impl FrameData {
             let buffer_create_info = vulkan::BufferCreateInfo {
                 size: element_size * MAX_INSTANCE_DATA_COUNT,
                 usage: vk::BufferUsageFlags::STORAGE_BUFFER,
-                memory_property_flags: vk::MemoryPropertyFlags::HOST_COHERENT | vk::MemoryPropertyFlags::HOST_VISIBLE
+                memory_property_flags: vk::MemoryPropertyFlags::HOST_COHERENT
+                    | vk::MemoryPropertyFlags::HOST_VISIBLE,
             };
             let buffer = vulkan::Buffer::new(device.clone(), &buffer_create_info)?;
 
@@ -75,7 +77,8 @@ impl FrameData {
             let buffer_create_info = vulkan::BufferCreateInfo {
                 size: element_size * MAX_INDIRECT_COMMAND_DATA_COUNT,
                 usage: vk::BufferUsageFlags::INDIRECT_BUFFER,
-                memory_property_flags: vk::MemoryPropertyFlags::HOST_COHERENT | vk::MemoryPropertyFlags::HOST_VISIBLE
+                memory_property_flags: vk::MemoryPropertyFlags::HOST_COHERENT
+                    | vk::MemoryPropertyFlags::HOST_VISIBLE,
             };
             let buffer = vulkan::Buffer::new(device.clone(), &buffer_create_info)?;
 
@@ -83,20 +86,16 @@ impl FrameData {
         };
 
         {
-            let camera_buffer_info = [
-                vk::DescriptorBufferInfo {
-                    buffer: camera_data.handle,
-                    offset: 0,
-                    range: camera_data_element_size,
-                },
-            ];
-            let instance_buffer_info = [
-                vk::DescriptorBufferInfo {
-                    buffer: instance_data.handle,
-                    offset: 0,
-                    range: instance_data.size,
-                }
-            ];
+            let camera_buffer_info = [vk::DescriptorBufferInfo {
+                buffer: camera_data.handle,
+                offset: 0,
+                range: camera_data_element_size,
+            }];
+            let instance_buffer_info = [vk::DescriptorBufferInfo {
+                buffer: instance_data.handle,
+                offset: 0,
+                range: instance_data.size,
+            }];
             let writes = [
                 vk::WriteDescriptorSet {
                     dst_set: descriptor_set,
@@ -115,9 +114,11 @@ impl FrameData {
                     p_buffer_info: instance_buffer_info.as_ptr(),
                     descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
                     ..Default::default()
-                }
+                },
             ];
-            unsafe { device.update_descriptor_sets(&writes, &[]); }
+            unsafe {
+                device.update_descriptor_sets(&writes, &[]);
+            }
         }
 
         let command_buffer_executed = {
@@ -132,10 +133,8 @@ impl FrameData {
             let create_info = vk::SemaphoreCreateInfo {
                 ..Default::default()
             };
-            unsafe { device.create_semaphore(&create_info) }.inspect_err(|_| {
-                unsafe {
-                    device.destroy_fence(command_buffer_executed);
-                }
+            unsafe { device.create_semaphore(&create_info) }.inspect_err(|_| unsafe {
+                device.destroy_fence(command_buffer_executed);
             })?
         };
 
@@ -143,11 +142,9 @@ impl FrameData {
             let create_info = vk::SemaphoreCreateInfo {
                 ..Default::default()
             };
-            unsafe { device.create_semaphore(&create_info) }.inspect_err(|_| {
-                unsafe {
-                    device.destroy_semaphore(image_acquired);
-                    device.destroy_fence(command_buffer_executed);
-                }
+            unsafe { device.create_semaphore(&create_info) }.inspect_err(|_| unsafe {
+                device.destroy_semaphore(image_acquired);
+                device.destroy_fence(command_buffer_executed);
             })?
         };
 
@@ -159,12 +156,10 @@ impl FrameData {
                     ..Default::default()
                 };
 
-                unsafe { device.create_command_pool(&create_info) }.inspect_err(|_| {
-                    unsafe {
-                        device.destroy_semaphore(render_complete);
-                        device.destroy_semaphore(image_acquired);
-                        device.destroy_fence(command_buffer_executed);
-                    }
+                unsafe { device.create_command_pool(&create_info) }.inspect_err(|_| unsafe {
+                    device.destroy_semaphore(render_complete);
+                    device.destroy_semaphore(image_acquired);
+                    device.destroy_fence(command_buffer_executed);
                 })?
             };
 
@@ -176,21 +171,20 @@ impl FrameData {
                     ..Default::default()
                 };
 
-                let buffers = unsafe { device.allocate_command_buffers(&allocate_info) }.inspect_err(|_| {
-                    unsafe {
+                let buffers = unsafe { device.allocate_command_buffers(&allocate_info) }
+                    .inspect_err(|_| unsafe {
                         device.destroy_command_pool(command_pool);
                         device.destroy_semaphore(render_complete);
                         device.destroy_semaphore(image_acquired);
                         device.destroy_fence(command_buffer_executed);
-                    }
-                })?;
+                    })?;
                 buffers[0]
             };
 
             (command_pool, command_buffer)
         };
 
-        Ok(Self{
+        Ok(Self {
             device,
             command_buffer_executed,
             image_acquired,
@@ -218,7 +212,9 @@ impl FrameData {
         let offset = self.camera_data_element_size * self.camera_data_count;
 
         unsafe {
-            let dst = self.camera_data.map_memory(offset, self.camera_data_element_size)?;
+            let dst = self
+                .camera_data
+                .map_memory(offset, self.camera_data_element_size)?;
             let dst = dst as *mut CameraUBO;
 
             *dst = data;
@@ -235,16 +231,35 @@ impl FrameData {
         self.instance_data_count = 0;
     }
     // returns an INDEX into the instance_data buffer
-    pub fn add_instance_data(&mut self, model_matrix: Mat4<f32>, material_index: u32) -> crate::Result<u64> {
-        let normal_matrix = model_matrix.as_mat3().transposed().inverse().unwrap().as_mat4(1.0).into_2d_arr();
+    pub fn add_instance_data(
+        &mut self,
+        model_matrix: Mat4<f32>,
+        material_index: u32,
+    ) -> crate::Result<u64> {
+        let normal_matrix = model_matrix
+            .as_mat3()
+            .transposed()
+            .inverse()
+            .unwrap()
+            .as_mat4(1.0)
+            .into_2d_arr();
         let model_matrix = model_matrix.into_2d_arr();
-        let data = InstanceData { model_matrix, normal_matrix, material_index, _pad0: 0, _pad1: 0, _pad2: 0 };
+        let data = InstanceData {
+            model_matrix,
+            normal_matrix,
+            material_index,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+        };
 
         let index = self.instance_data_count;
 
         unsafe {
             let offset = self.instance_data_element_size * self.instance_data_count;
-            let dst = self.instance_data.map_memory(offset, self.instance_data_element_size)?;
+            let dst = self
+                .instance_data
+                .map_memory(offset, self.instance_data_element_size)?;
             let dst = dst as *mut InstanceData;
 
             *dst = data;
@@ -261,12 +276,17 @@ impl FrameData {
         self.indirect_command_data_count = 0;
     }
     // returns an INDEX into the indirect_command_data buffer
-    pub fn add_indirect_command_data(&mut self, data: vk::DrawIndexedIndirectCommand) -> crate::Result<u64> {
+    pub fn add_indirect_command_data(
+        &mut self,
+        data: vk::DrawIndexedIndirectCommand,
+    ) -> crate::Result<u64> {
         let index = self.indirect_command_data_count;
 
         unsafe {
             let offset = self.indirect_command_data_element_size * self.indirect_command_data_count;
-            let dst = self.indirect_command_data.map_memory(offset, self.indirect_command_data_element_size)?;
+            let dst = self
+                .indirect_command_data
+                .map_memory(offset, self.indirect_command_data_element_size)?;
             let dst = dst as *mut vk::DrawIndexedIndirectCommand;
 
             *dst = data;
@@ -519,7 +539,7 @@ impl RenderContext {
             )?)
         };
 
-         let (descriptor_pool, descriptor_sets) = {
+        let (descriptor_pool, descriptor_sets) = {
             let descriptor_pool = {
                 let pool_sizes = [
                     vk::DescriptorPoolSize {
@@ -557,16 +577,14 @@ impl RenderContext {
                     }
                 })?
             };
-            
+
             (descriptor_pool, descriptor_sets)
         };
 
         let mut frames = Vec::<FrameData>::with_capacity(MAX_FRAME_COUNT as usize);
         for descriptor_set in descriptor_sets {
-            let frame = FrameData::new(device.clone(), descriptor_set).inspect_err(|_| {
-                unsafe {
-                    device.destroy_descriptor_pool(descriptor_pool);
-                }
+            let frame = FrameData::new(device.clone(), descriptor_set).inspect_err(|_| unsafe {
+                device.destroy_descriptor_pool(descriptor_pool);
             })?;
             frames.push(frame);
         }
@@ -603,20 +621,20 @@ impl RenderContext {
     pub fn get_current_frame_mut(&mut self) -> &mut FrameData {
         &mut self.frames[self.index]
     }
+    pub fn swapchain_extent(&self) -> vk::Extent2D {
+        *self.swapchain.get_extent()
+    }
     pub unsafe fn draw<F>(&mut self, record_draw_commands: F) -> vulkan::result::Result<()>
     where
         F: FnOnce(vk::CommandBuffer),
     {
         let frame = self.get_current_frame();
-        
+
         // Acquire image
         let (swapchain_image_index, swapchain_image_view) = {
             unsafe {
-                self.device.wait_for_fences(
-                    &[frame.command_buffer_executed],
-                    true,
-                    u64::MAX,
-                )?
+                self.device
+                    .wait_for_fences(&[frame.command_buffer_executed], true, u64::MAX)?
             };
 
             let (image_index, _) = unsafe {
@@ -624,10 +642,7 @@ impl RenderContext {
                     .acquire_next_image(frame.image_acquired, vk::Fence::null())?
             };
 
-            unsafe {
-                self.device
-                    .reset_fences(&[frame.command_buffer_executed])?
-            };
+            unsafe { self.device.reset_fences(&[frame.command_buffer_executed])? };
             (
                 image_index as usize,
                 self.swapchain.get_image_view(image_index as usize).unwrap(),
@@ -740,25 +755,9 @@ impl RenderContext {
                 ..Default::default()
             };
 
-            let viewport = ash::vk::Viewport {
-                x: 0.0,
-                y: 0.0,
-                width: self.swapchain.get_extent().width as f32,
-                height: self.swapchain.get_extent().height as f32,
-                min_depth: 0.0,
-                max_depth: 1.0,
-            };
-            let scissor = vk::Rect2D {
-                offset: vk::Offset2D { x: 0, y: 0 },
-                extent: *self.swapchain.get_extent(),
-            };
             unsafe {
                 self.device
                     .cmd_begin_rendering(frame.command_buffer, &rendering_info);
-
-                self.device
-                    .cmd_set_viewport(frame.command_buffer, 0, &[viewport]);
-                self.device.cmd_set_scissor(frame.command_buffer, 0, &[scissor]);
             };
         }
 

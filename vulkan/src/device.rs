@@ -514,6 +514,7 @@ impl Device {
     vk_delegate_forward!(cmd_draw_indexed_indirect, (cmd: CommandBuffer, buffer: Buffer, offset: u64, draw_count: u32, stride: u32), ());
     vk_delegate_forward!(cmd_draw_indexed, (cmd: CommandBuffer, index_count: u32, instance_count: u32, first_index: u32, vertex_offset: i32, first_instance: u32), ());
     vk_delegate_forward!(cmd_draw, (cmd: vk::CommandBuffer, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32), ());
+    vk_delegate_forward!(cmd_clear_attachments, (cmd: CommandBuffer, attachments: &[ClearAttachment], rects: &[ClearRect]), ());
 }
 
 impl Drop for Device {

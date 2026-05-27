@@ -16,7 +16,6 @@ use std::rc::Rc;
 use std::u64;
 use vulkan::device::SharedDeviceRef;
 
-
 unsafe extern "system" fn vulkan_debug_callback(
     message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
     message_type: vk::DebugUtilsMessageTypeFlagsEXT,
@@ -64,7 +63,7 @@ pub struct Renderer {
     pub pipeline_layout: Rc<vulkan::PipelineLayout>,
 
     command_pool: vk::CommandPool,
-    
+
     per_frame_ds_layout: vk::DescriptorSetLayout,
     other_ds_layout: vk::DescriptorSetLayout,
     descriptor_pool: vk::DescriptorPool,
@@ -149,20 +148,23 @@ impl Renderer {
 
         let ds_layout_bindings: &[&[vk::DescriptorSetLayoutBinding]] = &[
             // SET 0 - per frame (update in render_context.rs)
-            &[vk::DescriptorSetLayoutBinding {
-                binding: 0,
-                descriptor_type: vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
-                descriptor_count: 1,
-                stage_flags: vk::ShaderStageFlags::VERTEX,
-                ..Default::default()
-            }, vk::DescriptorSetLayoutBinding {
-                binding: 1,
-                descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
-                descriptor_count: 1,
-                stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                p_immutable_samplers: std::ptr::null(),
-                _marker: std::marker::PhantomData {},
-            }],
+            &[
+                vk::DescriptorSetLayoutBinding {
+                    binding: 0,
+                    descriptor_type: vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
+                    descriptor_count: 1,
+                    stage_flags: vk::ShaderStageFlags::VERTEX,
+                    ..Default::default()
+                },
+                vk::DescriptorSetLayoutBinding {
+                    binding: 1,
+                    descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+                    descriptor_count: 1,
+                    stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                    p_immutable_samplers: std::ptr::null(),
+                    _marker: std::marker::PhantomData {},
+                },
+            ],
             // SET 2 - other
             &[
                 //
@@ -213,7 +215,7 @@ impl Renderer {
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                     descriptor_count: MAX_TEXTURES,
-                }
+                },
             ];
             let descrptor_pool_create_info = vk::DescriptorPoolCreateInfo {
                 max_sets: 2,
@@ -280,15 +282,16 @@ impl Renderer {
                 ..Default::default()
             };
 
-            let sets = unsafe { device.allocate_descriptor_sets(&ds_create_info) }.inspect_err(|e| {
-                tracing::error!("{e}");
-                unsafe {
-                    device.destroy_descriptor_set_layout(per_frame_ds_layout);
-                    device.destroy_descriptor_set_layout(other_ds_layout);
-                    device.destroy_command_pool(command_pool);
-                    device.destroy_descriptor_pool(descriptor_pool);
-                }
-            })?;
+            let sets =
+                unsafe { device.allocate_descriptor_sets(&ds_create_info) }.inspect_err(|e| {
+                    tracing::error!("{e}");
+                    unsafe {
+                        device.destroy_descriptor_set_layout(per_frame_ds_layout);
+                        device.destroy_descriptor_set_layout(other_ds_layout);
+                        device.destroy_command_pool(command_pool);
+                        device.destroy_descriptor_pool(descriptor_pool);
+                    }
+                })?;
 
             sets[0]
         };

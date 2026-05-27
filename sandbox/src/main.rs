@@ -7,7 +7,7 @@ mod settings;
 use camera::{Camera, controllers::*};
 use constants::*;
 use input_manager::{Input, InputEvent, InputManager};
-use renderer::ShaderVertVertex;
+use renderer::{CameraUBO, ShaderVertVertex};
 use result::{Error, Result};
 use settings::{Command, Event, Settings};
 
@@ -50,6 +50,7 @@ struct Application {
     fps_controller: FpsCameraController,
     orbit_camera: Camera,
     orbit_controller: OrbitCameraController,
+    arrow_camera: Camera,
     windows: HashMap<WindowId, (renderer::RenderContext, Window)>,
     renderer: renderer::Renderer,
     default_texture_index: usize,
@@ -266,10 +267,10 @@ impl Application {
         }
 
         const ARROW_SCALAR: Vec3<f32> = Vec3::new(0.05, 0.1, 0.05);
-
+        const MATERIAL_UNLIT_FLAG: u32 = 1 << 1;
         // red arrow (+X)
         let red_material_index = renderer.add_material(renderer::MaterialUBO {
-            flags: 0,
+            flags: MATERIAL_UNLIT_FLAG,
             texture_index: 0,
             _pad2: [0; 8],
             base_color: [1.0, 0.1, 0.1, 1.0],
@@ -281,7 +282,7 @@ impl Application {
         };
         // green arrow (+Y)
         let green_material_index = renderer.add_material(renderer::MaterialUBO {
-            flags: 0,
+            flags: MATERIAL_UNLIT_FLAG,
             texture_index: 0,
             _pad2: [0; 8],
             base_color: [0.1, 1.0, 0.1, 1.0],
@@ -293,7 +294,7 @@ impl Application {
         };
         // blue arrow (+Z)
         let blue_material_index = renderer.add_material(renderer::MaterialUBO {
-            flags: 0,
+            flags: MATERIAL_UNLIT_FLAG,
             texture_index: 0,
             _pad2: [0; 8],
             base_color: [0.1, 0.1, 1.0, 1.0],
@@ -509,6 +510,7 @@ impl Application {
             fps_controller,
             orbit_camera,
             orbit_controller,
+            arrow_camera: Camera::orthographic(1.5, 1.5, 10.0),
             windows: HashMap::new(),
             default_texture_index,
             mesh_arena_handle,
@@ -656,6 +658,19 @@ impl Application {
             }
         }
 
+        {
+            self.arrow_camera.transform.position = Vec3::ZERO;
+            let current_camera = match self.camera_in_use {
+                CameraInUse::Fps => &self.fps_camera,
+                CameraInUse::Orbit => &self.orbit_camera,
+            };
+            self.arrow_camera.transform.orientation =
+                current_camera.transform.orientation.inverse();
+            self.arrow_camera
+                .transform
+                .translate_local(Vec3::ZERO.sub(ENGINE_FORWARDS));
+        }
+
         let now = std::time::Instant::now();
         let elapsed = (now - self.last).as_secs_f64();
         self.last = now;
@@ -718,48 +733,38 @@ impl Application {
                     .ok_or(Error::WindowIdInvalid)?;
 
                 // upload instance data into buffer
-                let (camera_offset, indirect_command_data, indirect_command_data_count, per_frame_descriptor_set) = {
+                let (
+                    swapchain_extent,
+                    model_camera_offset,
+                    arrow_camera_offset,
+                    indirect_command_data,
+                    model_indirect_command_data_count,
+                    arrow_indirect_command_data_count,
+                    per_frame_descriptor_set,
+                ) = {
+                    let swapchain_extent = context.swapchain_extent();
 
                     let frame = context.get_current_frame_mut();
                     frame.reset_indirect_command_data();
                     frame.reset_instance_data();
                     frame.reset_camera_data();
-                    
+
                     let camera_data = match self.camera_in_use {
-                        CameraInUse::Fps => {
-                            renderer::CameraUBO {
-                                view_matrix: self.fps_camera.view_matrix().into_2d_arr(),
-                                proj_matrix: self.fps_camera.projection_matrix().into_2d_arr(),
-                            }
-                        }
-                        CameraInUse::Orbit => {
-                            renderer::CameraUBO {
-                                view_matrix: self.orbit_camera.view_matrix().into_2d_arr(),
-                                proj_matrix: self.orbit_camera.projection_matrix().into_2d_arr(),
-                            }
-                        }
+                        CameraInUse::Fps => renderer::CameraUBO {
+                            view_matrix: self.fps_camera.view_matrix().into_2d_arr(),
+                            proj_matrix: self.fps_camera.projection_matrix().into_2d_arr(),
+                        },
+                        CameraInUse::Orbit => renderer::CameraUBO {
+                            view_matrix: self.orbit_camera.view_matrix().into_2d_arr(),
+                            proj_matrix: self.orbit_camera.projection_matrix().into_2d_arr(),
+                        },
                     };
-                    let camera_offset = frame.add_camera_data(camera_data)? as u32;
-                    
-                    let first_instance = frame
-                        .add_instance_data(self.x_arrow_transform.as_mat4(), self.red_material_index)? as u32;
-                    frame.add_instance_data(
-                        self.y_arrow_transform.as_mat4(),
-                        self.green_material_index,
-                    )?;
-                    frame
-                        .add_instance_data(self.z_arrow_transform.as_mat4(), self.blue_material_index)?;
-                    frame.add_indirect_command_data(vk::DrawIndexedIndirectCommand {
-                        index_count: self.arrow_submesh.index_count,
-                        instance_count: 3,
-                        first_instance,
-                        first_index: self.arrow_submesh.first_index,
-                        vertex_offset: 0,
-                    })?;
+                    let model_camera_offset = frame.add_camera_data(camera_data)?;
 
                     for (submesh, material_index) in self.model_submeshes.iter() {
                         let first_instance = frame
-                            .add_instance_data(self.model_transform.as_mat4(), *material_index)? as u32;
+                            .add_instance_data(self.model_transform.as_mat4(), *material_index)?
+                            as u32;
                         frame.add_indirect_command_data(vk::DrawIndexedIndirectCommand {
                             index_count: submesh.index_count,
                             instance_count: 1,
@@ -768,36 +773,50 @@ impl Application {
                             first_instance,
                         })?;
                     }
+                    let model_command_data_count = frame.indirect_command_data_count();
 
-                    (camera_offset, frame.indirect_command_data().handle, frame.indirect_command_data_count(), frame.descriptor_set())
+                    let camera_data = CameraUBO {
+                        view_matrix: self.arrow_camera.view_matrix().into_2d_arr(),
+                        proj_matrix: self.arrow_camera.projection_matrix().into_2d_arr(),
+                    };
+                    let arrow_camera_offset = frame.add_camera_data(camera_data)?;
+                    let first_instance = frame.add_instance_data(
+                        self.x_arrow_transform.as_mat4(),
+                        self.red_material_index,
+                    )? as u32;
+                    frame.add_instance_data(
+                        self.y_arrow_transform.as_mat4(),
+                        self.green_material_index,
+                    )?;
+                    frame.add_instance_data(
+                        self.z_arrow_transform.as_mat4(),
+                        self.blue_material_index,
+                    )?;
+                    frame.add_indirect_command_data(vk::DrawIndexedIndirectCommand {
+                        index_count: self.arrow_submesh.index_count,
+                        instance_count: 3,
+                        first_instance,
+                        first_index: self.arrow_submesh.first_index,
+                        vertex_offset: 0,
+                    })?;
+                    let arrow_command_data_count =
+                        frame.indirect_command_data_count() - model_command_data_count;
+
+                    (
+                        swapchain_extent,
+                        model_camera_offset as u32,
+                        arrow_camera_offset as u32,
+                        frame.indirect_command_data().handle,
+                        model_command_data_count as u32,
+                        arrow_command_data_count as u32,
+                        frame.descriptor_set(),
+                    )
                 };
 
                 let pipeline = context.get_pipeline();
 
                 let record_draw_commands = |cmd: vk::CommandBuffer| unsafe {
                     pipeline.bind(cmd);
-                    {
-                        let sets = [per_frame_descriptor_set];
-                        self.renderer.device.cmd_bind_descriptor_sets(
-                            cmd,
-                            self.renderer.pipeline_layout.bind_point,
-                            self.renderer.pipeline_layout.handle,
-                            0,
-                            &sets,
-                            &[camera_offset],
-                        );
-                    }
-                    {
-                        let sets = [self.renderer.other_descriptor_set()];
-                        self.renderer.device.cmd_bind_descriptor_sets(
-                            cmd,
-                            self.renderer.pipeline_layout.bind_point,
-                            self.renderer.pipeline_layout.handle,
-                            1,
-                            &sets,
-                            &[],
-                        );
-                    }
 
                     let (vb, ib) = {
                         let mesh_arena = self
@@ -816,20 +835,126 @@ impl Application {
 
                         (b, o)
                     };
-                    self.renderer
-                        .device
-                        .cmd_bind_vertex_buffers(cmd, 0, &buffers, &offsets);
-                    self.renderer
-                        .device
-                        .cmd_bind_index_buffer(cmd, ib, 0, vk::IndexType::UINT32);
 
-                    self.renderer.device.cmd_draw_indexed_indirect(
-                        cmd,
-                        indirect_command_data,
-                        0,
-                        indirect_command_data_count as u32,
-                        std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u32,
-                    );
+                    {
+                        let sets = [self.renderer.other_descriptor_set()];
+                        self.renderer.device.cmd_bind_descriptor_sets(
+                            cmd,
+                            self.renderer.pipeline_layout.bind_point,
+                            self.renderer.pipeline_layout.handle,
+                            1,
+                            &sets,
+                            &[],
+                        );
+
+                        self.renderer
+                            .device
+                            .cmd_bind_vertex_buffers(cmd, 0, &buffers, &offsets);
+                        self.renderer.device.cmd_bind_index_buffer(
+                            cmd,
+                            ib,
+                            0,
+                            vk::IndexType::UINT32,
+                        );
+                    }
+
+                    // model
+                    {
+                        let scissor = vk::Rect2D {
+                            offset: vk::Offset2D { x: 0, y: 0 },
+                            extent: swapchain_extent,
+                        };
+                        let viewport = ash::vk::Viewport {
+                            x: 0.0,
+                            y: 0.0,
+                            width: scissor.extent.width as f32,
+                            height: scissor.extent.height as f32,
+                            min_depth: 0.0,
+                            max_depth: 1.0,
+                        };
+                        self.renderer.device.cmd_set_viewport(cmd, 0, &[viewport]);
+                        self.renderer.device.cmd_set_scissor(cmd, 0, &[scissor]);
+
+                        let sets = [per_frame_descriptor_set];
+                        self.renderer.device.cmd_bind_descriptor_sets(
+                            cmd,
+                            self.renderer.pipeline_layout.bind_point,
+                            self.renderer.pipeline_layout.handle,
+                            0,
+                            &sets,
+                            &[model_camera_offset],
+                        );
+
+                        self.renderer.device.cmd_draw_indexed_indirect(
+                            cmd,
+                            indirect_command_data,
+                            0,
+                            model_indirect_command_data_count,
+                            std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u32,
+                        );
+                    }
+
+                    // arrow
+                    {
+                        let gizmo_size =
+                            (swapchain_extent.width.min(swapchain_extent.height) / 4).max(128);
+                        let scissor = vk::Rect2D {
+                            offset: vk::Offset2D { x: 0, y: 0 },
+                            extent: vk::Extent2D {
+                                width: gizmo_size,
+                                height: gizmo_size,
+                            },
+                        };
+                        let viewport = ash::vk::Viewport {
+                            x: 0.0,
+                            y: 0.0,
+                            width: scissor.extent.width as f32,
+                            height: scissor.extent.height as f32,
+                            min_depth: 0.0,
+                            max_depth: 1.0,
+                        };
+                        let attachments = [vk::ClearAttachment {
+                            aspect_mask: vk::ImageAspectFlags::DEPTH,
+                            color_attachment: 0,
+                            clear_value: vk::ClearValue {
+                                depth_stencil: vk::ClearDepthStencilValue {
+                                    depth: 1.0,
+                                    stencil: 0,
+                                },
+                            },
+                        }];
+                        let rects = [vk::ClearRect {
+                            rect: scissor,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        }];
+                        self.renderer
+                            .device
+                            .cmd_clear_attachments(cmd, &attachments, &rects);
+
+                        self.renderer.device.cmd_set_viewport(cmd, 0, &[viewport]);
+                        self.renderer.device.cmd_set_scissor(cmd, 0, &[scissor]);
+
+                        let sets = [per_frame_descriptor_set];
+                        self.renderer.device.cmd_bind_descriptor_sets(
+                            cmd,
+                            self.renderer.pipeline_layout.bind_point,
+                            self.renderer.pipeline_layout.handle,
+                            0,
+                            &sets,
+                            &[arrow_camera_offset],
+                        );
+                        let offset = model_indirect_command_data_count as u64
+                            * std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u64;
+
+                        self.renderer.device.cmd_draw_indexed_indirect(
+                            cmd,
+                            indirect_command_data,
+                            offset,
+                            arrow_indirect_command_data_count,
+                            std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u32,
+                        );
+                    }
                 };
 
                 unsafe { context.draw(record_draw_commands) }?;
@@ -838,6 +963,7 @@ impl Application {
 
                 return Ok(false);
             }
+
             e => e,
         };
 
@@ -864,8 +990,12 @@ impl ApplicationHandler for Application {
             return;
         }
 
-        let window_attributes =
-            winit::window::WindowAttributes::default().with_title(self.window_name.clone());
+        let window_attributes = winit::window::WindowAttributes::default()
+            .with_title(self.window_name.clone())
+            .with_min_inner_size(winit::dpi::Size::Physical(winit::dpi::PhysicalSize {
+                width: 256,
+                height: 256,
+            }));
         let window = match event_loop.create_window(window_attributes) {
             Ok(w) => w,
             Err(e) => {

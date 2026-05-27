@@ -1,6 +1,7 @@
 #version 450
 
 const uint MATERIAL_FLAG_TEXTURED_BIT = (1 << 0);
+const uint MATERIAL_FLAG_UNLIT_BIT = (1 << 1);
 
 // per frame
 layout(std140, set = 0, binding = 0) uniform CameraUBO {

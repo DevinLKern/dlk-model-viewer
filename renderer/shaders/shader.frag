@@ -3,6 +3,7 @@
 #extension GL_EXT_nonuniform_qualifier : enable
 
 const uint MATERIAL_FLAG_TEXTURED_BIT = (1 << 0);
+const uint MATERIAL_FLAG_UNLIT_BIT = (1 << 1);
 
 struct InstanceData {
     mat4 model_matrix;
@@ -50,6 +51,10 @@ void main() {
     float light_intensity = world_light.ambient + max(0.0, dot(v_normal_world_space, -normalize(L)));
     
     MaterialUBO mat = materials.arr[nonuniformEXT(v_material_index)];
+
+    if ((mat.flags & MATERIAL_FLAG_UNLIT_BIT) != 0) {
+        light_intensity = 1.0;
+    }
     
     if ((mat.flags & MATERIAL_FLAG_TEXTURED_BIT) != 0) {
         f_color = texture(global_textures[nonuniformEXT(mat.texture_index)], v_tex_coord) * light_intensity;
