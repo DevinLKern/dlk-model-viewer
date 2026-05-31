@@ -225,7 +225,7 @@ fn generate_entry_point_vars(
 
         writeln!(
             w,
-            "const ENTRY_POINT_NAME_{}: &str = \"{}\";",
+            "const ENTRY_POINT_NAME_{}: &std::ffi::CStr = c\"{}\";",
             to_snake_caps(&m.name),
             name
         )?;
@@ -300,5 +300,5 @@ fn main() {
 
     let entry_point_names_path = out_dir.join("entry_points.rs");
     generate_entry_point_vars(&entry_point_names_path, &spv_modules).unwrap();
-    run_rustfmt_on(&entry_point_names_path);
+    // run_rustfmt_on(&entry_point_names_path);
 }

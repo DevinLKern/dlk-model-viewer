@@ -2,12 +2,13 @@
 pub enum Error {
     VulkanError(vulkan::result::Error),
     ExpectedUniformBufferView,
-    NotAdded,
+    ResourceMissing,
     BufferCapacityExceeded {
         buffer: &'static str,
         requested_end: u64,
         capacity: u64,
     },
+    IoError(std::io::Error),
 }
 
 impl std::fmt::Display for Error {
@@ -34,9 +35,15 @@ impl From<ash::vk::Result> for Error {
     }
 }
 
-impl From<vulkan::result::Error> for Error {
+impl From<vulkan::Error> for Error {
     fn from(value: vulkan::result::Error) -> Self {
         Self::VulkanError(value)
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(value: std::io::Error) -> Self {
+        Self::IoError(value)
     }
 }
 

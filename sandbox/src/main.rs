@@ -720,6 +720,9 @@ impl Application {
                 }
 
                 let new_context = self.renderer.create_render_context(window)?;
+                if context.get_pipeline() != new_context.get_pipeline() {
+                    // 
+                }
                 *context = new_context;
 
                 return Ok(false);
@@ -816,7 +819,8 @@ impl Application {
                 let pipeline = context.get_pipeline();
 
                 let record_draw_commands = |cmd: vk::CommandBuffer| unsafe {
-                    pipeline.bind(cmd);
+                    self.renderer
+                        .bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
 
                     let (vb, ib) = {
                         let mesh_arena = self
@@ -838,10 +842,9 @@ impl Application {
 
                     {
                         let sets = [self.renderer.other_descriptor_set()];
-                        self.renderer.device.cmd_bind_descriptor_sets(
+                        self.renderer.bind_descriptor_sets(
                             cmd,
-                            self.renderer.pipeline_layout.bind_point,
-                            self.renderer.pipeline_layout.handle,
+                            self.renderer.main_pipeline_layout(),
                             1,
                             &sets,
                             &[],
@@ -876,15 +879,13 @@ impl Application {
                         self.renderer.device.cmd_set_scissor(cmd, 0, &[scissor]);
 
                         let sets = [per_frame_descriptor_set];
-                        self.renderer.device.cmd_bind_descriptor_sets(
+                        self.renderer.bind_descriptor_sets(
                             cmd,
-                            self.renderer.pipeline_layout.bind_point,
-                            self.renderer.pipeline_layout.handle,
+                            self.renderer.main_pipeline_layout(),
                             0,
                             &sets,
                             &[model_camera_offset],
                         );
-
                         self.renderer.device.cmd_draw_indexed_indirect(
                             cmd,
                             indirect_command_data,
@@ -936,10 +937,9 @@ impl Application {
                         self.renderer.device.cmd_set_scissor(cmd, 0, &[scissor]);
 
                         let sets = [per_frame_descriptor_set];
-                        self.renderer.device.cmd_bind_descriptor_sets(
+                        self.renderer.bind_descriptor_sets(
                             cmd,
-                            self.renderer.pipeline_layout.bind_point,
-                            self.renderer.pipeline_layout.handle,
+                            self.renderer.main_pipeline_layout(),
                             0,
                             &sets,
                             &[arrow_camera_offset],
@@ -1029,10 +1029,11 @@ impl ApplicationHandler for Application {
                 self.global_light_color,
             )
             .unwrap();
-
-        self.windows.insert(window_id, (context, window));
+        let _new_pipeline = context.get_pipeline();
+        if let Some((_old_context, _)) = self.windows.insert(window_id, (context, window)) {
+            //
+        }
     }
-
     #[allow(unused_variables)]
     fn device_event(
         &mut self,

@@ -1,4 +1,5 @@
 mod render_context;
+mod resource_manager;
 mod resources;
 mod result;
 
@@ -7,6 +8,7 @@ include!(concat!(env!("OUT_DIR"), "/shader_paths.rs"));
 include!(concat!(env!("OUT_DIR"), "/entry_points.rs"));
 
 pub use render_context::RenderContext;
+pub(crate) use resource_manager::*;
 pub use resources::*;
 pub use result::Error;
 pub use result::Result;
@@ -14,7 +16,7 @@ pub use result::Result;
 use ash::vk;
 use std::rc::Rc;
 use std::u64;
-use vulkan::device::SharedDeviceRef;
+use vulkan::SharedDeviceRef;
 
 unsafe extern "system" fn vulkan_debug_callback(
     message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
@@ -58,14 +60,22 @@ pub const MAX_MATERIALS: u32 = 32;
 
 // use crate::render_context::MAX_TEXTURES;
 
+#[allow(unused)]
 pub struct Renderer {
     pub device: SharedDeviceRef,
-    pub pipeline_layout: Rc<vulkan::PipelineLayout>,
 
     command_pool: vk::CommandPool,
 
-    per_frame_ds_layout: vk::DescriptorSetLayout,
-    other_ds_layout: vk::DescriptorSetLayout,
+    shader_modules: ShaderModuleResourceManager,
+    descriptor_set_layouts: DescriptorSetLayoutResourceManager,
+    pipeline_layouts: PipelineLayoutResourceManager,
+    pipelines: PipelineResourceManager,
+
+    per_frame_ds_layout: DescriptorSetLayoutResourceHandle,
+    other_ds_layout: DescriptorSetLayoutResourceHandle,
+
+    main_pipeline_layout: PipelineLayoutResourceHandle,
+
     descriptor_pool: vk::DescriptorPool,
     other_descriptor_set: vk::DescriptorSet,
 
@@ -79,6 +89,10 @@ pub struct Renderer {
     repeat_sampler: vk::Sampler,
     mesh_arenas: slotmap::DenseSlotMap<MeshArenaHandle, MeshArena>,
 }
+
+// TODO: convert crate::VERT_SHADER_PATH and crate::FRAG_SHADER_PATH into macros?
+const COMPILED_VERT_SHADER: &[u8] = include_bytes!("../shaders/shader.vert.spv");
+const COMPILED_FRAG_SHADER: &[u8] = include_bytes!("../shaders/shader.frag.spv");
 
 impl Renderer {
     pub fn new(
@@ -146,61 +160,71 @@ impl Renderer {
             (buffer, element_size as u64)
         };
 
-        let ds_layout_bindings: &[&[vk::DescriptorSetLayoutBinding]] = &[
+        let shader_modules = crate::ShaderModuleResourceManager::new(device.clone());
+        let mut descriptor_set_layouts =
+            crate::DescriptorSetLayoutResourceManager::new(device.clone());
+        let mut pipeline_layouts = crate::PipelineLayoutResourceManager::new(device.clone());
+        let pipelines = crate::PipelineResourceManager::new(device.clone());
+
+        let ds_layout_bindings: &[&[DescriptorSetLayoutBindingInfo]] = &[
             // SET 0 - per frame (update in render_context.rs)
             &[
-                vk::DescriptorSetLayoutBinding {
+                DescriptorSetLayoutBindingInfo {
                     binding: 0,
-                    descriptor_type: vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
-                    descriptor_count: 1,
+                    ty: vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
+                    count: 1,
                     stage_flags: vk::ShaderStageFlags::VERTEX,
-                    ..Default::default()
                 },
-                vk::DescriptorSetLayoutBinding {
+                DescriptorSetLayoutBindingInfo {
                     binding: 1,
-                    descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
-                    descriptor_count: 1,
+                    ty: vk::DescriptorType::STORAGE_BUFFER,
+                    count: 1,
                     stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    p_immutable_samplers: std::ptr::null(),
-                    _marker: std::marker::PhantomData {},
                 },
             ],
             // SET 2 - other
             &[
                 //
-                vk::DescriptorSetLayoutBinding {
+                DescriptorSetLayoutBindingInfo {
                     binding: 0,
-                    descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
-                    descriptor_count: 1,
+                    ty: vk::DescriptorType::UNIFORM_BUFFER,
+                    count: 1,
                     stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                    p_immutable_samplers: std::ptr::null(),
-                    _marker: std::marker::PhantomData {},
                 },
                 // global_textures
-                vk::DescriptorSetLayoutBinding {
+                DescriptorSetLayoutBindingInfo {
                     binding: 1,
-                    descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                    descriptor_count: texture_capacity as u32,
+                    ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                    count: texture_capacity as u32,
                     stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                    p_immutable_samplers: std::ptr::null(),
-                    _marker: std::marker::PhantomData {},
                 },
                 // materials
-                vk::DescriptorSetLayoutBinding {
+                DescriptorSetLayoutBindingInfo {
                     binding: 2,
-                    descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
-                    descriptor_count: 1,
+                    ty: vk::DescriptorType::STORAGE_BUFFER,
+                    count: 1,
                     stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                    p_immutable_samplers: std::ptr::null(),
-                    _marker: std::marker::PhantomData {},
                 },
             ],
         ];
 
-        let pipeline_layout = Rc::new(vulkan::PipelineLayout::new(
-            device.clone(),
-            ds_layout_bindings,
-        )?);
+        let per_frame_ds_layout_desc = DescriptorSetLayoutDescription {
+            bindings: ds_layout_bindings[0].iter().map(|x| x.clone()).collect(),
+        };
+        let per_frame_ds_layout =
+            descriptor_set_layouts.access_or_create(per_frame_ds_layout_desc)?;
+
+        let other_ds_layout_desc = DescriptorSetLayoutDescription {
+            bindings: ds_layout_bindings[1].iter().map(|x| x.clone()).collect(),
+        };
+        let other_ds_layout = descriptor_set_layouts.access_or_create(other_ds_layout_desc)?;
+
+        let pipeline_layout_desc = PipelineLayoutDescription {
+            descriptor_set_layouts: Box::new([per_frame_ds_layout, other_ds_layout]),
+            bind_point: vk::PipelineBindPoint::GRAPHICS,
+        };
+        let main_pipeline_layout =
+            pipeline_layouts.access_or_create(pipeline_layout_desc, &mut descriptor_set_layouts)?;
 
         let descriptor_pool = {
             let pool_sizes = [
@@ -234,47 +258,9 @@ impl Renderer {
             )?
         };
 
-        let per_frame_ds_layout = {
-            // 0 == per frame index
-            let ds_layout_create_info = vk::DescriptorSetLayoutCreateInfo {
-                binding_count: ds_layout_bindings[0].len() as u32,
-                p_bindings: ds_layout_bindings[0].as_ptr(),
-                ..Default::default()
-            };
-
-            unsafe { device.create_descriptor_set_layout(&ds_layout_create_info) }.inspect_err(
-                |e| {
-                    tracing::error!("{e}");
-                    unsafe {
-                        device.destroy_command_pool(command_pool);
-                        device.destroy_descriptor_pool(descriptor_pool);
-                    }
-                },
-            )?
-        };
-
-        let other_ds_layout = {
-            // 1 == other index
-            let ds_layout_create_info = vk::DescriptorSetLayoutCreateInfo {
-                binding_count: ds_layout_bindings[1].len() as u32,
-                p_bindings: ds_layout_bindings[1].as_ptr(),
-                ..Default::default()
-            };
-
-            unsafe { device.create_descriptor_set_layout(&ds_layout_create_info) }.inspect_err(
-                |e| {
-                    tracing::error!("{e}");
-                    unsafe {
-                        device.destroy_descriptor_set_layout(per_frame_ds_layout);
-                        device.destroy_command_pool(command_pool);
-                        device.destroy_descriptor_pool(descriptor_pool);
-                    }
-                },
-            )?
-        };
-
         let other_descriptor_set = {
-            let ds_layouts = [other_ds_layout];
+            let other_ds_layout_raw = descriptor_set_layouts.get(other_ds_layout).unwrap();
+            let ds_layouts = [*other_ds_layout_raw];
             let ds_create_info = vk::DescriptorSetAllocateInfo {
                 descriptor_pool,
                 descriptor_set_count: ds_layouts.len() as u32,
@@ -286,8 +272,6 @@ impl Renderer {
                 unsafe { device.allocate_descriptor_sets(&ds_create_info) }.inspect_err(|e| {
                     tracing::error!("{e}");
                     unsafe {
-                        device.destroy_descriptor_set_layout(per_frame_ds_layout);
-                        device.destroy_descriptor_set_layout(other_ds_layout);
                         device.destroy_command_pool(command_pool);
                         device.destroy_descriptor_pool(descriptor_pool);
                     }
@@ -316,8 +300,6 @@ impl Renderer {
             unsafe { device.create_sampler(&sampler_create_info) }.inspect_err(|e| {
                 tracing::error!("{e}");
                 unsafe {
-                    device.destroy_descriptor_set_layout(per_frame_ds_layout);
-                    device.destroy_descriptor_set_layout(other_ds_layout);
                     device.destroy_command_pool(command_pool);
                     device.destroy_descriptor_pool(descriptor_pool);
                 }
@@ -360,13 +342,19 @@ impl Renderer {
             unsafe { device.update_descriptor_sets(&writes, &[]) };
         }
 
-        Ok(Renderer {
+        Ok(Self {
             device,
-            pipeline_layout,
             command_pool,
-            descriptor_pool,
+            shader_modules,
+            descriptor_set_layouts,
+            pipeline_layouts,
+            pipelines,
+
             per_frame_ds_layout,
             other_ds_layout,
+            main_pipeline_layout,
+
+            descriptor_pool,
             other_descriptor_set,
             global_light_buffer,
             textures,
@@ -377,12 +365,34 @@ impl Renderer {
             repeat_sampler,
         })
     }
-    pub fn create_render_context(&self, window: &winit::window::Window) -> Result<RenderContext> {
+    pub fn create_render_context(
+        &mut self,
+        window: &winit::window::Window,
+    ) -> Result<RenderContext> {
+        let frag_shader = ShaderModuleDescription::Internal {
+            stage: vk::ShaderStageFlags::FRAGMENT,
+            spv: COMPILED_FRAG_SHADER,
+        };
+        let vert_shader = ShaderModuleDescription::Internal {
+            stage: vk::ShaderStageFlags::VERTEX,
+            spv: COMPILED_VERT_SHADER,
+        };
+
+        let layout = self.main_pipeline_layout;
+
         RenderContext::new(
             self.device.clone(),
-            self.pipeline_layout.clone(),
             window,
-            self.per_frame_ds_layout,
+            &mut self.pipelines,
+            vert_shader,
+            frag_shader,
+            &mut self.shader_modules,
+            &mut self.pipeline_layouts,
+            layout,
+            *self
+                .descriptor_set_layouts
+                .get(self.per_frame_ds_layout)
+                .unwrap(),
         )
     }
     pub fn update_world_light(
@@ -391,7 +401,7 @@ impl Renderer {
         dir: math::Vec3<f32>,
         color: math::Vec4<f32>,
     ) -> Result<()> {
-        let ubo = crate::GlobalLightUBO {
+        let data = crate::GlobalLightUBO {
             direction: dir.normalized().into_vec4().into_arr(),
             color: color.as_arr(),
             ambient,
@@ -401,9 +411,9 @@ impl Renderer {
             let dst = self
                 .global_light_buffer
                 .map_memory(0, std::mem::size_of::<crate::GlobalLightUBO>() as u64)?;
-            let src = &ubo;
+            let dst = dst as *mut GlobalLightUBO;
 
-            std::ptr::copy_nonoverlapping(src, dst as *mut crate::GlobalLightUBO, 1);
+            *dst = data;
 
             self.global_light_buffer.unmap();
         }
@@ -789,6 +799,17 @@ impl Renderer {
         Ok(handle)
     }
     #[inline]
+    pub fn bind_pipeline(
+        &self,
+        cmd: vk::CommandBuffer,
+        point: vk::PipelineBindPoint,
+        handle: PipelineResourceHandle,
+    ) {
+        if let Some(pipeline) = self.pipelines.get(handle) {
+            unsafe { self.device.cmd_bind_pipeline(cmd, point, *pipeline) };
+        }
+    }
+    #[inline]
     pub fn access_mesh_arena(&mut self, handle: MeshArenaHandle) -> Option<&MeshArena> {
         self.mesh_arenas.get(handle)
     }
@@ -800,17 +821,41 @@ impl Renderer {
     pub fn other_descriptor_set(&self) -> vk::DescriptorSet {
         self.other_descriptor_set
     }
+    #[inline]
+    pub fn main_pipeline_layout(&self) -> PipelineLayoutResourceHandle {
+        self.main_pipeline_layout
+    }
+    #[inline]
+    pub fn bind_descriptor_sets(
+        &self,
+        cmd: vk::CommandBuffer,
+        pipeline_layout: PipelineLayoutResourceHandle,
+        first_set: u32,
+        sets: &[vk::DescriptorSet],
+        dynamic_offsets: &[u32],
+    ) {
+        if let Some(layout) = self.pipeline_layouts.get(pipeline_layout) {
+            unsafe {
+                self.device.cmd_bind_descriptor_sets(
+                    cmd,
+                    layout.desc.bind_point,
+                    layout.raw,
+                    first_set,
+                    sets,
+                    dynamic_offsets,
+                );
+            }
+        }
+    }
 }
 
 impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe {
             let _ = self.device.device_wait_idle();
+
+            self.pipeline_layouts.destroy(self.main_pipeline_layout);
             self.device.destroy_sampler(self.repeat_sampler);
-            self.device
-                .destroy_descriptor_set_layout(self.per_frame_ds_layout);
-            self.device
-                .destroy_descriptor_set_layout(self.other_ds_layout);
             self.device.destroy_command_pool(self.command_pool);
             self.device.destroy_descriptor_pool(self.descriptor_pool);
         }
