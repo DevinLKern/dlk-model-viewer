@@ -57,8 +57,9 @@ void main() {
     }
     
     if ((mat.flags & MATERIAL_FLAG_TEXTURED_BIT) != 0) {
-        f_color = texture(global_textures[nonuniformEXT(mat.texture_index)], v_tex_coord) * light_intensity;
+        vec4 color = texture(global_textures[nonuniformEXT(mat.texture_index)], v_tex_coord);
+        f_color = vec4(color.xyz * light_intensity, color.w);
     } else {
-        f_color = mat.base_color * light_intensity;
+        f_color = vec4(mat.base_color.xyz * light_intensity, mat.base_color.w);
     }
 }

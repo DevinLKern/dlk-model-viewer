@@ -7,6 +7,8 @@ include!(concat!(env!("OUT_DIR"), "/variable_types.rs"));
 include!(concat!(env!("OUT_DIR"), "/shader_paths.rs"));
 include!(concat!(env!("OUT_DIR"), "/entry_points.rs"));
 
+use math::{Zero, Vec4, Mat4};
+
 pub use render_context::RenderContext;
 pub(crate) use resource_manager::*;
 pub use resources::*;
@@ -71,13 +73,19 @@ pub struct Renderer {
     pipeline_layouts: PipelineLayoutResourceManager,
     pipelines: PipelineResourceManager,
 
-    per_frame_ds_layout: DescriptorSetLayoutResourceHandle,
-    other_ds_layout: DescriptorSetLayoutResourceHandle,
-
+    main_per_frame_ds_layout: DescriptorSetLayoutResourceHandle,
+    main_other_ds_layout: DescriptorSetLayoutResourceHandle,
     main_pipeline_layout: PipelineLayoutResourceHandle,
 
+    grid_per_frame_ds_layout: DescriptorSetLayoutResourceHandle,
+    grid_other_ds_layout: DescriptorSetLayoutResourceHandle,
+    grid_pipeline_layout: PipelineLayoutResourceHandle,
+
     descriptor_pool: vk::DescriptorPool,
-    other_descriptor_set: vk::DescriptorSet,
+    main_other_descriptor_set: vk::DescriptorSet,
+    grid_other_descriptor_set: vk::DescriptorSet,
+
+    grid_buffer: vulkan::Buffer,
 
     global_light_buffer: vulkan::Buffer,
     textures: Vec<vulkan::Image>,
@@ -91,8 +99,11 @@ pub struct Renderer {
 }
 
 // TODO: convert crate::VERT_SHADER_PATH and crate::FRAG_SHADER_PATH into macros?
-const COMPILED_VERT_SHADER: &[u8] = include_bytes!("../shaders/shader.vert.spv");
-const COMPILED_FRAG_SHADER: &[u8] = include_bytes!("../shaders/shader.frag.spv");
+const COMPILED_MAIN_VERT_SHADER: &[u8] = include_bytes!("../shaders/shader.vert.spv");
+const COMPILED_MAIN_FRAG_SHADER: &[u8] = include_bytes!("../shaders/shader.frag.spv");
+
+const COMPILED_GRID_VERT_SHADER: &[u8] = include_bytes!("../shaders/grid.vert.spv");
+const COMPILED_GRID_FRAG_SHADER: &[u8] = include_bytes!("../shaders/grid.frag.spv");
 
 impl Renderer {
     pub fn new(
@@ -160,13 +171,57 @@ impl Renderer {
             (buffer, element_size as u64)
         };
 
+        let (grid_buffer, grid_buffer_element_size) = {
+            let element_size = {
+                let ubo_size = std::mem::size_of::<crate::GridData>();
+
+                let properties = unsafe { device.get_physical_device_properties() };
+
+                ubo_size.next_multiple_of(
+                    properties.limits.min_storage_buffer_offset_alignment as usize,
+                )
+            };
+
+            let buffer_create_info = vulkan::BufferCreateInfo {
+                size: (element_size as u64 * material_capacity),
+                usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
+                memory_property_flags: vk::MemoryPropertyFlags::HOST_VISIBLE
+                    | vk::MemoryPropertyFlags::HOST_COHERENT,
+            };
+
+            let buffer = vulkan::Buffer::new(device.clone(), &buffer_create_info)?;
+
+            const GDS: f32 = 1.0;
+            let data = GridData {
+                model_matrix: Mat4::from_cols(
+                    Vec4::X.scaled(GDS),
+                    Vec4::Y.scaled(GDS),
+                    Vec4::Z.scaled(GDS),
+                    Vec4::W.scaled(GDS),
+                ).into_2d_arr(),
+                scale: [1.0, 1.0],
+                _pad2: [0; 8],
+                base_color: Vec4::ZERO.as_arr(),
+                line_color: Vec4::new(1.0, 1.0, 1.0, 1.0).as_arr(),
+            };
+
+            unsafe {
+                let dst = buffer.map_memory(0, element_size as u64)?;
+                let dst = dst as *mut GridData;
+                *dst = data;
+                buffer.unmap();
+            }
+
+            (buffer, element_size as u64)
+        };
+
         let shader_modules = crate::ShaderModuleResourceManager::new(device.clone());
         let mut descriptor_set_layouts =
             crate::DescriptorSetLayoutResourceManager::new(device.clone());
         let mut pipeline_layouts = crate::PipelineLayoutResourceManager::new(device.clone());
         let pipelines = crate::PipelineResourceManager::new(device.clone());
 
-        let ds_layout_bindings: &[&[DescriptorSetLayoutBindingInfo]] = &[
+        let main_ds_layout_bindings: &[&[DescriptorSetLayoutBindingInfo]] = &[
             // SET 0 - per frame (update in render_context.rs)
             &[
                 DescriptorSetLayoutBindingInfo {
@@ -208,33 +263,71 @@ impl Renderer {
             ],
         ];
 
-        let per_frame_ds_layout_desc = DescriptorSetLayoutDescription {
-            bindings: ds_layout_bindings[0].iter().map(|x| x.clone()).collect(),
+        let main_per_frame_ds_layout_desc = DescriptorSetLayoutDescription {
+            bindings: main_ds_layout_bindings[0].iter().map(|x| x.clone()).collect(),
         };
-        let per_frame_ds_layout =
-            descriptor_set_layouts.access_or_create(per_frame_ds_layout_desc)?;
+        let main_per_frame_ds_layout =
+            descriptor_set_layouts.access_or_create(main_per_frame_ds_layout_desc)?;
 
-        let other_ds_layout_desc = DescriptorSetLayoutDescription {
-            bindings: ds_layout_bindings[1].iter().map(|x| x.clone()).collect(),
+        let main_other_ds_layout_desc = DescriptorSetLayoutDescription {
+            bindings: main_ds_layout_bindings[1].iter().map(|x| x.clone()).collect(),
         };
-        let other_ds_layout = descriptor_set_layouts.access_or_create(other_ds_layout_desc)?;
+        let main_other_ds_layout = descriptor_set_layouts.access_or_create(main_other_ds_layout_desc)?;
 
-        let pipeline_layout_desc = PipelineLayoutDescription {
-            descriptor_set_layouts: Box::new([per_frame_ds_layout, other_ds_layout]),
+        let main_pipeline_layout_desc = PipelineLayoutDescription {
+            descriptor_set_layouts: Box::new([main_per_frame_ds_layout, main_other_ds_layout]),
             bind_point: vk::PipelineBindPoint::GRAPHICS,
         };
         let main_pipeline_layout =
-            pipeline_layouts.access_or_create(pipeline_layout_desc, &mut descriptor_set_layouts)?;
+            pipeline_layouts.access_or_create(main_pipeline_layout_desc, &mut descriptor_set_layouts)?;
+
+        let grid_ds_layout_bindings = &[
+            &[
+                DescriptorSetLayoutBindingInfo {
+                    binding: 0,
+                    ty: vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
+                    count: 1,
+                    stage_flags: vk::ShaderStageFlags::VERTEX,
+                }
+            ],
+            &[
+                DescriptorSetLayoutBindingInfo {
+                    binding: 0,
+                    ty: vk::DescriptorType::UNIFORM_BUFFER,
+                    count: 1,
+                    stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                }
+            ]
+        ];
+
+        let grid_per_frame_ds_layout_desc = DescriptorSetLayoutDescription {
+            bindings: grid_ds_layout_bindings[0].iter().map(|x| x.clone()).collect()
+        };
+        let grid_per_frame_ds_layout = descriptor_set_layouts
+            .access_or_create(grid_per_frame_ds_layout_desc)?;
+
+        let grid_other_ds_layout_desc = DescriptorSetLayoutDescription {
+            bindings: grid_ds_layout_bindings[1].iter().map(|x| x.clone()).collect()
+        };
+        let grid_other_ds_layout = descriptor_set_layouts
+            .access_or_create(grid_other_ds_layout_desc)?;
+
+        let grid_pipeline_layout_desc = PipelineLayoutDescription {
+            descriptor_set_layouts: Box::new([grid_per_frame_ds_layout, grid_other_ds_layout]),
+            bind_point: vk::PipelineBindPoint::GRAPHICS,
+        };
+        let grid_pipeline_layout =
+            pipeline_layouts.access_or_create(grid_pipeline_layout_desc, &mut descriptor_set_layouts)?;
 
         let descriptor_pool = {
             let pool_sizes = [
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::UNIFORM_BUFFER,
-                    descriptor_count: 1,
+                    descriptor_count: 3,
                 },
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::STORAGE_BUFFER,
-                    descriptor_count: MAX_MATERIALS,
+                    descriptor_count: 1,
                 },
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
@@ -242,7 +335,7 @@ impl Renderer {
                 },
             ];
             let descrptor_pool_create_info = vk::DescriptorPoolCreateInfo {
-                max_sets: 2,
+                max_sets: pool_sizes.iter().map(|x| x.descriptor_count).sum(),
                 pool_size_count: pool_sizes.len() as u32,
                 p_pool_sizes: pool_sizes.as_ptr(),
                 ..Default::default()
@@ -258,8 +351,8 @@ impl Renderer {
             )?
         };
 
-        let other_descriptor_set = {
-            let other_ds_layout_raw = descriptor_set_layouts.get(other_ds_layout).unwrap();
+        let main_other_descriptor_set = {
+            let other_ds_layout_raw = descriptor_set_layouts.get(main_other_ds_layout).unwrap();
             let ds_layouts = [*other_ds_layout_raw];
             let ds_create_info = vk::DescriptorSetAllocateInfo {
                 descriptor_pool,
@@ -280,6 +373,28 @@ impl Renderer {
             sets[0]
         };
 
+        let grid_other_descriptor_set = {
+            let other_ds_layout_raw = descriptor_set_layouts.get(grid_other_ds_layout).unwrap();
+            let ds_layouts = [*other_ds_layout_raw];
+            let ds_create_info = vk::DescriptorSetAllocateInfo {
+                descriptor_pool,
+                descriptor_set_count: ds_layouts.len() as u32,
+                p_set_layouts: ds_layouts.as_ptr(),
+                ..Default::default()
+            };
+
+            let sets =
+                unsafe { device.allocate_descriptor_sets(&ds_create_info) }.inspect_err(|e| {
+                    tracing::error!("{e}");
+                    unsafe {
+                        device.destroy_command_pool(command_pool);
+                        device.destroy_descriptor_pool(descriptor_pool);
+                    }
+                })?;
+
+            sets[0]
+        };
+        
         let repeat_sampler = {
             let properties = unsafe { device.get_physical_device_properties() };
             let sampler_create_info = vk::SamplerCreateInfo {
@@ -318,11 +433,16 @@ impl Renderer {
                 offset: 0,
                 range: material_buffer.size,
             };
+            let grid_buffer_info = vk::DescriptorBufferInfo {
+                buffer: grid_buffer.handle,
+                offset: 0,
+                range: grid_buffer_element_size,
+            };
 
             let writes = [
                 // set 0 updated in render_context.rs
                 vk::WriteDescriptorSet {
-                    dst_set: other_descriptor_set,
+                    dst_set: main_other_descriptor_set,
                     dst_binding: 0,
                     descriptor_count: 1,
                     descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
@@ -330,13 +450,21 @@ impl Renderer {
                     ..Default::default()
                 },
                 vk::WriteDescriptorSet {
-                    dst_set: other_descriptor_set,
+                    dst_set: main_other_descriptor_set,
                     dst_binding: 2,
                     descriptor_count: 1,
                     descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
                     p_buffer_info: &material_buffer_info,
                     ..Default::default()
                 },
+                vk::WriteDescriptorSet {
+                    dst_set: grid_other_descriptor_set,
+                    dst_binding: 0,
+                    descriptor_count: 1,
+                    descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
+                    p_buffer_info: &grid_buffer_info,
+                    ..Default::default()
+                }
             ];
 
             unsafe { device.update_descriptor_sets(&writes, &[]) };
@@ -350,12 +478,20 @@ impl Renderer {
             pipeline_layouts,
             pipelines,
 
-            per_frame_ds_layout,
-            other_ds_layout,
+            main_per_frame_ds_layout,
+            main_other_ds_layout,
             main_pipeline_layout,
 
+            grid_per_frame_ds_layout,
+            grid_other_ds_layout,
+            grid_pipeline_layout,
+
             descriptor_pool,
-            other_descriptor_set,
+            main_other_descriptor_set,
+            grid_other_descriptor_set,
+
+            grid_buffer,
+            
             global_light_buffer,
             textures,
             mesh_arenas: slotmap::DenseSlotMap::with_key(),
@@ -369,30 +505,99 @@ impl Renderer {
         &mut self,
         window: &winit::window::Window,
     ) -> Result<RenderContext> {
-        let frag_shader = ShaderModuleDescription::Internal {
-            stage: vk::ShaderStageFlags::FRAGMENT,
-            spv: COMPILED_FRAG_SHADER,
-        };
-        let vert_shader = ShaderModuleDescription::Internal {
+        // TODO: it seems like this could be generated by build.rs or a macro?
+        let main_vert_vertex_attribute_descriptions = [
+            vk::VertexInputAttributeDescription {
+                location: 0,
+                binding: 0,
+                format: vk::Format::R32G32B32_SFLOAT,
+                offset: std::mem::offset_of!(crate::ShaderVertVertex, position) as u32,
+            },
+            vk::VertexInputAttributeDescription {
+                location: 1,
+                binding: 0,
+                format: vk::Format::R32G32_SFLOAT,
+                offset: std::mem::offset_of!(crate::ShaderVertVertex, tex_coord) as u32,
+            },
+            vk::VertexInputAttributeDescription {
+                location: 2,
+                binding: 0,
+                format: vk::Format::R32G32B32_SFLOAT,
+                offset: std::mem::offset_of!(crate::ShaderVertVertex, normal) as u32,
+            },
+        ];
+        let main_vert_vertex_input_bindings = [
+            vk::VertexInputBindingDescription {
+                binding: 0,
+                stride: std::mem::size_of::<ShaderVertVertex>() as u32,
+                input_rate: vk::VertexInputRate::VERTEX,
+            }
+        ];
+        let main_vert_shader_desc = ShaderModuleDescription::Internal {
             stage: vk::ShaderStageFlags::VERTEX,
-            spv: COMPILED_VERT_SHADER,
+            spv: COMPILED_MAIN_VERT_SHADER,
+            entry_point_name: ENTRY_POINT_NAME_SHADER_VERT,
+            vertex_attribute_descriptions: &main_vert_vertex_attribute_descriptions,
+            vertex_input_bindings: &main_vert_vertex_input_bindings
+        };
+        let main_frag_shader_desc = ShaderModuleDescription::Internal {
+            stage: vk::ShaderStageFlags::FRAGMENT,
+            spv: COMPILED_MAIN_FRAG_SHADER,
+            entry_point_name: ENTRY_POINT_NAME_SHADER_FRAG,
+            vertex_attribute_descriptions: &[],
+            vertex_input_bindings: &[],
         };
 
-        let layout = self.main_pipeline_layout;
+        let grid_vert_vertex_attribute_descriptions = [
+            vk::VertexInputAttributeDescription {
+                location: 0,
+                binding: 0,
+                format: vk::Format::R32G32B32_SFLOAT,
+                offset: std::mem::offset_of!(GridVertVertex, position) as u32,
+            },
+        ];
+        let grid_vert_vertex_input_bindings = [
+            vk::VertexInputBindingDescription {
+                binding: 0,
+                stride: std::mem::size_of::<GridVertVertex>() as u32,
+                input_rate: vk::VertexInputRate::VERTEX,
+            }
+        ];
+        let grid_vert_shader_desc = ShaderModuleDescription::Internal {
+            stage: vk::ShaderStageFlags::VERTEX,
+            spv: COMPILED_GRID_VERT_SHADER,
+            entry_point_name: ENTRY_POINT_NAME_GRID_VERT,
+            vertex_attribute_descriptions: &grid_vert_vertex_attribute_descriptions,
+            vertex_input_bindings: &grid_vert_vertex_input_bindings
+        };
+        let grid_frag_shader_desc = ShaderModuleDescription::Internal {
+            stage: vk::ShaderStageFlags::FRAGMENT,
+            spv: COMPILED_GRID_FRAG_SHADER,
+            entry_point_name: ENTRY_POINT_NAME_GRID_FRAG,
+            vertex_attribute_descriptions: &[],
+            vertex_input_bindings: &[]
+        };
 
         RenderContext::new(
             self.device.clone(),
             window,
-            &mut self.pipelines,
-            vert_shader,
-            frag_shader,
-            &mut self.shader_modules,
-            &mut self.pipeline_layouts,
-            layout,
+
             *self
                 .descriptor_set_layouts
-                .get(self.per_frame_ds_layout)
+                .get(self.main_per_frame_ds_layout)
                 .unwrap(),
+            self.main_pipeline_layout,
+            main_vert_shader_desc,
+            main_frag_shader_desc,
+
+            *self.descriptor_set_layouts.get(self.grid_per_frame_ds_layout).unwrap(),
+            self.grid_pipeline_layout,
+            grid_vert_shader_desc,
+            grid_frag_shader_desc,
+
+            &mut self.shader_modules,
+            &mut self.pipeline_layouts,
+            &mut self.pipelines,
         )
     }
     pub fn update_world_light(
@@ -706,7 +911,7 @@ impl Renderer {
             image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
         }];
         let writes = [vk::WriteDescriptorSet {
-            dst_set: self.other_descriptor_set,
+            dst_set: self.main_other_descriptor_set,
             dst_binding: 1,
             descriptor_count: image_infos.len() as u32,
             descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
@@ -818,12 +1023,20 @@ impl Renderer {
         self.mesh_arenas.remove(handle).is_some()
     }
     #[inline]
-    pub fn other_descriptor_set(&self) -> vk::DescriptorSet {
-        self.other_descriptor_set
+    pub fn main_other_descriptor_set(&self) -> vk::DescriptorSet {
+        self.main_other_descriptor_set
+    }
+    #[inline]
+    pub fn grid_other_descriptor_set(&self) -> vk::DescriptorSet {
+        self.grid_other_descriptor_set
     }
     #[inline]
     pub fn main_pipeline_layout(&self) -> PipelineLayoutResourceHandle {
         self.main_pipeline_layout
+    }
+    #[inline]
+    pub fn grid_pipeline_layout(&self) -> PipelineLayoutResourceHandle {
+        self.grid_pipeline_layout
     }
     #[inline]
     pub fn bind_descriptor_sets(

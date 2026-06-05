@@ -54,6 +54,7 @@ struct Application {
     windows: HashMap<WindowId, (renderer::RenderContext, Window)>,
     renderer: renderer::Renderer,
     default_texture_index: usize,
+    plane_arena_handle: renderer::MeshArenaHandle,
     mesh_arena_handle: renderer::MeshArenaHandle,
     x_arrow_transform: AffineTransform,
     red_material_index: u32,
@@ -197,7 +198,8 @@ impl Application {
         let mut vertex_map = HashMap::<obj_mtl::VtnIndex, usize>::new();
         // transform, material_index
 
-        const _PLANE_VERTEX_BUFFER_DATA: &[renderer::ShaderVertVertex] = {
+        const PS: f32 = 1000.0;
+        const PLANE_VERTEX_BUFFER_DATA: &[renderer::GridVertVertex] = {
             const F: Vec3<f32> = ENGINE_FORWARDS;
             const B: Vec3<f32> = Vec3::ZERO.sub(ENGINE_FORWARDS);
             const R: Vec3<f32> = ENGINE_RIGHT;
@@ -209,46 +211,32 @@ impl Application {
             const BL: Vec3<f32> = B.add(L);
 
             &[
-                renderer::ShaderVertVertex {
-                    position: FL.into_arr(),
-                    tex_coord: [1.0, 0.0],
-                    normal: ENGINE_UP.into_arr(),
+                renderer::GridVertVertex {
+                    position: FL.scaled(PS).into_arr(),
                 },
-                renderer::ShaderVertVertex {
-                    position: FR.into_arr(),
-                    tex_coord: [0.0, 0.0],
-                    normal: ENGINE_UP.into_arr(),
+                renderer::GridVertVertex {
+                    position: FR.scaled(PS).into_arr(),
                 },
-                renderer::ShaderVertVertex {
-                    position: BR.into_arr(),
-                    tex_coord: [0.0, 1.0],
-                    normal: ENGINE_UP.into_arr(),
+                renderer::GridVertVertex {
+                    position: BR.scaled(PS).into_arr(),
                 },
-                renderer::ShaderVertVertex {
-                    position: BL.into_arr(),
-                    tex_coord: [1.0, 1.0],
-                    normal: ENGINE_UP.into_arr(),
+                renderer::GridVertVertex {
+                    position: BL.scaled(PS).into_arr(),
                 },
             ]
         };
-        const _PLANE_INDEX_BUFFER_DATA: &[u32] = &[0, 1, 2, 2, 3, 0];
+        const PLANE_INDEX_BUFFER_DATA: &[u32] = &[0, 1, 2, 2, 3, 0];
 
-        // old_vertex_len = vertices.len();
-        // for vertex in PLANE_VERTEX_BUFFER_DATA {
-        //     vertices.push(*vertex);
-        // }
-        // old_index_len = indices.len();
-        // for index in PLANE_INDEX_BUFFER_DATA {
-        //     indices.push(*index);
-        // }
-        // instance_info.push((
-        //     math::AffineTransform {
-        //         position: Vec3::ZERO.sub(ENGINE_UP).scaled(0.5),
-        //         orientation: Quat::IDENTITY,
-        //         scalar: Vec3::new(1.0, 1.0, 1.0),
-        //     },
-        //     0
-        // ));
+        let plane_arena_handle = {
+            let vertex_buffer_data = unsafe {
+                std::slice::from_raw_parts(
+                    PLANE_VERTEX_BUFFER_DATA.as_ptr() as *const u8,
+                    PLANE_VERTEX_BUFFER_DATA.len() * std::mem::size_of::<renderer::GridData>(),
+                )
+            };
+                        
+            renderer.create_mesh_arena(vertex_buffer_data, &PLANE_INDEX_BUFFER_DATA)?
+        };
 
         let arrow_iter = crate::ARROW_VERTICES
             .iter()
@@ -513,6 +501,7 @@ impl Application {
             arrow_camera: Camera::orthographic(1.5, 1.5, 10.0),
             windows: HashMap::new(),
             default_texture_index,
+            plane_arena_handle,
             mesh_arena_handle,
             x_arrow_transform,
             red_material_index,
@@ -525,7 +514,7 @@ impl Application {
             model_transform,
             global_light_direction,
             global_light_color: Vec4::new(1.0, 1.0, 1.0, 1.0),
-            global_ambient_light: 0.1,
+            global_ambient_light: 0.05,
             exiting: false,
         })
     }
@@ -720,7 +709,7 @@ impl Application {
                 }
 
                 let new_context = self.renderer.create_render_context(window)?;
-                if context.get_pipeline() != new_context.get_pipeline() {
+                if context.get_grid_pipeline() != new_context.get_grid_pipeline() {
                     // 
                 }
                 *context = new_context;
@@ -743,7 +732,8 @@ impl Application {
                     indirect_command_data,
                     model_indirect_command_data_count,
                     arrow_indirect_command_data_count,
-                    per_frame_descriptor_set,
+                    main_per_frame_descriptor_set,
+                    grid_per_frame_descriptor_set,
                 ) = {
                     let swapchain_extent = context.swapchain_extent();
 
@@ -812,16 +802,20 @@ impl Application {
                         frame.indirect_command_data().handle,
                         model_command_data_count as u32,
                         arrow_command_data_count as u32,
-                        frame.descriptor_set(),
+                        frame.main_per_frame_descriptor_set(),
+                        frame.grid_per_frame_descriptor_set(),
                     )
                 };
 
-                let pipeline = context.get_pipeline();
+                let main_pipeline = context.get_main_pipeline();
+                let grid_pipeline = context.get_grid_pipeline();
 
                 let record_draw_commands = |cmd: vk::CommandBuffer| unsafe {
-                    self.renderer
-                        .bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
 
+                    // PART 2 - MAIN SCENE
+                    self.renderer
+                        .bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, main_pipeline);
+                    
                     let (vb, ib) = {
                         let mesh_arena = self
                             .renderer
@@ -841,7 +835,7 @@ impl Application {
                     };
 
                     {
-                        let sets = [self.renderer.other_descriptor_set()];
+                        let sets = [self.renderer.main_other_descriptor_set()];
                         self.renderer.bind_descriptor_sets(
                             cmd,
                             self.renderer.main_pipeline_layout(),
@@ -861,7 +855,6 @@ impl Application {
                         );
                     }
 
-                    // model
                     {
                         let scissor = vk::Rect2D {
                             offset: vk::Offset2D { x: 0, y: 0 },
@@ -878,7 +871,7 @@ impl Application {
                         self.renderer.device.cmd_set_viewport(cmd, 0, &[viewport]);
                         self.renderer.device.cmd_set_scissor(cmd, 0, &[scissor]);
 
-                        let sets = [per_frame_descriptor_set];
+                        let sets = [main_per_frame_descriptor_set];
                         self.renderer.bind_descriptor_sets(
                             cmd,
                             self.renderer.main_pipeline_layout(),
@@ -895,7 +888,126 @@ impl Application {
                         );
                     }
 
+                    // PART 1 - GRID
+                    self.renderer
+                        .bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, grid_pipeline);
+                    let (vb, ib) = {
+                        let mesh_arena = self
+                            .renderer
+                            .access_mesh_arena(self.plane_arena_handle)
+                            .unwrap();
+
+                        (
+                            mesh_arena.vertex_buffer.handle,
+                            mesh_arena.index_buffer.handle,
+                        )
+                    };
+
+                    let (buffers, offsets) = {
+                        let b = [vb];
+                        let o = [0];
+
+                        (b, o)
+                    };
+
+                    {
+                        let sets = [self.renderer.grid_other_descriptor_set()];
+                        self.renderer.bind_descriptor_sets(
+                            cmd,
+                            self.renderer.grid_pipeline_layout(),
+                            1,
+                            &sets,
+                            &[],
+                        );
+
+                        self.renderer
+                            .device
+                            .cmd_bind_vertex_buffers(cmd, 0, &buffers, &offsets);
+                        self.renderer.device.cmd_bind_index_buffer(
+                            cmd,
+                            ib,
+                            0,
+                            vk::IndexType::UINT32,
+                        );
+                    }
+
+                    {
+                        let scissor = vk::Rect2D {
+                            offset: vk::Offset2D { x: 0, y: 0 },
+                            extent: swapchain_extent,
+                        };
+                        let viewport = ash::vk::Viewport {
+                            x: 0.0,
+                            y: 0.0,
+                            width: scissor.extent.width as f32,
+                            height: scissor.extent.height as f32,
+                            min_depth: 0.0,
+                            max_depth: 1.0,
+                        };
+                        self.renderer.device.cmd_set_viewport(cmd, 0, &[viewport]);
+                        self.renderer.device.cmd_set_scissor(cmd, 0, &[scissor]);
+
+                        let sets = [grid_per_frame_descriptor_set];
+                        self.renderer.bind_descriptor_sets(
+                            cmd,
+                            self.renderer.grid_pipeline_layout(),
+                            0,
+                            &sets,
+                            &[model_camera_offset],
+                        );
+                        self.renderer.device.cmd_draw_indexed(
+                            cmd,
+                            6, // index_count
+                            1,
+                            0,
+                            0,
+                            0,
+                        );
+                    }
+
                     // arrow
+                    self.renderer
+                        .bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, main_pipeline);
+                    
+                    let (vb, ib) = {
+                        let mesh_arena = self
+                            .renderer
+                            .access_mesh_arena(self.mesh_arena_handle)
+                            .unwrap();
+                        (
+                            mesh_arena.vertex_buffer.handle,
+                            mesh_arena.index_buffer.handle,
+                        )
+                    };
+
+                    let (buffers, offsets) = {
+                        let b = [vb];
+                        let o = [0];
+
+                        (b, o)
+                    };
+
+                    {
+                        let sets = [self.renderer.main_other_descriptor_set()];
+                        self.renderer.bind_descriptor_sets(
+                            cmd,
+                            self.renderer.main_pipeline_layout(),
+                            1,
+                            &sets,
+                            &[],
+                        );
+
+                        self.renderer
+                            .device
+                            .cmd_bind_vertex_buffers(cmd, 0, &buffers, &offsets);
+                        self.renderer.device.cmd_bind_index_buffer(
+                            cmd,
+                            ib,
+                            0,
+                            vk::IndexType::UINT32,
+                        );
+                    }
+
                     {
                         let gizmo_size =
                             (swapchain_extent.width.min(swapchain_extent.height) / 4).max(128);
@@ -936,7 +1048,7 @@ impl Application {
                         self.renderer.device.cmd_set_viewport(cmd, 0, &[viewport]);
                         self.renderer.device.cmd_set_scissor(cmd, 0, &[scissor]);
 
-                        let sets = [per_frame_descriptor_set];
+                        let sets = [main_per_frame_descriptor_set];
                         self.renderer.bind_descriptor_sets(
                             cmd,
                             self.renderer.main_pipeline_layout(),
@@ -1029,7 +1141,7 @@ impl ApplicationHandler for Application {
                 self.global_light_color,
             )
             .unwrap();
-        let _new_pipeline = context.get_pipeline();
+        let _new_pipeline = context.get_main_pipeline();
         if let Some((_old_context, _)) = self.windows.insert(window_id, (context, window)) {
             //
         }

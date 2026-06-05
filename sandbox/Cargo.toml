@@ -11,8 +11,8 @@ repository = "https://github.com/DevinLKern/dlk-model-viewer"
 # documentation = ""
 
 [dependencies]
-# winit = { version = "0.30.12", default-features = false, features = ["x11", "rwh_06"] }
-winit = "0.30.12"
+winit = { version = "0.30.12", default-features = false, features = ["x11", "rwh_06"] }
+# winit = "0.30.12"
 ash = "0.38.0"
 vulkan = { path = "../vulkan" }
 renderer = { path = "../renderer" }

@@ -330,6 +330,21 @@ impl Device {
     }
 
     #[inline]
+    pub unsafe fn create_compute_pipelines(
+        &self,
+        pipeline_cache: vk::PipelineCache,
+        create_infos: &[vk::ComputePipelineCreateInfo],
+    ) -> std::result::Result<Vec<vk::Pipeline>, (Vec<vk::Pipeline>, vk::Result)> {
+        unsafe {
+            self.device.create_compute_pipelines(
+                pipeline_cache,
+                create_infos,
+                self.get_alloc_callbacks()
+            )
+        }
+    }
+
+    #[inline]
     pub unsafe fn create_swapchain(
         &self,
         create_info: &vk::SwapchainCreateInfoKHR,

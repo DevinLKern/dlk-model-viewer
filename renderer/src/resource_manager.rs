@@ -3,7 +3,7 @@ use std::{collections::HashMap, hash::Hash};
 use ash::vk;
 use vulkan::SharedDeviceRef;
 
-use crate::{ENTRY_POINT_NAME_SHADER_FRAG, ENTRY_POINT_NAME_SHADER_VERT, Error, Result};
+use crate::{Error, Result};
 
 // SHADER MODULES
 
@@ -12,11 +12,39 @@ pub enum ShaderModuleDescription {
     Internal {
         stage: vk::ShaderStageFlags,
         spv: &'static [u8],
+        entry_point_name: &'static std::ffi::CStr,
+        vertex_attribute_descriptions: *const [vk::VertexInputAttributeDescription],
+        vertex_input_bindings: *const [vk::VertexInputBindingDescription],
     },
     External {
         stage: vk::ShaderStageFlags,
         path: Box<str>,
+        entry_point_name: std::ffi::CString,
     },
+}
+
+impl ShaderModuleDescription {
+    #[inline]
+    pub fn entry_point_name(&self) -> *const i8 {
+        match self {
+            ShaderModuleDescription::Internal { entry_point_name, .. } => entry_point_name.as_ptr(),
+            ShaderModuleDescription::External { entry_point_name, .. } => entry_point_name.as_ptr(),
+        }
+    }
+    #[inline]
+    pub fn vertex_input_attribues(&self) -> *const [vk::VertexInputAttributeDescription] {
+        match self {
+            ShaderModuleDescription::Internal { vertex_attribute_descriptions, .. } => *vertex_attribute_descriptions,
+            _ => todo!()
+        }
+    }
+    #[inline]
+    pub fn vertex_input_bindings(&self) -> *const [vk::VertexInputBindingDescription] {
+        match self {
+            ShaderModuleDescription::Internal { vertex_input_bindings, .. } => *vertex_input_bindings,
+            _ => todo!()
+        }
+    }
 }
 
 slotmap::new_key_type! { pub struct ShaderModuleResourceHandle; }
@@ -272,8 +300,19 @@ impl PipelineLayoutResourceManager {
     }
 }
 
+impl Drop for PipelineLayoutResourceManager {
+    fn drop(&mut self) {
+        for (_handle, resource) in self.resources.iter() {
+            unsafe {
+                self.device.destroy_pipeline_layout(resource.raw);
+            }
+        }
+    }
+}
+
 // PIPELINES
 
+#[allow(unused)]
 #[derive(Hash, Eq, PartialEq, PartialOrd, Ord, Clone)]
 pub(crate) enum PipelineDescription {
     DynamicGraphics {
@@ -285,6 +324,11 @@ pub(crate) enum PipelineDescription {
         depth_format: vk::Format,
         samples: vk::SampleCountFlags,
     },
+    ComputeInternal {
+        pipeline_layout: PipelineLayoutResourceHandle,
+        shader_module: ShaderModuleResourceHandle,
+        entry_point: &'static std::ffi::CStr,
+    }
 }
 
 slotmap::new_key_type! { pub struct PipelineResourceHandle; }
@@ -329,64 +373,48 @@ impl PipelineResourceManager {
                 depth_format,
                 samples,
             } => {
-                let stages = {
-                    let vert_shader = shader_modules
-                        .get(vert_shader.clone())
+                let (vert_stage, vert_input_attributes, vert_input_bindings) = {
+                    let vert_shader_desc = shader_modules
+                        .get_desc(*vert_shader)
                         .ok_or(Error::ResourceMissing)?;
-                    let frag_shader = shader_modules
-                        .get(frag_shader.clone())
+                    let vert_shader = shader_modules
+                        .get(*vert_shader)
                         .ok_or(Error::ResourceMissing)?;
 
                     let vert_stage = vk::PipelineShaderStageCreateInfo {
                         stage: vk::ShaderStageFlags::VERTEX,
                         module: *vert_shader,
-                        p_name: ENTRY_POINT_NAME_SHADER_VERT.as_ptr(),
+                        p_name: vert_shader_desc.entry_point_name(),
                         ..Default::default()
                     };
+
+                    (vert_stage, vert_shader_desc.vertex_input_attribues(), vert_shader_desc.vertex_input_bindings())
+                };
+
+                let (frag_stage, frag_input_attributes, frag_input_bindings) = {
+                    let frag_shader_desc = shader_modules
+                        .get_desc(*frag_shader)
+                        .ok_or(Error::ResourceMissing)?;
+                    let frag_shader = shader_modules
+                        .get(*frag_shader)
+                        .ok_or(Error::ResourceMissing)?;
                     let frag_stage = vk::PipelineShaderStageCreateInfo {
                         stage: vk::ShaderStageFlags::FRAGMENT,
                         module: *frag_shader,
-                        p_name: ENTRY_POINT_NAME_SHADER_FRAG.as_ptr(),
+                        p_name: frag_shader_desc.entry_point_name(),
                         ..Default::default()
                     };
-                    [vert_stage, frag_stage]
+
+                    (frag_stage, frag_shader_desc.vertex_input_attribues(), frag_shader_desc.vertex_input_bindings())
                 };
 
-                let (vertex_input_attributes, vertex_input_bindings) = {
-                    let vk_input_attributes = [
-                        vk::VertexInputAttributeDescription {
-                            location: 0,
-                            binding: 0,
-                            format: vk::Format::R32G32B32_SFLOAT,
-                            offset: std::mem::offset_of!(crate::ShaderVertVertex, position) as u32,
-                        },
-                        vk::VertexInputAttributeDescription {
-                            location: 1,
-                            binding: 0,
-                            format: vk::Format::R32G32_SFLOAT,
-                            offset: std::mem::offset_of!(crate::ShaderVertVertex, tex_coord) as u32,
-                        },
-                        vk::VertexInputAttributeDescription {
-                            location: 2,
-                            binding: 0,
-                            format: vk::Format::R32G32B32_SFLOAT,
-                            offset: std::mem::offset_of!(crate::ShaderVertVertex, normal) as u32,
-                        },
-                    ];
+                let stages = [vert_stage, frag_stage];
 
-                    let vk_binding_descriptions = [vk::VertexInputBindingDescription {
-                        binding: 0,
-                        stride: std::mem::size_of::<crate::ShaderVertVertex>() as u32,
-                        input_rate: vk::VertexInputRate::VERTEX,
-                    }];
-
-                    (vk_input_attributes, vk_binding_descriptions)
-                };
                 let vertex_input_state = vk::PipelineVertexInputStateCreateInfo {
-                    vertex_binding_description_count: vertex_input_bindings.len() as u32,
-                    p_vertex_binding_descriptions: vertex_input_bindings.as_ptr(),
-                    vertex_attribute_description_count: vertex_input_attributes.len() as u32,
-                    p_vertex_attribute_descriptions: vertex_input_attributes.as_ptr(),
+                    vertex_binding_description_count: vert_input_bindings.len() as u32,
+                    p_vertex_binding_descriptions: vert_input_bindings.cast(),
+                    vertex_attribute_description_count: vert_input_attributes.len() as u32,
+                    p_vertex_attribute_descriptions: vert_input_attributes.cast(),
                     ..Default::default()
                 };
                 let input_assembly_state = vk::PipelineInputAssemblyStateCreateInfo {
@@ -432,9 +460,9 @@ impl PipelineResourceManager {
                 let attachments = [vk::PipelineColorBlendAttachmentState {
                     blend_enable: vk::TRUE,
                     src_color_blend_factor: vk::BlendFactor::SRC_ALPHA,
-                    dst_color_blend_factor: vk::BlendFactor::ZERO,
+                    dst_color_blend_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
                     color_blend_op: vk::BlendOp::ADD,
-                    src_alpha_blend_factor: vk::BlendFactor::ZERO,
+                    src_alpha_blend_factor: vk::BlendFactor::ONE,
                     dst_alpha_blend_factor: vk::BlendFactor::ZERO,
                     alpha_blend_op: vk::BlendOp::ADD,
                     color_write_mask: vk::ColorComponentFlags::RGBA,
@@ -488,6 +516,28 @@ impl PipelineResourceManager {
                 };
                 let pipelines = pipelines.map_err(|(_, e)| e)?;
 
+                pipelines[0]
+            }
+            PipelineDescription::ComputeInternal { pipeline_layout, shader_module, entry_point } => {
+                let layout = pipeline_layouts.get(*pipeline_layout).ok_or(Error::ResourceMissing)?;
+                let (layout, bind_point) = (layout.raw, layout.desc.bind_point);
+                let module = *shader_modules.get(*shader_module).ok_or(Error::ResourceMissing)?;
+
+                let stage = vk::PipelineShaderStageCreateInfo {
+                    stage: vk::ShaderStageFlags::COMPUTE,
+                    module,
+                    p_name: entry_point.as_ptr(),
+                    ..Default::default()
+                };
+                let create_infos = [vk::ComputePipelineCreateInfo {
+                    stage,
+                    layout,
+                    ..Default::default()
+                }];
+
+                let pipelines = unsafe { self.device.create_compute_pipelines(vk::PipelineCache::null(), &create_infos) };
+                let pipelines = pipelines.map_err(|(_, e)| e)?;
+                
                 pipelines[0]
             }
         };

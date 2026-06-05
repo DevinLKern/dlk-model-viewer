@@ -1,4 +1,4 @@
-use crate::{Vec3, traits::Zero};
+use crate::{Vec3, traits::{Zero, One}};
 
 #[allow(dead_code)]
 #[repr(transparent)]
@@ -24,6 +24,14 @@ where
 
 impl<T: Zero> Zero for Vec4<T> {
     const ZERO: Self = Self::new(T::ZERO, T::ZERO, T::ZERO, T::ZERO);
+}
+
+#[allow(dead_code)]
+impl<T: Zero + One> Vec4<T> {
+    pub const X: Self = Self::new(T::ONE, T::ZERO, T::ZERO, T::ZERO);
+    pub const Y: Self = Self::new(T::ZERO, T::ONE, T::ZERO, T::ZERO);
+    pub const Z: Self = Self::new(T::ZERO, T::ZERO, T::ONE, T::ZERO);
+    pub const W: Self = Self::new(T::ZERO, T::ZERO, T::ZERO, T::ONE);
 }
 
 impl<T> Vec4<T>
