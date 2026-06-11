@@ -339,7 +339,7 @@ impl Device {
             self.device.create_compute_pipelines(
                 pipeline_cache,
                 create_infos,
-                self.get_alloc_callbacks()
+                self.get_alloc_callbacks(),
             )
         }
     }

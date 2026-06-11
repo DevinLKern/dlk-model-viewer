@@ -1,4 +1,7 @@
-use crate::{Vec3, traits::{Zero, One}};
+use crate::{
+    Vec3,
+    traits::{One, Zero},
+};
 
 #[allow(dead_code)]
 #[repr(transparent)]

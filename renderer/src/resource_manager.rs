@@ -27,22 +27,32 @@ impl ShaderModuleDescription {
     #[inline]
     pub fn entry_point_name(&self) -> *const i8 {
         match self {
-            ShaderModuleDescription::Internal { entry_point_name, .. } => entry_point_name.as_ptr(),
-            ShaderModuleDescription::External { entry_point_name, .. } => entry_point_name.as_ptr(),
+            ShaderModuleDescription::Internal {
+                entry_point_name, ..
+            } => entry_point_name.as_ptr(),
+            ShaderModuleDescription::External {
+                entry_point_name, ..
+            } => entry_point_name.as_ptr(),
         }
     }
     #[inline]
     pub fn vertex_input_attribues(&self) -> *const [vk::VertexInputAttributeDescription] {
         match self {
-            ShaderModuleDescription::Internal { vertex_attribute_descriptions, .. } => *vertex_attribute_descriptions,
-            _ => todo!()
+            ShaderModuleDescription::Internal {
+                vertex_attribute_descriptions,
+                ..
+            } => *vertex_attribute_descriptions,
+            _ => todo!(),
         }
     }
     #[inline]
     pub fn vertex_input_bindings(&self) -> *const [vk::VertexInputBindingDescription] {
         match self {
-            ShaderModuleDescription::Internal { vertex_input_bindings, .. } => *vertex_input_bindings,
-            _ => todo!()
+            ShaderModuleDescription::Internal {
+                vertex_input_bindings,
+                ..
+            } => *vertex_input_bindings,
+            _ => todo!(),
         }
     }
 }
@@ -328,7 +338,7 @@ pub(crate) enum PipelineDescription {
         pipeline_layout: PipelineLayoutResourceHandle,
         shader_module: ShaderModuleResourceHandle,
         entry_point: &'static std::ffi::CStr,
-    }
+    },
 }
 
 slotmap::new_key_type! { pub struct PipelineResourceHandle; }
@@ -388,7 +398,11 @@ impl PipelineResourceManager {
                         ..Default::default()
                     };
 
-                    (vert_stage, vert_shader_desc.vertex_input_attribues(), vert_shader_desc.vertex_input_bindings())
+                    (
+                        vert_stage,
+                        vert_shader_desc.vertex_input_attribues(),
+                        vert_shader_desc.vertex_input_bindings(),
+                    )
                 };
 
                 let (frag_stage, frag_input_attributes, frag_input_bindings) = {
@@ -405,7 +419,11 @@ impl PipelineResourceManager {
                         ..Default::default()
                     };
 
-                    (frag_stage, frag_shader_desc.vertex_input_attribues(), frag_shader_desc.vertex_input_bindings())
+                    (
+                        frag_stage,
+                        frag_shader_desc.vertex_input_attribues(),
+                        frag_shader_desc.vertex_input_bindings(),
+                    )
                 };
 
                 let stages = [vert_stage, frag_stage];
@@ -518,10 +536,18 @@ impl PipelineResourceManager {
 
                 pipelines[0]
             }
-            PipelineDescription::ComputeInternal { pipeline_layout, shader_module, entry_point } => {
-                let layout = pipeline_layouts.get(*pipeline_layout).ok_or(Error::ResourceMissing)?;
+            PipelineDescription::ComputeInternal {
+                pipeline_layout,
+                shader_module,
+                entry_point,
+            } => {
+                let layout = pipeline_layouts
+                    .get(*pipeline_layout)
+                    .ok_or(Error::ResourceMissing)?;
                 let (layout, bind_point) = (layout.raw, layout.desc.bind_point);
-                let module = *shader_modules.get(*shader_module).ok_or(Error::ResourceMissing)?;
+                let module = *shader_modules
+                    .get(*shader_module)
+                    .ok_or(Error::ResourceMissing)?;
 
                 let stage = vk::PipelineShaderStageCreateInfo {
                     stage: vk::ShaderStageFlags::COMPUTE,
@@ -535,9 +561,12 @@ impl PipelineResourceManager {
                     ..Default::default()
                 }];
 
-                let pipelines = unsafe { self.device.create_compute_pipelines(vk::PipelineCache::null(), &create_infos) };
+                let pipelines = unsafe {
+                    self.device
+                        .create_compute_pipelines(vk::PipelineCache::null(), &create_infos)
+                };
                 let pipelines = pipelines.map_err(|(_, e)| e)?;
-                
+
                 pipelines[0]
             }
         };

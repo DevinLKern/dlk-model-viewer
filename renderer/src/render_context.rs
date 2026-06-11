@@ -1,10 +1,9 @@
 use ash::vk;
-use math::Mat4;
 use vulkan::device::SharedDeviceRef;
 
 use crate::{
     CameraUBO, InstanceData, PipelineLayoutResourceHandle, PipelineLayoutResourceManager,
-    PipelineResourceHandle, PipelineResourceManager, ShaderModuleDescription,
+    PipelineResourceHandle, PipelineResourceManager, Result, ShaderModuleDescription,
     ShaderModuleResourceManager,
 };
 
@@ -12,6 +11,131 @@ pub const MAX_FRAME_COUNT: u64 = 3;
 pub const MAX_CAMERA_DATA_COUNT: u64 = 32;
 pub const MAX_INSTANCE_DATA_COUNT: u64 = 128;
 pub const MAX_INDIRECT_COMMAND_DATA_COUNT: u64 = MAX_INSTANCE_DATA_COUNT * 4;
+
+#[allow(dead_code)]
+pub struct FrameAllocator {
+    uniform_buffer: vulkan::Buffer,
+    uniform_buffer_offset: u64,
+    storage_buffer: vulkan::Buffer,
+    storage_buffer_offset: u64,
+    indirect_buffer: vulkan::Buffer,
+    indirect_buffer_offset: u64,
+}
+
+#[allow(dead_code)]
+impl FrameAllocator {
+    pub fn new(
+        device: SharedDeviceRef,
+        uniform_buffer_capcity: u64,
+        storage_buffer_capacity: u64,
+        indirect_buffer_capacity: u64,
+    ) -> Result<Self> {
+        let uniform_buffer = {
+            let create_info = vulkan::BufferCreateInfo {
+                size: uniform_buffer_capcity,
+                usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
+                memory_property_flags: vk::MemoryPropertyFlags::HOST_COHERENT
+                    | vk::MemoryPropertyFlags::HOST_VISIBLE,
+            };
+
+            vulkan::Buffer::new(device.clone(), &create_info)?
+        };
+
+        let storage_buffer = {
+            let create_info = vulkan::BufferCreateInfo {
+                size: storage_buffer_capacity,
+                usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+                memory_property_flags: vk::MemoryPropertyFlags::HOST_COHERENT
+                    | vk::MemoryPropertyFlags::HOST_VISIBLE,
+            };
+
+            vulkan::Buffer::new(device.clone(), &create_info)?
+        };
+
+        let indirect_buffer = {
+            let create_info = vulkan::BufferCreateInfo {
+                size: indirect_buffer_capacity,
+                usage: vk::BufferUsageFlags::INDIRECT_BUFFER,
+                memory_property_flags: vk::MemoryPropertyFlags::HOST_COHERENT
+                    | vk::MemoryPropertyFlags::HOST_VISIBLE,
+            };
+
+            vulkan::Buffer::new(device, &create_info)?
+        };
+
+        Ok(Self {
+            uniform_buffer,
+            uniform_buffer_offset: 0,
+            storage_buffer,
+            storage_buffer_offset: 0,
+            indirect_buffer,
+            indirect_buffer_offset: 0,
+        })
+    }
+    pub fn upload_uniform_data<T>(&mut self, data: &[T], alignment: u64) -> Result<u64> {
+        let (buffer, offset) = (&self.uniform_buffer, &mut self.uniform_buffer_offset);
+        let res = *offset;
+
+        let size = (data.len() * std::mem::size_of::<T>()) as u64;
+        unsafe {
+            let dst = buffer.map_memory(*offset, size)? as *mut T;
+            dst.copy_from_nonoverlapping(data.as_ptr(), data.len());
+            buffer.unmap();
+        }
+        *offset += size;
+        *offset = offset.next_multiple_of(alignment);
+
+        Ok(res)
+    }
+    pub fn upload_storage_data<T>(&mut self, data: &[T], alignment: u64) -> Result<u64> {
+        let (buffer, offset) = (&self.storage_buffer, &mut self.storage_buffer_offset);
+        let res = *offset;
+
+        let size = (data.len() * std::mem::size_of::<T>()) as u64;
+        unsafe {
+            let dst = buffer.map_memory(*offset, size)? as *mut T;
+            dst.copy_from_nonoverlapping(data.as_ptr(), data.len());
+            buffer.unmap();
+        }
+        *offset += size;
+        *offset = offset.next_multiple_of(alignment);
+
+        Ok(res)
+    }
+    pub fn upload_indirect_data<T>(&mut self, data: &[T], alignment: u64) -> Result<u64> {
+        let (buffer, offset) = (&self.indirect_buffer, &mut self.indirect_buffer_offset);
+        let res = *offset;
+
+        let size = (data.len() * std::mem::size_of::<T>()) as u64;
+        unsafe {
+            let dst = buffer.map_memory(*offset, size)? as *mut T;
+            dst.copy_from_nonoverlapping(data.as_ptr(), data.len());
+            buffer.unmap();
+        }
+        *offset += size;
+        *offset = offset.next_multiple_of(alignment);
+
+        Ok(res)
+    }
+    #[inline]
+    pub fn reset(&mut self) {
+        self.uniform_buffer_offset = 0;
+        self.storage_buffer_offset = 0;
+        self.indirect_buffer_offset = 0;
+    }
+    #[inline]
+    pub fn uniform_buffer_raw(&self) -> vk::Buffer {
+        self.uniform_buffer.handle
+    }
+    #[inline]
+    pub fn storage_buffer_raw(&self) -> vk::Buffer {
+        self.storage_buffer.handle
+    }
+    #[inline]
+    pub fn indirect_buffer_raw(&self) -> vk::Buffer {
+        self.indirect_buffer.handle
+    }
+}
 
 #[allow(dead_code)]
 pub struct FrameData {
@@ -24,14 +148,9 @@ pub struct FrameData {
     main_per_frame_descriptor_set: vk::DescriptorSet,
     grid_per_frame_descriptor_set: vk::DescriptorSet,
     camera_data_element_size: u64,
-    camera_data_count: u64,
-    camera_data: vulkan::Buffer,
     instance_data_element_size: u64,
-    instance_data_count: u64,
-    instance_data: vulkan::Buffer,
     indirect_command_data_element_size: u64,
-    indirect_command_data_count: u64,
-    indirect_command_data: vulkan::Buffer,
+    allocator: FrameAllocator,
 }
 
 #[allow(unused)]
@@ -40,72 +159,44 @@ impl FrameData {
         device: SharedDeviceRef,
         main_per_frame_descriptor_set: vk::DescriptorSet,
         grid_per_frame_descriptor_set: vk::DescriptorSet,
-    ) -> crate::Result<Self> {
-        let (camera_data, camera_data_element_size) = {
-            let element_size = {
-                let size = std::mem::size_of::<CameraUBO>() as u64;
-                let properties = unsafe { device.get_physical_device_properties() };
+    ) -> Result<Self> {
+        let camera_data_element_size = {
+            let size = std::mem::size_of::<CameraUBO>() as u64;
+            let properties = unsafe { device.get_physical_device_properties() };
 
-                size.next_multiple_of(properties.limits.min_uniform_buffer_offset_alignment)
-            };
-
-            let buffer_create_info = vulkan::BufferCreateInfo {
-                size: element_size * MAX_CAMERA_DATA_COUNT * 2,
-                usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
-                memory_property_flags: vk::MemoryPropertyFlags::HOST_COHERENT
-                    | vk::MemoryPropertyFlags::HOST_VISIBLE,
-            };
-            let buffer = vulkan::Buffer::new(device.clone(), &buffer_create_info)?;
-
-            (buffer, element_size)
+            size.next_multiple_of(properties.limits.min_uniform_buffer_offset_alignment)
         };
 
-        let (instance_data, instance_data_element_size) = {
-            let element_size = {
-                let size = std::mem::size_of::<InstanceData>() as u64;
-                let properties = unsafe { device.get_physical_device_properties() };
+        let instance_data_element_size = {
+            let size = std::mem::size_of::<InstanceData>() as u64;
+            let properties = unsafe { device.get_physical_device_properties() };
 
-                size.next_multiple_of(properties.limits.min_storage_buffer_offset_alignment)
-            };
-
-            let buffer_create_info = vulkan::BufferCreateInfo {
-                size: element_size * MAX_INSTANCE_DATA_COUNT,
-                usage: vk::BufferUsageFlags::STORAGE_BUFFER,
-                memory_property_flags: vk::MemoryPropertyFlags::HOST_COHERENT
-                    | vk::MemoryPropertyFlags::HOST_VISIBLE,
-            };
-            let buffer = vulkan::Buffer::new(device.clone(), &buffer_create_info)?;
-
-            (buffer, element_size)
+            size.next_multiple_of(properties.limits.min_storage_buffer_offset_alignment)
         };
 
-        let (indirect_command_data, indirect_command_data_element_size) = {
-            let element_size = std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u64;
+        let indirect_command_data_element_size =
+            std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u64;
 
-            let buffer_create_info = vulkan::BufferCreateInfo {
-                size: element_size * MAX_INDIRECT_COMMAND_DATA_COUNT,
-                usage: vk::BufferUsageFlags::INDIRECT_BUFFER,
-                memory_property_flags: vk::MemoryPropertyFlags::HOST_COHERENT
-                    | vk::MemoryPropertyFlags::HOST_VISIBLE,
-            };
-            let buffer = vulkan::Buffer::new(device.clone(), &buffer_create_info)?;
-
-            (buffer, element_size)
-        };
+        let allocator = FrameAllocator::new(
+            device.clone(),
+            camera_data_element_size * MAX_CAMERA_DATA_COUNT,
+            instance_data_element_size * MAX_INSTANCE_DATA_COUNT,
+            indirect_command_data_element_size * MAX_INDIRECT_COMMAND_DATA_COUNT,
+        )?;
 
         {
             let main_camera_buffer_info = [vk::DescriptorBufferInfo {
-                buffer: camera_data.handle,
+                buffer: allocator.uniform_buffer_raw(),
                 offset: 0,
                 range: camera_data_element_size,
             }];
             let instance_buffer_info = [vk::DescriptorBufferInfo {
-                buffer: instance_data.handle,
+                buffer: allocator.storage_buffer_raw(),
                 offset: 0,
-                range: instance_data.size,
+                range: instance_data_element_size * MAX_INSTANCE_DATA_COUNT,
             }];
             let grid_camera_buffer_info = [vk::DescriptorBufferInfo {
-                buffer: camera_data.handle,
+                buffer: allocator.uniform_buffer_raw(),
                 offset: 0,
                 range: camera_data_element_size,
             }];
@@ -216,118 +307,26 @@ impl FrameData {
             main_per_frame_descriptor_set,
             grid_per_frame_descriptor_set,
             camera_data_element_size,
-            camera_data_count: 0,
-            camera_data,
             instance_data_element_size,
-            instance_data_count: 0,
-            instance_data,
             indirect_command_data_element_size,
-            indirect_command_data_count: 0,
-            indirect_command_data,
+            allocator,
         })
     }
     #[inline]
-    pub fn reset_camera_data(&mut self) {
-        self.camera_data_count = 0;
-    }
-    // returns an OFFSET into the camera_data buffer
-    pub fn add_camera_data(&mut self, data: CameraUBO) -> crate::Result<u64> {
-        let offset = self.camera_data_element_size * self.camera_data_count;
-
-        unsafe {
-            let dst = self
-                .camera_data
-                .map_memory(offset, self.camera_data_element_size)?;
-            let dst = dst as *mut CameraUBO;
-
-            *dst = data;
-
-            self.camera_data.unmap();
-        }
-
-        self.camera_data_count += 1;
-
-        Ok(offset)
+    pub fn allocator_mut(&mut self) -> &mut FrameAllocator {
+        &mut self.allocator
     }
     #[inline]
-    pub fn reset_instance_data(&mut self) {
-        self.instance_data_count = 0;
-    }
-    // returns an INDEX into the instance_data buffer
-    pub fn add_instance_data(
-        &mut self,
-        model_matrix: Mat4<f32>,
-        material_index: u32,
-    ) -> crate::Result<u64> {
-        let normal_matrix = model_matrix
-            .as_mat3()
-            .transposed()
-            .inverse()
-            .unwrap()
-            .as_mat4(1.0)
-            .into_2d_arr();
-        let model_matrix = model_matrix.into_2d_arr();
-        let data = InstanceData {
-            model_matrix,
-            normal_matrix,
-            material_index,
-            _pad0: 0,
-            _pad1: 0,
-            _pad2: 0,
-        };
-
-        let index = self.instance_data_count;
-
-        unsafe {
-            let offset = self.instance_data_element_size * self.instance_data_count;
-            let dst = self
-                .instance_data
-                .map_memory(offset, self.instance_data_element_size)?;
-            let dst = dst as *mut InstanceData;
-
-            *dst = data;
-
-            self.instance_data.unmap();
-        }
-
-        self.instance_data_count += 1;
-
-        Ok(index)
+    pub fn camera_data_element_size(&self) -> u64 {
+        self.camera_data_element_size
     }
     #[inline]
-    pub fn reset_indirect_command_data(&mut self) {
-        self.indirect_command_data_count = 0;
-    }
-    // returns an INDEX into the indirect_command_data buffer
-    pub fn add_indirect_command_data(
-        &mut self,
-        data: vk::DrawIndexedIndirectCommand,
-    ) -> crate::Result<u64> {
-        let index = self.indirect_command_data_count;
-
-        unsafe {
-            let offset = self.indirect_command_data_element_size * self.indirect_command_data_count;
-            let dst = self
-                .indirect_command_data
-                .map_memory(offset, self.indirect_command_data_element_size)?;
-            let dst = dst as *mut vk::DrawIndexedIndirectCommand;
-
-            *dst = data;
-
-            self.indirect_command_data.unmap();
-        }
-
-        self.indirect_command_data_count += 1;
-
-        Ok(index)
+    pub fn instance_data_element_size(&self) -> u64 {
+        self.instance_data_element_size
     }
     #[inline]
-    pub fn indirect_command_data(&self) -> &vulkan::Buffer {
-        &self.indirect_command_data
-    }
-    #[inline]
-    pub fn indirect_command_data_count(&self) -> u64 {
-        self.indirect_command_data_count
+    pub fn indirect_command_data_element_size(&self) -> u64 {
+        self.indirect_command_data_element_size
     }
     #[inline]
     pub fn main_per_frame_descriptor_set(&self) -> vk::DescriptorSet {
@@ -502,14 +501,13 @@ impl RenderContext {
         };
 
         let mut frames = Vec::<FrameData>::with_capacity(MAX_FRAME_COUNT as usize);
-        for (main_descriptor_set, grid_descriptor_set) in main_descriptor_sets.iter().zip(grid_descriptor_sets.iter()) {
-            let frame = FrameData::new(
-                device.clone(),
-                *main_descriptor_set,
-                *grid_descriptor_set
-            ).inspect_err(|_| unsafe {
-                device.destroy_descriptor_pool(descriptor_pool);
-            })?;
+        for (main_descriptor_set, grid_descriptor_set) in
+            main_descriptor_sets.iter().zip(grid_descriptor_sets.iter())
+        {
+            let frame = FrameData::new(device.clone(), *main_descriptor_set, *grid_descriptor_set)
+                .inspect_err(|_| unsafe {
+                    device.destroy_descriptor_pool(descriptor_pool);
+                })?;
             frames.push(frame);
         }
 

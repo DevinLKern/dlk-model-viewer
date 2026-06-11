@@ -234,7 +234,7 @@ impl Application {
                     PLANE_VERTEX_BUFFER_DATA.len() * std::mem::size_of::<renderer::GridData>(),
                 )
             };
-                        
+
             renderer.create_mesh_arena(vertex_buffer_data, &PLANE_INDEX_BUFFER_DATA)?
         };
 
@@ -435,7 +435,7 @@ impl Application {
 
             camera
                 .transform
-                .translate_global(model_position.add(ENGINE_FORWARDS));
+                .translate_global(model_position.sub(ENGINE_FORWARDS));
             controller.update(&mut camera, 0.0, 0.0);
 
             (camera, controller)
@@ -710,7 +710,7 @@ impl Application {
 
                 let new_context = self.renderer.create_render_context(window)?;
                 if context.get_grid_pipeline() != new_context.get_grid_pipeline() {
-                    // 
+                    //
                 }
                 *context = new_context;
 
@@ -735,12 +735,29 @@ impl Application {
                     main_per_frame_descriptor_set,
                     grid_per_frame_descriptor_set,
                 ) = {
+                    let calc_instance_data =
+                        |model_transform: &math::AffineTransform, material_index: u32| {
+                            let model_matrix = model_transform.as_mat4();
+                            let normal_matrix = model_matrix
+                                .as_mat3()
+                                .transposed()
+                                .inverse()
+                                .unwrap()
+                                .into_mat4(1.0);
+
+                            renderer::InstanceData {
+                                model_matrix: model_matrix.into_2d_arr(),
+                                normal_matrix: normal_matrix.into_2d_arr(),
+                                material_index,
+                                _pad0: 0,
+                                _pad1: 0,
+                                _pad2: 0,
+                            }
+                        };
                     let swapchain_extent = context.swapchain_extent();
 
                     let frame = context.get_current_frame_mut();
-                    frame.reset_indirect_command_data();
-                    frame.reset_instance_data();
-                    frame.reset_camera_data();
+                    frame.allocator_mut().reset();
 
                     let camera_data = match self.camera_in_use {
                         CameraInUse::Fps => renderer::CameraUBO {
@@ -752,54 +769,84 @@ impl Application {
                             proj_matrix: self.orbit_camera.projection_matrix().into_2d_arr(),
                         },
                     };
-                    let model_camera_offset = frame.add_camera_data(camera_data)?;
+                    let alignment = frame.camera_data_element_size();
+                    let model_camera_offset = frame
+                        .allocator_mut()
+                        .upload_uniform_data(&[camera_data], alignment)?;
+
+                    let mut command_data = Vec::<vk::DrawIndexedIndirectCommand>::with_capacity(32);
 
                     for (submesh, material_index) in self.model_submeshes.iter() {
-                        let first_instance = frame
-                            .add_instance_data(self.model_transform.as_mat4(), *material_index)?
-                            as u32;
-                        frame.add_indirect_command_data(vk::DrawIndexedIndirectCommand {
+                        let instance_data =
+                            calc_instance_data(&self.model_transform, *material_index);
+                        let alignment = frame.instance_data_element_size();
+                        let first_instance_offset = frame
+                            .allocator_mut()
+                            .upload_storage_data(&[instance_data], alignment)?;
+                        let first_instance_index =
+                            first_instance_offset / frame.instance_data_element_size();
+
+                        let command = vk::DrawIndexedIndirectCommand {
                             index_count: submesh.index_count,
                             instance_count: 1,
                             first_index: submesh.first_index,
                             vertex_offset: 0,
-                            first_instance,
-                        })?;
+                            first_instance: first_instance_index as u32,
+                        };
+                        command_data.push(command);
                     }
-                    let model_command_data_count = frame.indirect_command_data_count();
+
+                    frame.allocator_mut().upload_indirect_data(
+                        &command_data,
+                        std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u64,
+                    )?;
+
+                    let model_command_data_count = command_data.len();
 
                     let camera_data = CameraUBO {
                         view_matrix: self.arrow_camera.view_matrix().into_2d_arr(),
                         proj_matrix: self.arrow_camera.projection_matrix().into_2d_arr(),
                     };
-                    let arrow_camera_offset = frame.add_camera_data(camera_data)?;
-                    let first_instance = frame.add_instance_data(
-                        self.x_arrow_transform.as_mat4(),
-                        self.red_material_index,
-                    )? as u32;
-                    frame.add_instance_data(
-                        self.y_arrow_transform.as_mat4(),
-                        self.green_material_index,
-                    )?;
-                    frame.add_instance_data(
-                        self.z_arrow_transform.as_mat4(),
-                        self.blue_material_index,
-                    )?;
-                    frame.add_indirect_command_data(vk::DrawIndexedIndirectCommand {
+                    let alignment = frame.camera_data_element_size();
+                    let arrow_camera_offset = frame
+                        .allocator_mut()
+                        .upload_uniform_data(&[camera_data], alignment)?;
+                    let instance_data = {
+                        let x_arrow_data =
+                            calc_instance_data(&self.x_arrow_transform, self.red_material_index);
+                        let y_arrow_data =
+                            calc_instance_data(&self.y_arrow_transform, self.green_material_index);
+                        let z_arrow_data =
+                            calc_instance_data(&self.z_arrow_transform, self.blue_material_index);
+
+                        [x_arrow_data, y_arrow_data, z_arrow_data]
+                    };
+                    let alignment = frame.instance_data_element_size();
+                    let first_instance_offset = frame
+                        .allocator_mut()
+                        .upload_storage_data(&instance_data, alignment)?;
+                    let first_instance_index =
+                        first_instance_offset / frame.instance_data_element_size();
+
+                    let command_data = vk::DrawIndexedIndirectCommand {
                         index_count: self.arrow_submesh.index_count,
-                        instance_count: 3,
-                        first_instance,
+                        instance_count: instance_data.len() as u32,
+                        first_instance: first_instance_index as u32,
                         first_index: self.arrow_submesh.first_index,
                         vertex_offset: 0,
-                    })?;
-                    let arrow_command_data_count =
-                        frame.indirect_command_data_count() - model_command_data_count;
+                    };
+                    let alignment = frame.indirect_command_data_element_size();
+                    frame
+                        .allocator_mut()
+                        .upload_indirect_data(&[command_data], alignment)?;
+
+                    let arrow_command_data_count = 1;
 
                     (
                         swapchain_extent,
                         model_camera_offset as u32,
                         arrow_camera_offset as u32,
-                        frame.indirect_command_data().handle,
+                        frame.allocator_mut().indirect_buffer_raw(),
                         model_command_data_count as u32,
                         arrow_command_data_count as u32,
                         frame.main_per_frame_descriptor_set(),
@@ -811,11 +858,13 @@ impl Application {
                 let grid_pipeline = context.get_grid_pipeline();
 
                 let record_draw_commands = |cmd: vk::CommandBuffer| unsafe {
+                    // PART 1 - MAIN SCENE
+                    self.renderer.bind_pipeline(
+                        cmd,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        main_pipeline,
+                    );
 
-                    // PART 2 - MAIN SCENE
-                    self.renderer
-                        .bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, main_pipeline);
-                    
                     let (vb, ib) = {
                         let mesh_arena = self
                             .renderer
@@ -888,9 +937,12 @@ impl Application {
                         );
                     }
 
-                    // PART 1 - GRID
-                    self.renderer
-                        .bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, grid_pipeline);
+                    // PART 2 - GRID
+                    self.renderer.bind_pipeline(
+                        cmd,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        grid_pipeline,
+                    );
                     let (vb, ib) = {
                         let mesh_arena = self
                             .renderer
@@ -956,19 +1008,18 @@ impl Application {
                             &[model_camera_offset],
                         );
                         self.renderer.device.cmd_draw_indexed(
-                            cmd,
-                            6, // index_count
-                            1,
-                            0,
-                            0,
-                            0,
+                            cmd, 6, // index_count
+                            1, 0, 0, 0,
                         );
                     }
 
                     // arrow
-                    self.renderer
-                        .bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, main_pipeline);
-                    
+                    self.renderer.bind_pipeline(
+                        cmd,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        main_pipeline,
+                    );
+
                     let (vb, ib) = {
                         let mesh_arena = self
                             .renderer
