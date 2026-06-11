@@ -51,7 +51,7 @@ struct Application {
     orbit_camera: Camera,
     orbit_controller: OrbitCameraController,
     arrow_camera: Camera,
-    windows: HashMap<WindowId, (renderer::RenderContext, Window)>,
+    windows: HashMap<WindowId, (renderer::FrameContext, Window)>,
     renderer: renderer::Renderer,
     default_texture_index: usize,
     plane_arena_handle: renderer::MeshArenaHandle,

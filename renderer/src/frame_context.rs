@@ -350,7 +350,7 @@ impl Drop for FrameData {
 }
 
 #[allow(dead_code)]
-pub struct RenderContext {
+pub struct FrameContext {
     device: SharedDeviceRef,
     swapchain: vulkan::Swapchain,
     depth_images: Box<[vulkan::Image]>,
@@ -361,7 +361,7 @@ pub struct RenderContext {
     pub index: usize,
 }
 
-impl RenderContext {
+impl FrameContext {
     pub fn new(
         device: SharedDeviceRef,
         window: &winit::window::Window,
@@ -378,7 +378,7 @@ impl RenderContext {
         shader_modules: &mut ShaderModuleResourceManager,
         pipeline_layouts: &mut PipelineLayoutResourceManager,
         pipelines: &mut PipelineResourceManager,
-    ) -> crate::Result<RenderContext> {
+    ) -> Result<Self> {
         let swapchain = vulkan::Swapchain::new(device.clone(), window)
             .inspect_err(|e| tracing::error!("{e}"))?;
 
@@ -511,7 +511,7 @@ impl RenderContext {
             frames.push(frame);
         }
 
-        Ok(RenderContext {
+        Ok(Self {
             device,
             swapchain,
             frames: frames.into_boxed_slice(),
@@ -524,7 +524,7 @@ impl RenderContext {
     }
 }
 
-impl Drop for RenderContext {
+impl Drop for FrameContext {
     fn drop(&mut self) {
         unsafe {
             let _ = self.device.device_wait_idle();
@@ -534,7 +534,7 @@ impl Drop for RenderContext {
     }
 }
 
-impl RenderContext {
+impl FrameContext {
     pub fn get_main_pipeline(&self) -> PipelineResourceHandle {
         self.main_pipeline
     }
