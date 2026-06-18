@@ -10,13 +10,14 @@ pub struct Vertex {
     pub w: f64,
 }
 
+#[derive(Default, Copy, Clone)]
 pub struct VertexTexture {
     pub u: f64,
     pub v: f64,
     pub w: Option<f64>,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Default)]
 pub struct VertexNormal {
     pub x: f64,
     pub y: f64,

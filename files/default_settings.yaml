@@ -53,6 +53,6 @@ options:
   fov_y: 65.0
   mouse_sensitivity: 75.0
   derive_normals: true
-  model_up: "-z"
+  model_up: "+z"
   model_right: "+x"
-  model_forward: "+y"
+  model_forward: "-y"

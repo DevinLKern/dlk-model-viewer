@@ -61,12 +61,12 @@ impl<T> Vec3<T> {
 
 impl<T: Zero + Copy> Vec3<T> {
     #[inline]
-    pub const fn into_vec4(self) -> Vec4<T> {
-        Vec4::new(self.x(), self.y(), self.z(), T::ZERO)
+    pub const fn into_vec4(self, w: T) -> Vec4<T> {
+        Vec4::new(self.x(), self.y(), self.z(), w)
     }
     #[inline]
-    pub const fn as_vec4(&self) -> Vec4<T> {
-        Vec4::new(self.x(), self.y(), self.z(), T::ZERO)
+    pub const fn as_vec4(&self, w: T) -> Vec4<T> {
+        Vec4::new(self.x(), self.y(), self.z(), w)
     }
 }
 impl<T: Copy> Vec3<T> {

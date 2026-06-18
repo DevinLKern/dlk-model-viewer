@@ -40,8 +40,8 @@ impl FpsCameraController {
 
 impl CameraController for FpsCameraController {
     fn update(&mut self, camera: &mut Camera, sensitivity: f64, dt: f64) {
-        self.yaw += sensitivity * self.rotation_delta.x();
-        self.pitch += sensitivity * self.rotation_delta.y();
+        self.yaw -= sensitivity * self.rotation_delta.x();
+        self.pitch -= sensitivity * self.rotation_delta.y();
         const LIMIT: f64 = std::f64::consts::FRAC_PI_2 - 0.001;
         self.pitch = self.pitch.clamp(-LIMIT, LIMIT);
 
@@ -104,8 +104,8 @@ impl OrbitCameraController {
 
 impl CameraController for OrbitCameraController {
     fn update(&mut self, camera: &mut Camera, sensitivity: f64, dt: f64) {
-        let dx = sensitivity * self.rotation_delta.x();
-        let dy = sensitivity * self.rotation_delta.y();
+        let dx = -sensitivity * self.rotation_delta.x();
+        let dy = -sensitivity * self.rotation_delta.y();
         self.rotation_delta = Vec2::ZERO;
 
         let up = camera.transform.orientation.rotate_vec(ENGINE_UP);

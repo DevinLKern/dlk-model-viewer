@@ -11,3 +11,4 @@ pub struct SubMesh {
     pub first_index: u32,
     pub index_count: u32,
 }
+slotmap::new_key_type! { pub struct SubMeshHandle; }

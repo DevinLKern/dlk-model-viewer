@@ -1,11 +1,7 @@
 use ash::vk;
 use vulkan::device::SharedDeviceRef;
 
-use crate::{
-    CameraUBO, InstanceData, PipelineLayoutResourceHandle, PipelineLayoutResourceManager,
-    PipelineResourceHandle, PipelineResourceManager, Result, ShaderModuleDescription,
-    ShaderModuleResourceManager,
-};
+use crate::{CameraUBO, InstanceData, Result};
 
 pub const MAX_FRAME_COUNT: u64 = 3;
 pub const MAX_CAMERA_DATA_COUNT: u64 = 32;
@@ -135,9 +131,12 @@ impl FrameAllocator {
     pub fn indirect_buffer_raw(&self) -> vk::Buffer {
         self.indirect_buffer.handle
     }
+    #[inline]
+    pub fn storage_buffer_offset(&self) -> u64 {
+        self.storage_buffer_offset
+    }
 }
 
-#[allow(dead_code)]
 pub struct FrameData {
     device: SharedDeviceRef,
     command_buffer_executed: vk::Fence,
@@ -145,21 +144,18 @@ pub struct FrameData {
     render_complete: vk::Semaphore,
     command_pool: vk::CommandPool,
     command_buffer: vk::CommandBuffer,
-    main_per_frame_descriptor_set: vk::DescriptorSet,
-    grid_per_frame_descriptor_set: vk::DescriptorSet,
-    camera_data_element_size: u64,
-    instance_data_element_size: u64,
-    indirect_command_data_element_size: u64,
     allocator: FrameAllocator,
+}
+
+impl std::fmt::Debug for FrameData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "FrameData")
+    }
 }
 
 #[allow(unused)]
 impl FrameData {
-    pub fn new(
-        device: SharedDeviceRef,
-        main_per_frame_descriptor_set: vk::DescriptorSet,
-        grid_per_frame_descriptor_set: vk::DescriptorSet,
-    ) -> Result<Self> {
+    pub fn new(device: SharedDeviceRef) -> Result<Self> {
         let camera_data_element_size = {
             let size = std::mem::size_of::<CameraUBO>() as u64;
             let properties = unsafe { device.get_physical_device_properties() };
@@ -183,56 +179,6 @@ impl FrameData {
             instance_data_element_size * MAX_INSTANCE_DATA_COUNT,
             indirect_command_data_element_size * MAX_INDIRECT_COMMAND_DATA_COUNT,
         )?;
-
-        {
-            let main_camera_buffer_info = [vk::DescriptorBufferInfo {
-                buffer: allocator.uniform_buffer_raw(),
-                offset: 0,
-                range: camera_data_element_size,
-            }];
-            let instance_buffer_info = [vk::DescriptorBufferInfo {
-                buffer: allocator.storage_buffer_raw(),
-                offset: 0,
-                range: instance_data_element_size * MAX_INSTANCE_DATA_COUNT,
-            }];
-            let grid_camera_buffer_info = [vk::DescriptorBufferInfo {
-                buffer: allocator.uniform_buffer_raw(),
-                offset: 0,
-                range: camera_data_element_size,
-            }];
-            let writes = [
-                vk::WriteDescriptorSet {
-                    dst_set: main_per_frame_descriptor_set,
-                    dst_binding: 0,
-                    dst_array_element: 0,
-                    descriptor_count: 1,
-                    p_buffer_info: main_camera_buffer_info.as_ptr(),
-                    descriptor_type: vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
-                    ..Default::default()
-                },
-                vk::WriteDescriptorSet {
-                    dst_set: main_per_frame_descriptor_set,
-                    dst_binding: 1,
-                    dst_array_element: 0,
-                    descriptor_count: 1,
-                    p_buffer_info: instance_buffer_info.as_ptr(),
-                    descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
-                    ..Default::default()
-                },
-                vk::WriteDescriptorSet {
-                    dst_set: grid_per_frame_descriptor_set,
-                    dst_binding: 0,
-                    dst_array_element: 0,
-                    descriptor_count: 1,
-                    p_buffer_info: grid_camera_buffer_info.as_ptr(),
-                    descriptor_type: vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
-                    ..Default::default()
-                },
-            ];
-            unsafe {
-                device.update_descriptor_sets(&writes, &[]);
-            }
-        }
 
         let command_buffer_executed = {
             let create_info = vk::FenceCreateInfo {
@@ -304,37 +250,20 @@ impl FrameData {
             render_complete,
             command_pool,
             command_buffer,
-            main_per_frame_descriptor_set,
-            grid_per_frame_descriptor_set,
-            camera_data_element_size,
-            instance_data_element_size,
-            indirect_command_data_element_size,
             allocator,
         })
+    }
+    #[inline]
+    pub fn allocator(&self) -> &FrameAllocator {
+        &self.allocator
     }
     #[inline]
     pub fn allocator_mut(&mut self) -> &mut FrameAllocator {
         &mut self.allocator
     }
     #[inline]
-    pub fn camera_data_element_size(&self) -> u64 {
-        self.camera_data_element_size
-    }
-    #[inline]
-    pub fn instance_data_element_size(&self) -> u64 {
-        self.instance_data_element_size
-    }
-    #[inline]
-    pub fn indirect_command_data_element_size(&self) -> u64 {
-        self.indirect_command_data_element_size
-    }
-    #[inline]
-    pub fn main_per_frame_descriptor_set(&self) -> vk::DescriptorSet {
-        self.main_per_frame_descriptor_set
-    }
-    #[inline]
-    pub fn grid_per_frame_descriptor_set(&self) -> vk::DescriptorSet {
-        self.grid_per_frame_descriptor_set
+    pub fn command_buffer(&self) -> vk::CommandBuffer {
+        self.command_buffer
     }
 }
 
@@ -354,31 +283,13 @@ pub struct FrameContext {
     device: SharedDeviceRef,
     swapchain: vulkan::Swapchain,
     depth_images: Box<[vulkan::Image]>,
-    main_pipeline: PipelineResourceHandle,
-    grid_pipeline: PipelineResourceHandle,
-    descriptor_pool: vk::DescriptorPool,
-    frames: Box<[FrameData]>,
+    depth_format: vk::Format,
+    frames: [FrameData; MAX_FRAME_COUNT as usize],
     pub index: usize,
 }
 
 impl FrameContext {
-    pub fn new(
-        device: SharedDeviceRef,
-        window: &winit::window::Window,
-        main_per_frame_ds_layout: vk::DescriptorSetLayout,
-        main_pipeline_layout: PipelineLayoutResourceHandle,
-        main_vert_shader_desc: ShaderModuleDescription,
-        main_frag_shader_desc: ShaderModuleDescription,
-
-        grid_per_frame_ds_layout: vk::DescriptorSetLayout,
-        grid_pipeline_layout: PipelineLayoutResourceHandle,
-        grid_vert_shader_desc: ShaderModuleDescription,
-        grid_frag_shader_desc: ShaderModuleDescription,
-
-        shader_modules: &mut ShaderModuleResourceManager,
-        pipeline_layouts: &mut PipelineLayoutResourceManager,
-        pipelines: &mut PipelineResourceManager,
-    ) -> Result<Self> {
+    pub fn new(device: SharedDeviceRef, window: &winit::window::Window) -> Result<Self> {
         let swapchain = vulkan::Swapchain::new(device.clone(), window)
             .inspect_err(|e| tracing::error!("{e}"))?;
 
@@ -411,114 +322,20 @@ impl FrameContext {
             images.into_boxed_slice()
         };
 
-        let main_pipeline = {
-            let vert_shader = shader_modules.access_or_create(main_vert_shader_desc)?;
-            let frag_shader = shader_modules.access_or_create(main_frag_shader_desc)?;
-            let desc = crate::PipelineDescription::DynamicGraphics {
-                pipeline_layout: main_pipeline_layout,
-                vert_shader,
-                frag_shader,
-                topology: vk::PrimitiveTopology::TRIANGLE_LIST,
-                color_format: swapchain.get_format(),
-                depth_format: depth_stencil_format,
-                samples: vk::SampleCountFlags::TYPE_1,
-            };
-            pipelines.access_or_create(desc, pipeline_layouts, shader_modules)?
-        };
-
-        let grid_pipeline = {
-            let vert_shader = shader_modules.access_or_create(grid_vert_shader_desc)?;
-            let frag_shader = shader_modules.access_or_create(grid_frag_shader_desc)?;
-            let desc = crate::PipelineDescription::DynamicGraphics {
-                pipeline_layout: grid_pipeline_layout,
-                vert_shader,
-                frag_shader,
-                topology: vk::PrimitiveTopology::TRIANGLE_LIST,
-                color_format: swapchain.get_format(),
-                depth_format: depth_stencil_format,
-                samples: vk::SampleCountFlags::TYPE_1,
-            };
-            pipelines.access_or_create(desc, pipeline_layouts, shader_modules)?
-        };
-
-        let (descriptor_pool, main_descriptor_sets, grid_descriptor_sets) = {
-            let descriptor_pool = {
-                let pool_sizes = [
-                    vk::DescriptorPoolSize {
-                        ty: vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
-                        descriptor_count: MAX_FRAME_COUNT as u32 * 2,
-                    },
-                    vk::DescriptorPoolSize {
-                        ty: vk::DescriptorType::STORAGE_BUFFER,
-                        descriptor_count: MAX_FRAME_COUNT as u32,
-                    },
-                ];
-                let create_info = vk::DescriptorPoolCreateInfo {
-                    max_sets: MAX_FRAME_COUNT as u32 * 2,
-                    p_pool_sizes: pool_sizes.as_ptr(),
-                    pool_size_count: pool_sizes.len() as u32,
-                    ..Default::default()
-                };
-
-                unsafe { device.create_descriptor_pool(&create_info) }?
-            };
-
-            let main_descriptor_sets = {
-                let set_layouts = [main_per_frame_ds_layout; MAX_FRAME_COUNT as usize];
-                let allocate_info = vk::DescriptorSetAllocateInfo {
-                    descriptor_pool,
-                    descriptor_set_count: set_layouts.len() as u32,
-                    p_set_layouts: set_layouts.as_ptr(),
-                    ..Default::default()
-                };
-
-                unsafe { device.allocate_descriptor_sets(&allocate_info) }.inspect_err(|e| {
-                    tracing::error!("{e}");
-                    unsafe {
-                        device.destroy_descriptor_pool(descriptor_pool);
-                    }
-                })?
-            };
-
-            let grid_descriptor_sets = {
-                let set_layouts = [grid_per_frame_ds_layout; MAX_FRAME_COUNT as usize];
-                let allocate_info = vk::DescriptorSetAllocateInfo {
-                    descriptor_pool,
-                    descriptor_set_count: set_layouts.len() as u32,
-                    p_set_layouts: set_layouts.as_ptr(),
-                    ..Default::default()
-                };
-
-                unsafe { device.allocate_descriptor_sets(&allocate_info) }.inspect_err(|e| {
-                    tracing::error!("{e}");
-                    unsafe {
-                        device.destroy_descriptor_pool(descriptor_pool);
-                    }
-                })?
-            };
-
-            (descriptor_pool, main_descriptor_sets, grid_descriptor_sets)
-        };
-
         let mut frames = Vec::<FrameData>::with_capacity(MAX_FRAME_COUNT as usize);
-        for (main_descriptor_set, grid_descriptor_set) in
-            main_descriptor_sets.iter().zip(grid_descriptor_sets.iter())
-        {
-            let frame = FrameData::new(device.clone(), *main_descriptor_set, *grid_descriptor_set)
-                .inspect_err(|_| unsafe {
-                    device.destroy_descriptor_pool(descriptor_pool);
-                })?;
+        for _ in 0..MAX_FRAME_COUNT {
+            let frame = FrameData::new(device.clone())?;
             frames.push(frame);
         }
+        let frames: [FrameData; MAX_FRAME_COUNT as usize] =
+            frames.try_into().expect("Incorrect number of frames");
 
         Ok(Self {
             device,
             swapchain,
-            frames: frames.into_boxed_slice(),
+            frames,
             depth_images,
-            main_pipeline,
-            grid_pipeline,
-            descriptor_pool,
+            depth_format: depth_stencil_format,
             index: 0,
         })
     }
@@ -528,21 +345,25 @@ impl Drop for FrameContext {
     fn drop(&mut self) {
         unsafe {
             let _ = self.device.device_wait_idle();
-
-            self.device.destroy_descriptor_pool(self.descriptor_pool);
         }
     }
 }
 
 impl FrameContext {
-    pub fn get_main_pipeline(&self) -> PipelineResourceHandle {
-        self.main_pipeline
+    #[inline]
+    pub fn get_color_format(&self) -> vk::Format {
+        self.swapchain.get_format()
     }
-    pub fn get_grid_pipeline(&self) -> PipelineResourceHandle {
-        self.grid_pipeline
+    #[inline]
+    pub fn depth_format(&self) -> vk::Format {
+        self.depth_format
     }
     pub fn get_current_frame(&self) -> &FrameData {
         &self.frames[self.index]
+    }
+    #[inline]
+    pub(crate) fn frames(&self) -> &[FrameData] {
+        &self.frames
     }
     pub fn get_current_frame_mut(&mut self) -> &mut FrameData {
         &mut self.frames[self.index]
@@ -550,14 +371,14 @@ impl FrameContext {
     pub fn swapchain_extent(&self) -> vk::Extent2D {
         *self.swapchain.get_extent()
     }
-    pub unsafe fn draw<F>(&mut self, record_draw_commands: F) -> vulkan::result::Result<()>
+    pub unsafe fn draw<F>(&mut self, record_draw_commands: F) -> Result<()>
     where
-        F: FnOnce(vk::CommandBuffer),
+        F: FnOnce(&mut FrameContext) -> Result<()>,
     {
-        let frame = self.get_current_frame();
-
         // Acquire image
         let (swapchain_image_index, swapchain_image_view) = {
+            let frame = self.get_current_frame();
+
             unsafe {
                 self.device
                     .wait_for_fences(&[frame.command_buffer_executed], true, u64::MAX)?
@@ -582,6 +403,7 @@ impl FrameContext {
         };
 
         unsafe {
+            let frame = self.get_current_frame();
             // Reset the command buffer (requires pool/reset capability)
             self.device
                 .reset_command_buffer(frame.command_buffer, vk::CommandBufferResetFlags::empty())?;
@@ -633,6 +455,7 @@ impl FrameContext {
                 ..Default::default()
             };
             unsafe {
+                let frame = self.get_current_frame();
                 self.device
                     .cmd_pipeline_barrier2(frame.command_buffer, &dependency_info)
             };
@@ -682,12 +505,14 @@ impl FrameContext {
             };
 
             unsafe {
+                let frame = self.get_current_frame();
                 self.device
                     .cmd_begin_rendering(frame.command_buffer, &rendering_info);
             };
         }
 
-        record_draw_commands(frame.command_buffer);
+        record_draw_commands(self)?;
+        let frame = self.get_current_frame();
 
         // End rendering & end command buffer
         unsafe {
@@ -721,13 +546,13 @@ impl FrameContext {
 
             unsafe {
                 self.device
-                    .cmd_pipeline_barrier2(frame.command_buffer, &dependency_info)
+                    .cmd_pipeline_barrier2(frame.command_buffer(), &dependency_info)
             };
         }
 
         unsafe {
             self.device
-                .end_command_buffer(frame.command_buffer)
+                .end_command_buffer(self.get_current_frame().command_buffer)
                 .inspect_err(|e| tracing::error!("{}", e))?;
         }
 

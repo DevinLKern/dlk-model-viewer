@@ -16,11 +16,11 @@ pub enum ShaderModuleDescription {
         vertex_attribute_descriptions: *const [vk::VertexInputAttributeDescription],
         vertex_input_bindings: *const [vk::VertexInputBindingDescription],
     },
-    External {
-        stage: vk::ShaderStageFlags,
-        path: Box<str>,
-        entry_point_name: std::ffi::CString,
-    },
+    // External {
+    //     stage: vk::ShaderStageFlags,
+    //     path: Box<str>,
+    //     entry_point_name: std::ffi::CString,
+    // },
 }
 
 impl ShaderModuleDescription {
@@ -30,9 +30,9 @@ impl ShaderModuleDescription {
             ShaderModuleDescription::Internal {
                 entry_point_name, ..
             } => entry_point_name.as_ptr(),
-            ShaderModuleDescription::External {
-                entry_point_name, ..
-            } => entry_point_name.as_ptr(),
+            // ShaderModuleDescription::External {
+            //     entry_point_name, ..
+            // } => entry_point_name.as_ptr(),
         }
     }
     #[inline]
@@ -42,7 +42,7 @@ impl ShaderModuleDescription {
                 vertex_attribute_descriptions,
                 ..
             } => *vertex_attribute_descriptions,
-            _ => todo!(),
+            // _ => todo!(),
         }
     }
     #[inline]
@@ -52,7 +52,7 @@ impl ShaderModuleDescription {
                 vertex_input_bindings,
                 ..
             } => *vertex_input_bindings,
-            _ => todo!(),
+            // _ => todo!(),
         }
     }
 }
@@ -162,7 +162,7 @@ struct DescriptorSetLayoutResource {
 
 slotmap::new_key_type! { pub(crate) struct DescriptorSetLayoutResourceHandle; }
 
-pub(crate) struct DescriptorSetLayoutResourceManager {
+pub struct DescriptorSetLayoutResourceManager {
     device: vulkan::SharedDeviceRef,
     cache: HashMap<DescriptorSetLayoutDescription, DescriptorSetLayoutResourceHandle>,
     resources: slotmap::SlotMap<DescriptorSetLayoutResourceHandle, DescriptorSetLayoutResource>,
@@ -268,7 +268,7 @@ impl PipelineLayoutResourceManager {
     pub(crate) fn access_or_create(
         &mut self,
         desc: PipelineLayoutDescription,
-        descriptor_set_layouts: &mut DescriptorSetLayoutResourceManager,
+        descriptor_set_layouts: &DescriptorSetLayoutResourceManager,
     ) -> crate::Result<PipelineLayoutResourceHandle> {
         if let Some(&handle) = self.cache.get(&desc) {
             return Ok(handle);
@@ -303,6 +303,7 @@ impl PipelineLayoutResourceManager {
     ) -> Option<&PipelineLayoutResource> {
         self.resources.get(handle)
     }
+    #[allow(unused)]
     pub(crate) fn destroy(&mut self, handle: PipelineLayoutResourceHandle) {
         if let Some(val) = self.resources.remove(handle) {
             unsafe { self.device.destroy_pipeline_layout(val.raw) };

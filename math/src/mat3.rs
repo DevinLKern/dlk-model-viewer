@@ -206,17 +206,17 @@ where
 {
     pub const fn into_mat4(self, v: T) -> crate::Mat4<T> {
         crate::Mat4::from_cols(
-            self.c0().into_vec4(),
-            self.c1().into_vec4(),
-            self.c2().into_vec4(),
+            self.c0().into_vec4(T::ZERO),
+            self.c1().into_vec4(T::ZERO),
+            self.c2().into_vec4(T::ZERO),
             Vec4::new(T::ZERO, T::ZERO, T::ZERO, v),
         )
     }
     pub const fn as_mat4(&self, v: T) -> crate::Mat4<T> {
         Mat4::from_cols(
-            self.c0().as_vec4(),
-            self.c1().as_vec4(),
-            self.c2().as_vec4(),
+            self.c0().as_vec4(T::ZERO),
+            self.c1().as_vec4(T::ZERO),
+            self.c2().as_vec4(T::ZERO),
             Vec4::new(T::ZERO, T::ZERO, T::ZERO, v),
         )
     }

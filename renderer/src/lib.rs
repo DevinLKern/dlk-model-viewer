@@ -1,6 +1,6 @@
 mod frame_context;
-mod resource_manager;
 mod render_pass;
+mod resource_manager;
 mod resources;
 mod result;
 
@@ -8,9 +8,8 @@ include!(concat!(env!("OUT_DIR"), "/variable_types.rs"));
 include!(concat!(env!("OUT_DIR"), "/shader_paths.rs"));
 include!(concat!(env!("OUT_DIR"), "/entry_points.rs"));
 
-use math::{Mat4, Vec4, Zero};
-
 pub use frame_context::*;
+pub use render_pass::*;
 pub(crate) use resource_manager::*;
 pub use resources::*;
 pub use result::Error;
@@ -57,44 +56,14 @@ unsafe extern "system" fn vulkan_debug_callback(
     vk::FALSE
 }
 
-pub const MAX_CONTEXTS: u32 = 1;
-pub const MAX_TEXTURES: u32 = 16;
-pub const MAX_MATERIALS: u32 = 32;
-
-// use crate::render_context::MAX_TEXTURES;
-
 #[allow(unused)]
 pub struct Renderer {
     pub device: SharedDeviceRef,
-
     command_pool: vk::CommandPool,
-
     shader_modules: ShaderModuleResourceManager,
     descriptor_set_layouts: DescriptorSetLayoutResourceManager,
     pipeline_layouts: PipelineLayoutResourceManager,
     pipelines: PipelineResourceManager,
-
-    main_per_frame_ds_layout: DescriptorSetLayoutResourceHandle,
-    main_other_ds_layout: DescriptorSetLayoutResourceHandle,
-    main_pipeline_layout: PipelineLayoutResourceHandle,
-
-    grid_per_frame_ds_layout: DescriptorSetLayoutResourceHandle,
-    grid_other_ds_layout: DescriptorSetLayoutResourceHandle,
-    grid_pipeline_layout: PipelineLayoutResourceHandle,
-
-    descriptor_pool: vk::DescriptorPool,
-    main_other_descriptor_set: vk::DescriptorSet,
-    grid_other_descriptor_set: vk::DescriptorSet,
-
-    grid_buffer: vulkan::Buffer,
-
-    global_light_buffer: vulkan::Buffer,
-    textures: Vec<vulkan::Image>,
-
-    material_buffer_element_size: u64,
-    material_buffer: vulkan::Buffer,
-    material_buffer_offset: u64,
-
     repeat_sampler: vk::Sampler,
     mesh_arenas: slotmap::DenseSlotMap<MeshArenaHandle, MeshArena>,
 }
@@ -103,15 +72,13 @@ pub struct Renderer {
 const COMPILED_MAIN_VERT_SHADER: &[u8] = include_bytes!("../shaders/shader.vert.spv");
 const COMPILED_MAIN_FRAG_SHADER: &[u8] = include_bytes!("../shaders/shader.frag.spv");
 
-const COMPILED_GRID_VERT_SHADER: &[u8] = include_bytes!("../shaders/grid.vert.spv");
-const COMPILED_GRID_FRAG_SHADER: &[u8] = include_bytes!("../shaders/grid.frag.spv");
+// const COMPILED_GRID_VERT_SHADER: &[u8] = include_bytes!("../shaders/grid.vert.spv");
+// const COMPILED_GRID_FRAG_SHADER: &[u8] = include_bytes!("../shaders/grid.frag.spv");
 
 impl Renderer {
     pub fn new(
         debug_enabled: bool,
         display_handle: &winit::raw_window_handle::DisplayHandle,
-        texture_capacity: u64,
-        material_capacity: u64,
     ) -> result::Result<Renderer> {
         let instance = vulkan::Instance::new(debug_enabled, display_handle)?;
         let device = vulkan::Device::new(instance, Some(vulkan_debug_callback))?;
@@ -126,285 +93,10 @@ impl Renderer {
                 .inspect_err(|e| tracing::error!("{e}"))?
         };
 
-        let textures = Vec::<vulkan::Image>::with_capacity(texture_capacity as usize);
-
-        let global_light_buffer = {
-            let element_size = {
-                let ubo_size = std::mem::size_of::<crate::GlobalLightUBO>();
-
-                let properties = unsafe { device.get_physical_device_properties() };
-
-                ubo_size.next_multiple_of(
-                    properties.limits.min_uniform_buffer_offset_alignment as usize,
-                )
-            };
-
-            let global_light_buffer_create_info = vulkan::BufferCreateInfo {
-                size: element_size as u64,
-                usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
-                memory_property_flags: vk::MemoryPropertyFlags::HOST_VISIBLE
-                    | vk::MemoryPropertyFlags::HOST_COHERENT,
-            };
-
-            vulkan::Buffer::new(device.clone(), &global_light_buffer_create_info)?
-        };
-
-        let (material_buffer, material_buffer_element_size) = {
-            let element_size = {
-                let ubo_size = std::mem::size_of::<crate::MaterialUBO>();
-
-                let properties = unsafe { device.get_physical_device_properties() };
-
-                ubo_size.next_multiple_of(
-                    properties.limits.min_storage_buffer_offset_alignment as usize,
-                )
-            };
-
-            let buffer_create_info = vulkan::BufferCreateInfo {
-                size: (element_size as u64 * material_capacity),
-                usage: vk::BufferUsageFlags::STORAGE_BUFFER,
-                memory_property_flags: vk::MemoryPropertyFlags::HOST_VISIBLE
-                    | vk::MemoryPropertyFlags::HOST_COHERENT,
-            };
-
-            let buffer = vulkan::Buffer::new(device.clone(), &buffer_create_info)?;
-
-            (buffer, element_size as u64)
-        };
-
-        let (grid_buffer, grid_buffer_element_size) = {
-            let element_size = {
-                let ubo_size = std::mem::size_of::<crate::GridData>();
-
-                let properties = unsafe { device.get_physical_device_properties() };
-
-                ubo_size.next_multiple_of(
-                    properties.limits.min_storage_buffer_offset_alignment as usize,
-                )
-            };
-
-            let buffer_create_info = vulkan::BufferCreateInfo {
-                size: (element_size as u64 * material_capacity),
-                usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
-                memory_property_flags: vk::MemoryPropertyFlags::HOST_VISIBLE
-                    | vk::MemoryPropertyFlags::HOST_COHERENT,
-            };
-
-            let buffer = vulkan::Buffer::new(device.clone(), &buffer_create_info)?;
-
-            const GDS: f32 = 1.0;
-            let data = GridData {
-                model_matrix: Mat4::from_cols(
-                    Vec4::X.scaled(GDS),
-                    Vec4::Y.scaled(GDS),
-                    Vec4::Z.scaled(GDS),
-                    Vec4::W.scaled(GDS),
-                )
-                .into_2d_arr(),
-                scale: [1.0, 1.0],
-                _pad2: [0; 8],
-                base_color: Vec4::ZERO.as_arr(),
-                line_color: Vec4::new(1.0, 1.0, 1.0, 1.0).as_arr(),
-            };
-
-            unsafe {
-                let dst = buffer.map_memory(0, element_size as u64)?;
-                let dst = dst as *mut GridData;
-                *dst = data;
-                buffer.unmap();
-            }
-
-            (buffer, element_size as u64)
-        };
-
         let shader_modules = crate::ShaderModuleResourceManager::new(device.clone());
-        let mut descriptor_set_layouts =
-            crate::DescriptorSetLayoutResourceManager::new(device.clone());
-        let mut pipeline_layouts = crate::PipelineLayoutResourceManager::new(device.clone());
+        let descriptor_set_layouts = crate::DescriptorSetLayoutResourceManager::new(device.clone());
+        let pipeline_layouts = crate::PipelineLayoutResourceManager::new(device.clone());
         let pipelines = crate::PipelineResourceManager::new(device.clone());
-
-        let main_ds_layout_bindings: &[&[DescriptorSetLayoutBindingInfo]] = &[
-            // SET 0 - per frame (update in render_context.rs)
-            &[
-                DescriptorSetLayoutBindingInfo {
-                    binding: 0,
-                    ty: vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
-                    count: 1,
-                    stage_flags: vk::ShaderStageFlags::VERTEX,
-                },
-                DescriptorSetLayoutBindingInfo {
-                    binding: 1,
-                    ty: vk::DescriptorType::STORAGE_BUFFER,
-                    count: 1,
-                    stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                },
-            ],
-            // SET 2 - other
-            &[
-                //
-                DescriptorSetLayoutBindingInfo {
-                    binding: 0,
-                    ty: vk::DescriptorType::UNIFORM_BUFFER,
-                    count: 1,
-                    stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                },
-                // global_textures
-                DescriptorSetLayoutBindingInfo {
-                    binding: 1,
-                    ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                    count: texture_capacity as u32,
-                    stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                },
-                // materials
-                DescriptorSetLayoutBindingInfo {
-                    binding: 2,
-                    ty: vk::DescriptorType::STORAGE_BUFFER,
-                    count: 1,
-                    stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                },
-            ],
-        ];
-
-        let main_per_frame_ds_layout_desc = DescriptorSetLayoutDescription {
-            bindings: main_ds_layout_bindings[0]
-                .iter()
-                .map(|x| x.clone())
-                .collect(),
-        };
-        let main_per_frame_ds_layout =
-            descriptor_set_layouts.access_or_create(main_per_frame_ds_layout_desc)?;
-
-        let main_other_ds_layout_desc = DescriptorSetLayoutDescription {
-            bindings: main_ds_layout_bindings[1]
-                .iter()
-                .map(|x| x.clone())
-                .collect(),
-        };
-        let main_other_ds_layout =
-            descriptor_set_layouts.access_or_create(main_other_ds_layout_desc)?;
-
-        let main_pipeline_layout_desc = PipelineLayoutDescription {
-            descriptor_set_layouts: Box::new([main_per_frame_ds_layout, main_other_ds_layout]),
-            bind_point: vk::PipelineBindPoint::GRAPHICS,
-        };
-        let main_pipeline_layout = pipeline_layouts
-            .access_or_create(main_pipeline_layout_desc, &mut descriptor_set_layouts)?;
-
-        let grid_ds_layout_bindings = &[
-            &[DescriptorSetLayoutBindingInfo {
-                binding: 0,
-                ty: vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
-                count: 1,
-                stage_flags: vk::ShaderStageFlags::VERTEX,
-            }],
-            &[DescriptorSetLayoutBindingInfo {
-                binding: 0,
-                ty: vk::DescriptorType::UNIFORM_BUFFER,
-                count: 1,
-                stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-            }],
-        ];
-
-        let grid_per_frame_ds_layout_desc = DescriptorSetLayoutDescription {
-            bindings: grid_ds_layout_bindings[0]
-                .iter()
-                .map(|x| x.clone())
-                .collect(),
-        };
-        let grid_per_frame_ds_layout =
-            descriptor_set_layouts.access_or_create(grid_per_frame_ds_layout_desc)?;
-
-        let grid_other_ds_layout_desc = DescriptorSetLayoutDescription {
-            bindings: grid_ds_layout_bindings[1]
-                .iter()
-                .map(|x| x.clone())
-                .collect(),
-        };
-        let grid_other_ds_layout =
-            descriptor_set_layouts.access_or_create(grid_other_ds_layout_desc)?;
-
-        let grid_pipeline_layout_desc = PipelineLayoutDescription {
-            descriptor_set_layouts: Box::new([grid_per_frame_ds_layout, grid_other_ds_layout]),
-            bind_point: vk::PipelineBindPoint::GRAPHICS,
-        };
-        let grid_pipeline_layout = pipeline_layouts
-            .access_or_create(grid_pipeline_layout_desc, &mut descriptor_set_layouts)?;
-
-        let descriptor_pool = {
-            let pool_sizes = [
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::UNIFORM_BUFFER,
-                    descriptor_count: 3,
-                },
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::STORAGE_BUFFER,
-                    descriptor_count: 1,
-                },
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                    descriptor_count: MAX_TEXTURES,
-                },
-            ];
-            let descrptor_pool_create_info = vk::DescriptorPoolCreateInfo {
-                max_sets: pool_sizes.iter().map(|x| x.descriptor_count).sum(),
-                pool_size_count: pool_sizes.len() as u32,
-                p_pool_sizes: pool_sizes.as_ptr(),
-                ..Default::default()
-            };
-
-            unsafe { device.create_descriptor_pool(&descrptor_pool_create_info) }.inspect_err(
-                |e| {
-                    unsafe {
-                        device.destroy_command_pool(command_pool);
-                    }
-                    tracing::error!("{e}")
-                },
-            )?
-        };
-
-        let main_other_descriptor_set = {
-            let other_ds_layout_raw = descriptor_set_layouts.get(main_other_ds_layout).unwrap();
-            let ds_layouts = [*other_ds_layout_raw];
-            let ds_create_info = vk::DescriptorSetAllocateInfo {
-                descriptor_pool,
-                descriptor_set_count: ds_layouts.len() as u32,
-                p_set_layouts: ds_layouts.as_ptr(),
-                ..Default::default()
-            };
-
-            let sets =
-                unsafe { device.allocate_descriptor_sets(&ds_create_info) }.inspect_err(|e| {
-                    tracing::error!("{e}");
-                    unsafe {
-                        device.destroy_command_pool(command_pool);
-                        device.destroy_descriptor_pool(descriptor_pool);
-                    }
-                })?;
-
-            sets[0]
-        };
-
-        let grid_other_descriptor_set = {
-            let other_ds_layout_raw = descriptor_set_layouts.get(grid_other_ds_layout).unwrap();
-            let ds_layouts = [*other_ds_layout_raw];
-            let ds_create_info = vk::DescriptorSetAllocateInfo {
-                descriptor_pool,
-                descriptor_set_count: ds_layouts.len() as u32,
-                p_set_layouts: ds_layouts.as_ptr(),
-                ..Default::default()
-            };
-
-            let sets =
-                unsafe { device.allocate_descriptor_sets(&ds_create_info) }.inspect_err(|e| {
-                    tracing::error!("{e}");
-                    unsafe {
-                        device.destroy_command_pool(command_pool);
-                        device.destroy_descriptor_pool(descriptor_pool);
-                    }
-                })?;
-
-            sets[0]
-        };
 
         let repeat_sampler = {
             let properties = unsafe { device.get_physical_device_properties() };
@@ -427,59 +119,9 @@ impl Renderer {
                 tracing::error!("{e}");
                 unsafe {
                     device.destroy_command_pool(command_pool);
-                    device.destroy_descriptor_pool(descriptor_pool);
                 }
             })?
         };
-
-        {
-            let global_light_buffer_info = vk::DescriptorBufferInfo {
-                buffer: global_light_buffer.handle,
-                offset: 0,
-                range: global_light_buffer.size,
-            };
-
-            let material_buffer_info = vk::DescriptorBufferInfo {
-                buffer: material_buffer.handle,
-                offset: 0,
-                range: material_buffer.size,
-            };
-            let grid_buffer_info = vk::DescriptorBufferInfo {
-                buffer: grid_buffer.handle,
-                offset: 0,
-                range: grid_buffer_element_size,
-            };
-
-            let writes = [
-                // set 0 updated in render_context.rs
-                vk::WriteDescriptorSet {
-                    dst_set: main_other_descriptor_set,
-                    dst_binding: 0,
-                    descriptor_count: 1,
-                    descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
-                    p_buffer_info: &global_light_buffer_info,
-                    ..Default::default()
-                },
-                vk::WriteDescriptorSet {
-                    dst_set: main_other_descriptor_set,
-                    dst_binding: 2,
-                    descriptor_count: 1,
-                    descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
-                    p_buffer_info: &material_buffer_info,
-                    ..Default::default()
-                },
-                vk::WriteDescriptorSet {
-                    dst_set: grid_other_descriptor_set,
-                    dst_binding: 0,
-                    descriptor_count: 1,
-                    descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
-                    p_buffer_info: &grid_buffer_info,
-                    ..Default::default()
-                },
-            ];
-
-            unsafe { device.update_descriptor_sets(&writes, &[]) };
-        }
 
         Ok(Self {
             device,
@@ -488,147 +130,63 @@ impl Renderer {
             descriptor_set_layouts,
             pipeline_layouts,
             pipelines,
-
-            main_per_frame_ds_layout,
-            main_other_ds_layout,
-            main_pipeline_layout,
-
-            grid_per_frame_ds_layout,
-            grid_other_ds_layout,
-            grid_pipeline_layout,
-
-            descriptor_pool,
-            main_other_descriptor_set,
-            grid_other_descriptor_set,
-
-            grid_buffer,
-
-            global_light_buffer,
-            textures,
             mesh_arenas: slotmap::DenseSlotMap::with_key(),
-            material_buffer,
-            material_buffer_offset: 0,
-            material_buffer_element_size,
             repeat_sampler,
         })
     }
-    pub fn create_render_context(
+    pub fn create_frame_context(
         &mut self,
         window: &winit::window::Window,
+        render_pass: &MainRenderPass,
     ) -> Result<FrameContext> {
-        // TODO: it seems like this could be generated by build.rs or a macro?
-        let main_vert_vertex_attribute_descriptions = [
-            vk::VertexInputAttributeDescription {
-                location: 0,
-                binding: 0,
-                format: vk::Format::R32G32B32_SFLOAT,
-                offset: std::mem::offset_of!(crate::ShaderVertVertex, position) as u32,
-            },
-            vk::VertexInputAttributeDescription {
-                location: 1,
-                binding: 0,
-                format: vk::Format::R32G32_SFLOAT,
-                offset: std::mem::offset_of!(crate::ShaderVertVertex, tex_coord) as u32,
-            },
-            vk::VertexInputAttributeDescription {
-                location: 2,
-                binding: 0,
-                format: vk::Format::R32G32B32_SFLOAT,
-                offset: std::mem::offset_of!(crate::ShaderVertVertex, normal) as u32,
-            },
-        ];
-        let main_vert_vertex_input_bindings = [vk::VertexInputBindingDescription {
-            binding: 0,
-            stride: std::mem::size_of::<ShaderVertVertex>() as u32,
-            input_rate: vk::VertexInputRate::VERTEX,
-        }];
-        let main_vert_shader_desc = ShaderModuleDescription::Internal {
-            stage: vk::ShaderStageFlags::VERTEX,
-            spv: COMPILED_MAIN_VERT_SHADER,
-            entry_point_name: ENTRY_POINT_NAME_SHADER_VERT,
-            vertex_attribute_descriptions: &main_vert_vertex_attribute_descriptions,
-            vertex_input_bindings: &main_vert_vertex_input_bindings,
-        };
-        let main_frag_shader_desc = ShaderModuleDescription::Internal {
-            stage: vk::ShaderStageFlags::FRAGMENT,
-            spv: COMPILED_MAIN_FRAG_SHADER,
-            entry_point_name: ENTRY_POINT_NAME_SHADER_FRAG,
-            vertex_attribute_descriptions: &[],
-            vertex_input_bindings: &[],
-        };
+        let ctx = FrameContext::new(self.device.clone(), window)?;
 
-        let grid_vert_vertex_attribute_descriptions = [vk::VertexInputAttributeDescription {
-            location: 0,
-            binding: 0,
-            format: vk::Format::R32G32B32_SFLOAT,
-            offset: std::mem::offset_of!(GridVertVertex, position) as u32,
-        }];
-        let grid_vert_vertex_input_bindings = [vk::VertexInputBindingDescription {
-            binding: 0,
-            stride: std::mem::size_of::<GridVertVertex>() as u32,
-            input_rate: vk::VertexInputRate::VERTEX,
-        }];
-        let grid_vert_shader_desc = ShaderModuleDescription::Internal {
-            stage: vk::ShaderStageFlags::VERTEX,
-            spv: COMPILED_GRID_VERT_SHADER,
-            entry_point_name: ENTRY_POINT_NAME_GRID_VERT,
-            vertex_attribute_descriptions: &grid_vert_vertex_attribute_descriptions,
-            vertex_input_bindings: &grid_vert_vertex_input_bindings,
-        };
-        let grid_frag_shader_desc = ShaderModuleDescription::Internal {
-            stage: vk::ShaderStageFlags::FRAGMENT,
-            spv: COMPILED_GRID_FRAG_SHADER,
-            entry_point_name: ENTRY_POINT_NAME_GRID_FRAG,
-            vertex_attribute_descriptions: &[],
-            vertex_input_bindings: &[],
-        };
+        render_pass.update_context(&ctx);
 
-        FrameContext::new(
-            self.device.clone(),
-            window,
-            *self
-                .descriptor_set_layouts
-                .get(self.main_per_frame_ds_layout)
-                .unwrap(),
-            self.main_pipeline_layout,
-            main_vert_shader_desc,
-            main_frag_shader_desc,
-            *self
-                .descriptor_set_layouts
-                .get(self.grid_per_frame_ds_layout)
-                .unwrap(),
-            self.grid_pipeline_layout,
-            grid_vert_shader_desc,
-            grid_frag_shader_desc,
-            &mut self.shader_modules,
-            &mut self.pipeline_layouts,
+        Ok(ctx)
+    }
+    #[inline]
+    pub fn render_scene(
+        &mut self,
+        ctx: &mut FrameContext,
+        scene: &MainScene,
+        pass: &MainRenderPass,
+        camera_data: CameraUBO,
+    ) -> Result<()> {
+        pass.render(
+            ctx,
             &mut self.pipelines,
+            &mut self.pipeline_layouts,
+            &mut self.shader_modules,
+            &self.mesh_arenas,
+            scene,
+            camera_data,
         )
     }
-    pub fn update_world_light(
-        &self,
-        ambient: f32,
-        dir: math::Vec3<f32>,
-        color: math::Vec4<f32>,
-    ) -> Result<()> {
-        let data = crate::GlobalLightUBO {
-            direction: dir.normalized().into_vec4().into_arr(),
-            color: color.as_arr(),
-            ambient,
-        };
-
-        unsafe {
-            let dst = self
-                .global_light_buffer
-                .map_memory(0, std::mem::size_of::<crate::GlobalLightUBO>() as u64)?;
-            let dst = dst as *mut GlobalLightUBO;
-
-            *dst = data;
-
-            self.global_light_buffer.unmap();
-        }
-
-        Ok(())
+    pub fn access_or_create_pipeline_layout(
+        &mut self,
+        desc: PipelineLayoutDescription,
+    ) -> Result<PipelineLayoutResourceHandle> {
+        self.pipeline_layouts
+            .access_or_create(desc, &self.descriptor_set_layouts)
+    }
+    pub fn mesh_arenas_mut(&mut self) -> &mut slotmap::DenseSlotMap<MeshArenaHandle, MeshArena> {
+        &mut self.mesh_arenas
+    }
+    pub fn pipeline_layouts_mut(&mut self) -> &mut PipelineLayoutResourceManager {
+        &mut self.pipeline_layouts
+    }
+    pub fn descriptor_set_layouts(&self) -> &DescriptorSetLayoutResourceManager {
+        &self.descriptor_set_layouts
+    }
+    pub fn descriptor_set_layouts_mut(&mut self) -> &mut DescriptorSetLayoutResourceManager {
+        &mut self.descriptor_set_layouts
+    }
+    pub fn shader_modules_mut(&mut self) -> &mut ShaderModuleResourceManager {
+        &mut self.shader_modules
+    }
+    pub fn piplines_mut(&mut self) -> &mut PipelineResourceManager {
+        &mut self.pipelines
     }
     fn create_transfer_buffer(&self, size: u64) -> result::Result<vulkan::Buffer> {
         let create_info = vulkan::BufferCreateInfo {
@@ -746,7 +304,10 @@ impl Renderer {
             Ok(uniform_bv.buffer.unmap())
         }
     }
-    pub fn create_image(&mut self, image_data: image::DynamicImage) -> result::Result<usize> {
+    pub fn create_image(
+        &mut self,
+        image_data: image::DynamicImage,
+    ) -> result::Result<vulkan::Image> {
         use image::GenericImageView;
 
         let (width, height) = image_data.dimensions();
@@ -908,49 +469,7 @@ impl Renderer {
                 .free_command_buffers(self.command_pool, &[command_buffer]);
         }
 
-        let idx = self.textures.len();
-
-        let image_infos = [vk::DescriptorImageInfo {
-            sampler: self.repeat_sampler,
-            image_view: image.view,
-            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-        }];
-        let writes = [vk::WriteDescriptorSet {
-            dst_set: self.main_other_descriptor_set,
-            dst_binding: 1,
-            descriptor_count: image_infos.len() as u32,
-            descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            p_image_info: image_infos.as_ptr(),
-            dst_array_element: idx as u32,
-            ..Default::default()
-        }];
-
-        unsafe { self.device.update_descriptor_sets(&writes, &[]) }
-        self.textures.push(image);
-        Ok(idx)
-    }
-    pub fn add_material(&mut self, material_data: crate::MaterialUBO) -> Result<u32> {
-        let data = material_data;
-        let write_offset = self.material_buffer_offset;
-        let write_size = self.material_buffer_element_size;
-        let requested_end = write_offset + write_size;
-        if requested_end > self.material_buffer.size {
-            return Err(Error::BufferCapacityExceeded {
-                buffer: "material_buffer",
-                requested_end,
-                capacity: self.material_buffer.size,
-            });
-        }
-
-        unsafe {
-            let dst = self.material_buffer.map_memory(write_offset, write_size)?;
-            let src = &data;
-            std::ptr::copy_nonoverlapping(src, dst as *mut crate::MaterialUBO, 1);
-            self.material_buffer.unmap();
-        }
-        let res = self.material_buffer_offset / self.material_buffer_element_size;
-        self.material_buffer_offset += self.material_buffer_element_size;
-        Ok(res as u32)
+        Ok(image)
     }
     pub fn create_mesh_arena(
         &mut self,
@@ -1009,39 +528,12 @@ impl Renderer {
         Ok(handle)
     }
     #[inline]
-    pub fn bind_pipeline(
-        &self,
-        cmd: vk::CommandBuffer,
-        point: vk::PipelineBindPoint,
-        handle: PipelineResourceHandle,
-    ) {
-        if let Some(pipeline) = self.pipelines.get(handle) {
-            unsafe { self.device.cmd_bind_pipeline(cmd, point, *pipeline) };
-        }
-    }
-    #[inline]
     pub fn access_mesh_arena(&mut self, handle: MeshArenaHandle) -> Option<&MeshArena> {
         self.mesh_arenas.get(handle)
     }
     #[inline]
     pub fn destroy_mesh_arena(&mut self, handle: MeshArenaHandle) -> bool {
         self.mesh_arenas.remove(handle).is_some()
-    }
-    #[inline]
-    pub fn main_other_descriptor_set(&self) -> vk::DescriptorSet {
-        self.main_other_descriptor_set
-    }
-    #[inline]
-    pub fn grid_other_descriptor_set(&self) -> vk::DescriptorSet {
-        self.grid_other_descriptor_set
-    }
-    #[inline]
-    pub fn main_pipeline_layout(&self) -> PipelineLayoutResourceHandle {
-        self.main_pipeline_layout
-    }
-    #[inline]
-    pub fn grid_pipeline_layout(&self) -> PipelineLayoutResourceHandle {
-        self.grid_pipeline_layout
     }
     #[inline]
     pub fn bind_descriptor_sets(
@@ -1065,6 +557,10 @@ impl Renderer {
             }
         }
     }
+    #[inline]
+    pub fn repeat_sampler(&self) -> vk::Sampler {
+        self.repeat_sampler
+    }
 }
 
 impl Drop for Renderer {
@@ -1072,10 +568,8 @@ impl Drop for Renderer {
         unsafe {
             let _ = self.device.device_wait_idle();
 
-            self.pipeline_layouts.destroy(self.main_pipeline_layout);
             self.device.destroy_sampler(self.repeat_sampler);
             self.device.destroy_command_pool(self.command_pool);
-            self.device.destroy_descriptor_pool(self.descriptor_pool);
         }
     }
 }

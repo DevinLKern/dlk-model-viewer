@@ -223,6 +223,8 @@ fn generate_entry_point_vars(
             })
             .expect("Could not find entry point \"main\" ");
 
+        writeln!(w, "#[allow(unused)]")?;
+
         writeln!(
             w,
             "const ENTRY_POINT_NAME_{}: &std::ffi::CStr = c\"{}\";",

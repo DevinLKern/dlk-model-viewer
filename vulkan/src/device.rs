@@ -5,7 +5,6 @@ use ash::prelude::VkResult;
 use ash::vk;
 use ash::vk::*;
 
-// #[derive(Debug)]
 pub struct Device {
     instance: SharedInstanceRef,
     physical_device: vk::PhysicalDevice,
@@ -241,7 +240,34 @@ impl Device {
         }
         .into())
     }
+    #[inline]
+    pub fn get_uniform_buffer_min_offset_alignment(&self) -> u64 {
+        let limits = unsafe { self.get_physical_device_properties().limits };
+        return limits.min_uniform_buffer_offset_alignment;
+    }
+    pub fn get_uniform_buffer_min_size<T>(&self) -> u64 {
+        let limits = unsafe { self.get_physical_device_properties().limits };
+        let alignment = limits.min_uniform_buffer_offset_alignment;
+        let size = std::mem::size_of::<T>() as u64;
 
+        size.next_multiple_of(alignment)
+    }
+    #[inline]
+    pub fn get_storage_buffer_min_offset_alignment(&self) -> u64 {
+        let limits = unsafe { self.get_physical_device_properties().limits };
+        return limits.min_storage_buffer_offset_alignment;
+    }
+    #[inline]
+    pub fn get_storage_buffer_min_size<T>(&self) -> u64 {
+        let size = std::mem::size_of::<T>();
+        let alignment = std::mem::align_of::<T>();
+        let size = size.next_multiple_of(alignment) as u64;
+
+        let limits = unsafe { self.get_physical_device_properties().limits };
+        let alignment = limits.min_storage_buffer_offset_alignment;
+
+        size.next_multiple_of(alignment)
+    }
     #[inline]
     unsafe fn get_alloc_callbacks(&self) -> Option<&vk::AllocationCallbacks<'_>> {
         self.instance.allocation_callbacks_ref()
@@ -505,7 +531,7 @@ impl Device {
     vk_delegate_forward!(reset_command_buffer, (buffer: CommandBuffer, flags: CommandBufferResetFlags), VkResult<()>);
     vk_delegate_forward!(cmd_pipeline_barrier2, (cb: CommandBuffer, info: &DependencyInfo), ());
     vk_delegate_forward!(device_wait_idle, (), VkResult<()>);
-    vk_delegate_forward!(cmd_bind_pipeline, (cb: CommandBuffer, bind_point: PipelineBindPoint, pipeline: Pipeline), ());
+    vk_delegate_forward!(cmd_bind_pipeline, (cmd: CommandBuffer, bind_point: PipelineBindPoint, pipeline: Pipeline), ());
     vk_delegate_forward!(cmd_set_viewport, (buffer: CommandBuffer, first_viewport: u32, viewports: &[Viewport]), ());
     vk_delegate_forward!(cmd_set_scissor, (buffer: CommandBuffer, first_scissor: u32, scissors: &[Rect2D]), ());
     vk_delegate_forward!(cmd_bind_vertex_buffers, (command_buffer: CommandBuffer, first_binding: u32, buffers: &[Buffer], offsets: &[DeviceSize]), ());
@@ -524,7 +550,7 @@ impl Device {
     vk_delegate_forward!(get_image_memory_requirements, (image: Image), MemoryRequirements);
     vk_delegate_forward!(map_memory, (memory: DeviceMemory, offset: DeviceSize, size: DeviceSize, flags: MemoryMapFlags), VkResult<*mut std::ffi::c_void>);
     vk_delegate_forward!(unmap_memory, (memory: DeviceMemory), ());
-    vk_delegate_forward!(cmd_bind_descriptor_sets,(buffer: CommandBuffer, bind_point: PipelineBindPoint, layout: PipelineLayout, first_set: u32, sets: &[DescriptorSet], dynamic_offsets: &[u32]), ());
+    vk_delegate_forward!(cmd_bind_descriptor_sets,(cmd: CommandBuffer, bind_point: PipelineBindPoint, layout: PipelineLayout, first_set: u32, sets: &[DescriptorSet], dynamic_offsets: &[u32]), ());
     vk_delegate_forward!(cmd_draw_indirect, (cmd: CommandBuffer, buffer: Buffer, offset: u64, draw_count: u32, stride: u32), ());
     vk_delegate_forward!(cmd_draw_indexed_indirect, (cmd: CommandBuffer, buffer: Buffer, offset: u64, draw_count: u32, stride: u32), ());
     vk_delegate_forward!(cmd_draw_indexed, (cmd: CommandBuffer, index_count: u32, instance_count: u32, first_index: u32, vertex_offset: i32, first_instance: u32), ());

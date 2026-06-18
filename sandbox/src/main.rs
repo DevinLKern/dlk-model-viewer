@@ -7,7 +7,10 @@ mod settings;
 use camera::{Camera, controllers::*};
 use constants::*;
 use input_manager::{Input, InputEvent, InputManager};
-use renderer::{CameraUBO, ShaderVertVertex};
+use obj_mtl::{Vertex, VertexNormal};
+use renderer::{
+    CameraUBO, FrameContext, MainRenderPass, MainScene, MainSceneBuilder, ShaderVertVertex,
+};
 use result::{Error, Result};
 use settings::{Command, Event, Settings};
 
@@ -27,7 +30,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
-use math::{AffineTransform, Identity, Quat, Vec3, Vec4, Zero};
+use math::{AffineTransform, Identity, Mat4, Quat, Vec3, Vec4, Zero};
 
 include!(concat!(env!("OUT_DIR"), "/arrow.rs"));
 
@@ -53,17 +56,21 @@ struct Application {
     arrow_camera: Camera,
     windows: HashMap<WindowId, (renderer::FrameContext, Window)>,
     renderer: renderer::Renderer,
+    main_scene: MainScene,
+    main_pass: MainRenderPass,
     default_texture_index: usize,
-    plane_arena_handle: renderer::MeshArenaHandle,
-    mesh_arena_handle: renderer::MeshArenaHandle,
+    grid_arena_handle: renderer::MeshArenaHandle,
+    // (first_index, index_count)
+    arrow_shape_info: (usize, usize),
     x_arrow_transform: AffineTransform,
-    red_material_index: u32,
+    red_material_index: usize,
     y_arrow_transform: AffineTransform,
-    green_material_index: u32,
+    green_material_index: usize,
     z_arrow_transform: AffineTransform,
-    blue_material_index: u32,
-    arrow_submesh: renderer::SubMesh,
-    model_submeshes: Vec<(renderer::SubMesh, u32)>,
+    blue_material_index: usize,
+    // (first_index_count, index_count, material_index)
+    model_shape_info: Vec<(usize, usize, usize)>,
+    model_import_transform: math::Mat4<f32>,
     model_transform: math::AffineTransform,
     global_light_direction: Vec3<f32>,
     global_light_color: Vec4<f32>,
@@ -91,6 +98,17 @@ impl Application {
 
         return None;
     }
+    fn calc_derived_normal(v0: &Vertex, v1: &Vertex, v2: &Vertex) -> VertexNormal {
+        let v0 = Vec3::new(v0.x as f32, v0.y as f32, v0.z as f32);
+        let v1 = Vec3::new(v1.x as f32, v1.y as f32, v1.z as f32);
+        let v2 = Vec3::new(v2.x as f32, v2.y as f32, v2.z as f32);
+        let n = v1.sub(v0).cross(v2.sub(v0)).normalized();
+        VertexNormal {
+            x: n.x() as f64,
+            y: n.y() as f64,
+            z: n.z() as f64,
+        }
+    }
     fn new(
         window_name: Box<str>,
         settings: crate::Settings,
@@ -100,7 +118,7 @@ impl Application {
     ) -> Result<Self> {
         // load materials
         let file_path = model_path.with_extension("mtl");
-        let objf = obj_mtl::ObjScene::from_file(model_path)?;
+        let obj_scene = obj_mtl::ObjScene::from_file(model_path)?;
 
         let mtl_materials = match obj_mtl::load_materials(&file_path) {
             Ok(materials) => materials,
@@ -111,93 +129,252 @@ impl Application {
             Err(e) => return Err(e.into()),
         };
 
-        let (texture_count, material_count) = {
-            let mut count = 0;
-            let mut seen = HashSet::<&str>::new();
-            for material in mtl_materials.iter() {
-                if let Some(texture) = &material.diffuse.texture {
-                    if seen.insert(&texture.file_path) {
-                        count += 1;
-                    }
-                }
-            }
-
-            (count, mtl_materials.len() as u64)
-        };
-
         // TODO: one is added to account for the plane, default texture, and default material.
         // However, this is very unsafe. add bounds checks and return errors instead of crashing
         // or printing validation error info.
-        let mut renderer = renderer::Renderer::new(
-            debug_enabled,
-            display_handle,
-            texture_count + 1,
-            material_count + 4,
-        )?;
+        let mut renderer = renderer::Renderer::new(debug_enabled, display_handle)?;
 
-        let mut texture_name_to_index = HashMap::<Box<str>, usize>::new();
+        let mut scene_builder = MainSceneBuilder::new();
+
+        scene_builder.set_light_color(Vec4::new(1.0, 1.0, 1.0, 1.0));
+        scene_builder.set_light_direction(ENGINE_RIGHT.sub(ENGINE_UP));
+        scene_builder.set_ambient_light_intensity(0.1);
+
+        // main - add materials and textures
+        let mut texture_path_to_index = HashMap::<Box<str>, usize>::new();
+        let mut material_name_to_index = HashMap::<Box<str>, usize>::new();
+
         let default_texture_index = {
-            let image_data =
+            let image =
                 image::load_from_memory_with_format(DEFAULT_IMAGE, image::ImageFormat::Png)?;
-            renderer.create_image(image_data)?
+            let image = renderer.create_image(image)?;
+            scene_builder.add_image(renderer.repeat_sampler(), image)
         };
-        for material in mtl_materials.iter() {
-            if let Some(diffuse_texture) = &material.diffuse.texture {
-                // PathBuf::from_str is infallable
-                let path = {
-                    let base = model_path.with_file_name("");
-                    // PathBuf::from_str is infallible
-                    let target = PathBuf::from_str(&diffuse_texture.file_path).unwrap();
 
-                    Self::search_for(&base, &target).ok_or(Error::CouldNotFindFile)?
-                };
-                let name = diffuse_texture.file_path.clone();
-                if texture_name_to_index.contains_key(&name) {
-                    continue;
-                }
-                let texture_data = image::open(path).inspect_err(|e| tracing::error!("{e}"))?;
-                let texture_handle = renderer.create_image(texture_data)?;
-                texture_name_to_index.insert(name, texture_handle);
+        let default_material_index =
+            scene_builder.add_material(Vec4::new(1.0, 0.2, 0.2, 1.0), None, false);
+        let red_material_index =
+            scene_builder.add_material(Vec4::new(1.0, 0.0, 0.0, 1.0), None, true);
+        let green_material_index =
+            scene_builder.add_material(Vec4::new(0.0, 1.0, 0.0, 1.0), None, true);
+        let blue_material_index =
+            scene_builder.add_material(Vec4::new(0.0, 1.0, 0.0, 1.0), None, true);
+
+        for material in mtl_materials.iter() {
+            if let Some(_material_index) = material_name_to_index.get(&material.name) {
+                continue;
             }
-        }
 
-        let mut material_name_to_index = HashMap::<Box<str>, u32>::new();
-        let default_material_index = renderer.add_material(renderer::MaterialUBO {
-            flags: 0,
-            texture_index: 0,
-            _pad2: [0; 8],
-            base_color: [0.8, 0.2, 0.2, 1.0],
-        })?;
-        for material in mtl_materials.iter() {
-            let (texture_index, flags) = if let Some(diffuse_texture) = &material.diffuse.texture {
-                let name = diffuse_texture.file_path.clone();
-                (*texture_name_to_index.get(&name).unwrap() as u32, 1)
+            let base_color = material.diffuse.color.unwrap_or([0.0; 3]);
+            let base_color = Vec4::new(base_color[0], base_color[1], base_color[2], 1.0);
+
+            let diffuse_texture = if let Some(texture) = &material.diffuse.texture {
+                let image_index = if let Some(index) = texture_path_to_index.get(&texture.file_path)
+                {
+                    *index
+                } else {
+                    let path = {
+                        let base = model_path.with_file_name("");
+                        // PathBuf::from_str is infallible
+                        let target = PathBuf::from_str(&texture.file_path).unwrap();
+
+                        Self::search_for(&base, &target).ok_or(Error::CouldNotFindFile)?
+                    };
+                    let image = image::open(&path).inspect_err(|e| tracing::error!("{e}"))?;
+                    let image = renderer.create_image(image)?;
+                    let image_index = scene_builder.add_image(renderer.repeat_sampler(), image);
+
+                    texture_path_to_index.insert(texture.file_path.clone(), image_index);
+                    image_index
+                };
+
+                Some(image_index)
             } else {
-                (0, 0)
+                None
             };
 
-            let base_color = if let Some(color) = material.diffuse.color {
-                [color[0], color[1], color[2], 1.0]
-            } else {
-                [0.0; 4]
-            };
-
-            let material_index = renderer.add_material(renderer::MaterialUBO {
-                flags,
-                texture_index,
-                _pad2: [0; 8],
-                base_color,
-            })?;
-
-            let name = material.name.clone();
-            material_name_to_index.insert(name, material_index);
+            let material_index = scene_builder.add_material(base_color, diffuse_texture, false);
+            material_name_to_index.insert(material.name.clone(), material_index);
         }
 
-        let mut vertices = Vec::<ShaderVertVertex>::with_capacity(1024);
-        let mut indices = Vec::<u32>::with_capacity(512);
+        // main - add arrow vertices
+
+        let arrow_iter = crate::ARROW_VERTICES
+            .iter()
+            .zip(crate::ARROW_NORMALS.iter())
+            .map(|(pos, normal)| renderer::ShaderVertVertex {
+                position: *pos,
+                tex_coord: [0.0, 0.0],
+                normal: *normal,
+            });
+        let (arrow_first_vertex, arrow_vertex_count) = scene_builder.add_vertices(arrow_iter);
+        let (arrow_first_index, arrow_index_count) =
+            scene_builder.add_indices(ARROW_INDICES.iter().map(|idx| *idx));
+        let arrow_shape_info = (arrow_first_index, arrow_index_count);
+
+        const ARROW_SCALAR: Vec3<f32> = Vec3::new(0.05, 0.1, 0.05);
+        let x_arrow_transform = AffineTransform {
+            position: Vec3::ZERO,
+            orientation: Quat::unit_from_angle_axis(std::f32::consts::FRAC_PI_2, Vec3::Z),
+            scalar: ARROW_SCALAR,
+        };
+        let y_arrow_transform = AffineTransform {
+            position: Vec3::ZERO,
+            orientation: Quat::unit_from_angle_axis(std::f32::consts::PI, Vec3::Z),
+            scalar: ARROW_SCALAR,
+        };
+        let z_arrow_transform = AffineTransform {
+            position: Vec3::ZERO,
+            orientation: Quat::unit_from_angle_axis(std::f32::consts::FRAC_PI_2, Vec3::X),
+            scalar: ARROW_SCALAR,
+        };
+
+        // main - add model vertices
+        let shape_vertex_offset = arrow_first_vertex + arrow_vertex_count;
         let mut vertex_map = HashMap::<obj_mtl::VtnIndex, usize>::new();
-        // transform, material_index
+        let mut model_min = Vec3::scalar(f32::MAX);
+        let mut model_max = Vec3::scalar(f32::MIN);
+        // Vec<(index_count, first_index, material_info)>
+        let mut model_shape_info = Vec::<(usize, usize, usize)>::new();
+        for shape in obj_scene.get_shapes() {
+            let triangles = shape.get_primitives().flat_map(|p| match p {
+                obj_mtl::Primitive::Triangle { v0, v1, v2 } => vec![(*v0, *v1, *v2)].into_iter(),
+                obj_mtl::Primitive::Polygon(indices) => (2..indices.len())
+                    .map(move |i| (indices[0], indices[i - 1], indices[i]))
+                    .collect::<Vec<_>>()
+                    .into_iter(),
+                _ => Vec::new().into_iter(),
+            });
 
+            let vertices = triangles
+                .flat_map(|(v0, v1, v2)| {
+                    let dn = if settings.derive_normals {
+                        Self::calc_derived_normal(
+                            &obj_scene.vs[v0.v],
+                            &obj_scene.vs[v1.v],
+                            &obj_scene.vs[v2.v],
+                        )
+                    } else {
+                        VertexNormal {
+                            x: 0.0,
+                            y: 0.0,
+                            z: 0.0,
+                        }
+                    };
+                    [(v0, dn), (v1, dn), (v2, dn)].into_iter()
+                })
+                .filter_map(|(v, dn)| {
+                    let idx = vertex_map.len() + shape_vertex_offset;
+
+                    match vertex_map.entry(v) {
+                        std::collections::hash_map::Entry::Occupied(_) => None,
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            let position = obj_scene.vs[v.v];
+
+                            let tex_coord =
+                                v.vt.and_then(|idx| obj_scene.vts.get(idx))
+                                    .copied()
+                                    .unwrap_or_default();
+
+                            let normal = v.vn.and_then(|idx| obj_scene.vns.get(idx)).unwrap_or(&dn);
+
+                            let position =
+                                Vec3::new(position.x as f32, position.y as f32, position.z as f32);
+
+                            model_max = model_max.max(position);
+                            model_min = model_min.min(position);
+
+                            entry.insert(idx);
+
+                            Some(ShaderVertVertex {
+                                position: position.into_arr(),
+                                tex_coord: [tex_coord.u as f32, 1.0 - tex_coord.v as f32],
+                                normal: [normal.x as f32, normal.y as f32, normal.z as f32],
+                            })
+                        }
+                    }
+                });
+
+            let (_first_vertex, _vertex_count) = scene_builder.add_vertices(vertices);
+
+            let triangles = shape.get_primitives().flat_map(|p| match p {
+                obj_mtl::Primitive::Triangle { v0, v1, v2 } => vec![(*v0, *v1, *v2)].into_iter(),
+                obj_mtl::Primitive::Polygon(indices) => (2..indices.len())
+                    .map(move |i| (indices[0], indices[i - 1], indices[i]))
+                    .collect::<Vec<_>>()
+                    .into_iter(),
+                _ => Vec::new().into_iter(),
+            });
+
+            let indices = triangles
+                .flat_map(|(v0, v1, v2)| [v0, v1, v2].into_iter())
+                .map(|v| *vertex_map.get(&v).unwrap() as u32);
+
+            let (first_index, index_count) = scene_builder.add_indices(indices);
+
+            if shape.materials.len() > 1 {
+                println!("Warning: Multiple materials per shape not supported.");
+            }
+
+            let material_index = shape
+                .materials
+                .get(0)
+                .and_then(|mtl_name| material_name_to_index.get(mtl_name))
+                .unwrap_or(&default_material_index);
+
+            model_shape_info.push((first_index, index_count, *material_index));
+        }
+
+        let model_scale = model_max.sub(model_min);
+        let model_scale = model_scale.x().max(model_scale.y()).max(model_scale.z());
+        let model_scale = 1.0 / model_scale;
+
+        let model_import_transform = {
+            let center = model_max.add(model_min).scaled(0.5);
+            let t = Mat4::translation(Vec3::ZERO.sub(center));
+            let r = settings.from_model.into_mat4(1.0);
+
+            r.mul(&t)
+        };
+
+        let model_transform = math::AffineTransform {
+            position: Vec3::ZERO,
+            orientation: Quat::IDENTITY,
+            scalar: Vec3::scalar(model_scale),
+        };
+
+        let mut binding_map = HashMap::new();
+        for (index, binding) in settings.bindings.iter().enumerate() {
+            binding_map.insert(binding.command, index);
+        }
+
+        let (orbit_camera, orbit_controller) = {
+            let mut controller = OrbitCameraController::new(model_transform.position);
+            let mut camera = Camera::orthographic(1.25, 1.25, 100.0);
+
+            camera
+                .transform
+                .translate_global(model_transform.position.sub(ENGINE_FORWARDS));
+            controller.update(&mut camera, 0.0, 0.0);
+
+            (camera, controller)
+        };
+
+        let (fps_camera, fps_controller) = {
+            let mut controller = FpsCameraController::new();
+            let mut camera = Camera::perspective(settings.fov_y);
+
+            controller.r#move(model_transform.position.sub(ENGINE_FORWARDS));
+            controller.update(&mut camera, 1.0, 1.0);
+
+            (camera, controller)
+        };
+
+        let global_light_direction = Vec3::ZERO.sub(ENGINE_UP).add(ENGINE_RIGHT.scaled(0.2));
+
+        let camera_in_use = settings.default_camera.clone();
+
+        // grid - add vertices
         const PS: f32 = 1000.0;
         const PLANE_VERTEX_BUFFER_DATA: &[renderer::GridVertVertex] = {
             const F: Vec3<f32> = ENGINE_FORWARDS;
@@ -227,263 +404,23 @@ impl Application {
         };
         const PLANE_INDEX_BUFFER_DATA: &[u32] = &[0, 1, 2, 2, 3, 0];
 
-        let plane_arena_handle = {
+        let grid_arena_handle = {
             let vertex_buffer_data = unsafe {
                 std::slice::from_raw_parts(
                     PLANE_VERTEX_BUFFER_DATA.as_ptr() as *const u8,
-                    PLANE_VERTEX_BUFFER_DATA.len() * std::mem::size_of::<renderer::GridData>(),
+                    PLANE_VERTEX_BUFFER_DATA.len()
+                        * std::mem::size_of::<renderer::GridVertVertex>(),
                 )
             };
 
             renderer.create_mesh_arena(vertex_buffer_data, &PLANE_INDEX_BUFFER_DATA)?
         };
 
-        let arrow_iter = crate::ARROW_VERTICES
-            .iter()
-            .zip(crate::ARROW_NORMALS.iter())
-            .map(|(pos, normal)| renderer::ShaderVertVertex {
-                position: *pos,
-                tex_coord: [0.0, 0.0],
-                normal: *normal,
-            });
-        for vertex in arrow_iter {
-            vertices.push(vertex);
-        }
-        let mut old_index_len = indices.len();
-        for index in crate::ARROW_INDICES {
-            indices.push(*index);
-        }
+        let main_scene =
+            scene_builder.build(renderer.device.clone(), renderer.mesh_arenas_mut())?;
 
-        const ARROW_SCALAR: Vec3<f32> = Vec3::new(0.05, 0.1, 0.05);
-        const MATERIAL_UNLIT_FLAG: u32 = 1 << 1;
-        // red arrow (+X)
-        let red_material_index = renderer.add_material(renderer::MaterialUBO {
-            flags: MATERIAL_UNLIT_FLAG,
-            texture_index: 0,
-            _pad2: [0; 8],
-            base_color: [1.0, 0.1, 0.1, 1.0],
-        })?;
-        let x_arrow_transform = AffineTransform {
-            position: Vec3::ZERO,
-            orientation: Quat::unit_from_angle_axis(std::f32::consts::FRAC_PI_2, Vec3::Z),
-            scalar: ARROW_SCALAR,
-        };
-        // green arrow (+Y)
-        let green_material_index = renderer.add_material(renderer::MaterialUBO {
-            flags: MATERIAL_UNLIT_FLAG,
-            texture_index: 0,
-            _pad2: [0; 8],
-            base_color: [0.1, 1.0, 0.1, 1.0],
-        })?;
-        let y_arrow_transform = AffineTransform {
-            position: Vec3::ZERO,
-            orientation: Quat::unit_from_angle_axis(std::f32::consts::PI, Vec3::Z),
-            scalar: ARROW_SCALAR,
-        };
-        // blue arrow (+Z)
-        let blue_material_index = renderer.add_material(renderer::MaterialUBO {
-            flags: MATERIAL_UNLIT_FLAG,
-            texture_index: 0,
-            _pad2: [0; 8],
-            base_color: [0.1, 0.1, 1.0, 1.0],
-        })?;
-        let z_arrow_transform = AffineTransform {
-            position: Vec3::ZERO,
-            orientation: Quat::unit_from_angle_axis(std::f32::consts::FRAC_PI_2, Vec3::X),
-            scalar: ARROW_SCALAR,
-        };
-
-        let arrow_index_count = crate::ARROW_INDICES.len();
-        let arrow_first_index = old_index_len;
-
-        let model_to_engine = crate::TO_ENGINE.mul(&settings.from_model);
-
-        let mut model_min = Vec3::scalar(f32::MAX);
-        let mut model_max = Vec3::scalar(f32::MIN);
-        // Vec<(index_count, first_index, material_index)>
-        let mut model_submesh_data = Vec::<(usize, usize, u32)>::new();
-        for shape in objf.get_shapes() {
-            let material_index = if shape.materials.len() == 0 {
-                default_material_index
-            } else if shape.materials.len() == 1 {
-                *material_name_to_index
-                    .get(&shape.materials[0])
-                    .ok_or(Error::InvalidMaterialIndex)?
-            } else {
-                return Err(Error::MultipleMaterialsPerShape);
-            };
-
-            // Build a triangle list
-            let mut triangles =
-                Vec::<(obj_mtl::VtnIndex, obj_mtl::VtnIndex, obj_mtl::VtnIndex)>::with_capacity(64);
-            for primitive in shape.get_primitives() {
-                match primitive {
-                    obj_mtl::Primitive::Triangle { v0, v1, v2 } => triangles.push((*v0, *v1, *v2)),
-                    obj_mtl::Primitive::Polygon(poly) => {
-                        if poly.len() < 3 {
-                            continue;
-                        }
-                        let v0 = poly[0];
-                        for i in 1..(poly.len() - 1) {
-                            triangles.push((v0, poly[i], poly[i + 1]));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-
-            old_index_len = indices.len();
-
-            for (v0, v1, v2) in triangles {
-                let derived_normal = if settings.derive_normals {
-                    match (v0.vn, v1.vn, v2.vn) {
-                        (None, None, None) => {
-                            let p0 = &objf.vs[v0.v];
-                            let p0 = Vec3::new(p0.x as f32, p0.y as f32, p0.z as f32);
-                            let p1 = &objf.vs[v1.v];
-                            let p1 = Vec3::new(p1.x as f32, p1.y as f32, p1.z as f32);
-                            let p2 = &objf.vs[v2.v];
-                            let p2 = Vec3::new(p2.x as f32, p2.y as f32, p2.z as f32);
-
-                            let face_normal = p1.sub(p0).cross(p2.sub(p0));
-
-                            Some(face_normal)
-                        }
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
-                let derived_normal = match derived_normal {
-                    Some(n) => n,
-                    None => Vec3::new(0.0, 0.0, 0.0),
-                };
-
-                for v in [v0, v1, v2] {
-                    let index = if let Some(&i) = vertex_map.get(&v) {
-                        i
-                    } else {
-                        let position = model_to_engine.mul_vec(Vec3::new(
-                            objf.vs[v.v].x as f32,
-                            objf.vs[v.v].y as f32,
-                            objf.vs[v.v].z as f32,
-                        ));
-
-                        let tex_coord = if let Some(i) = v.vt {
-                            [objf.vts[i].u as f32, 1.0 - objf.vts[i].v as f32]
-                        } else {
-                            [0.0, 0.0]
-                        };
-
-                        let normal = if let Some(i) = v.vn {
-                            Vec3::new(
-                                objf.vns[i].x as f32,
-                                objf.vns[i].y as f32,
-                                objf.vns[i].z as f32,
-                            )
-                        } else {
-                            derived_normal
-                        };
-
-                        let normal = model_to_engine.mul_vec(normal).into_arr();
-
-                        model_min = model_min.min(position);
-                        model_max = model_max.max(position);
-
-                        let i = vertices.len();
-                        vertices.push(ShaderVertVertex {
-                            position: position.into_arr(),
-                            tex_coord,
-                            normal,
-                        });
-                        vertex_map.insert(v, i);
-                        i
-                    };
-
-                    indices.push(index as u32);
-                }
-            }
-
-            // (index_count, first_index, material_index)
-            model_submesh_data.push((indices.len() - old_index_len, old_index_len, material_index));
-        }
-
-        let model_position = Vec3::ZERO;
-        let model_transform = {
-            let center = model_max.add(model_min).scaled(0.5);
-            let model_scale = model_max.sub(model_min);
-            let model_scale = model_scale.x().max(model_scale.y()).max(model_scale.z());
-            let model_scale = 1.0 / model_scale;
-
-            let model_pos = model_position.sub(center.scaled(model_scale));
-
-            math::AffineTransform {
-                position: model_pos,
-                orientation: Quat::IDENTITY,
-                scalar: Vec3::scalar(model_scale),
-            }
-        };
-
-        let mut binding_map = HashMap::new();
-        for (index, binding) in settings.bindings.iter().enumerate() {
-            binding_map.insert(binding.command, index);
-        }
-
-        let (orbit_camera, orbit_controller) = {
-            let mut controller = OrbitCameraController::new(model_position);
-            let mut camera = Camera::orthographic(1.25, 1.25, 100.0);
-
-            camera
-                .transform
-                .translate_global(model_position.sub(ENGINE_FORWARDS));
-            controller.update(&mut camera, 0.0, 0.0);
-
-            (camera, controller)
-        };
-
-        let mesh_arena_handle = {
-            let vertex_buffer_data = unsafe {
-                std::slice::from_raw_parts(
-                    vertices.as_ptr() as *const u8,
-                    vertices.len() * std::mem::size_of::<ShaderVertVertex>(),
-                )
-            };
-            renderer.create_mesh_arena(&vertex_buffer_data, &indices)?
-        };
-
-        let arrow_submesh = renderer::SubMesh {
-            geometry: mesh_arena_handle,
-            first_index: arrow_first_index as u32,
-            index_count: arrow_index_count as u32,
-        };
-
-        let model_submeshes = model_submesh_data
-            .into_iter()
-            .map(|(index_count, first_index, material_index)| {
-                (
-                    renderer::SubMesh {
-                        geometry: mesh_arena_handle,
-                        first_index: first_index as u32,
-                        index_count: index_count as u32,
-                    },
-                    material_index,
-                )
-            })
-            .collect();
-
-        let (fps_camera, fps_controller) = {
-            let mut controller = FpsCameraController::new();
-            let mut camera = Camera::perspective(settings.fov_y);
-
-            controller.r#move(model_position.sub(ENGINE_FORWARDS));
-            controller.update(&mut camera, 1.0, 1.0);
-
-            (camera, controller)
-        };
-
-        let global_light_direction = Vec3::ZERO.sub(ENGINE_UP).add(ENGINE_RIGHT.scaled(0.2));
-
-        let camera_in_use = settings.default_camera.clone();
+        let main_pass =
+            renderer::MainRenderPass::new(renderer.device.clone(), &main_scene, &mut renderer)?;
 
         Ok(Self {
             last: std::time::Instant::now(),
@@ -500,17 +437,19 @@ impl Application {
             orbit_controller,
             arrow_camera: Camera::orthographic(1.5, 1.5, 10.0),
             windows: HashMap::new(),
+            main_scene,
+            main_pass,
             default_texture_index,
-            plane_arena_handle,
-            mesh_arena_handle,
+            grid_arena_handle,
+            arrow_shape_info,
             x_arrow_transform,
             red_material_index,
             y_arrow_transform,
             green_material_index,
             z_arrow_transform,
             blue_material_index,
-            arrow_submesh,
-            model_submeshes,
+            model_shape_info,
+            model_import_transform,
             model_transform,
             global_light_direction,
             global_light_color: Vec4::new(1.0, 1.0, 1.0, 1.0),
@@ -708,10 +647,9 @@ impl Application {
                     self.orbit_camera.set_aspect_ratio(aspect_ratio);
                 }
 
-                let new_context = self.renderer.create_render_context(window)?;
-                if context.get_grid_pipeline() != new_context.get_grid_pipeline() {
-                    //
-                }
+                let new_context = self
+                    .renderer
+                    .create_frame_context(window, &self.main_pass)?;
                 *context = new_context;
 
                 return Ok(false);
@@ -724,187 +662,26 @@ impl Application {
                     .get_mut(window_id)
                     .ok_or(Error::WindowIdInvalid)?;
 
-                // upload instance data into buffer
-                let (
-                    swapchain_extent,
-                    model_camera_offset,
-                    arrow_camera_offset,
-                    indirect_command_data,
-                    model_indirect_command_data_count,
-                    arrow_indirect_command_data_count,
-                    main_per_frame_descriptor_set,
-                    grid_per_frame_descriptor_set,
-                ) = {
-                    let calc_instance_data =
-                        |model_transform: &math::AffineTransform, material_index: u32| {
-                            let model_matrix = model_transform.as_mat4();
-                            let normal_matrix = model_matrix
-                                .as_mat3()
-                                .transposed()
-                                .inverse()
-                                .unwrap()
-                                .into_mat4(1.0);
-
-                            renderer::InstanceData {
-                                model_matrix: model_matrix.into_2d_arr(),
-                                normal_matrix: normal_matrix.into_2d_arr(),
-                                material_index,
-                                _pad0: 0,
-                                _pad1: 0,
-                                _pad2: 0,
-                            }
-                        };
-                    let swapchain_extent = context.swapchain_extent();
-
-                    let frame = context.get_current_frame_mut();
-                    frame.allocator_mut().reset();
-
-                    let camera_data = match self.camera_in_use {
-                        CameraInUse::Fps => renderer::CameraUBO {
-                            view_matrix: self.fps_camera.view_matrix().into_2d_arr(),
-                            proj_matrix: self.fps_camera.projection_matrix().into_2d_arr(),
-                        },
-                        CameraInUse::Orbit => renderer::CameraUBO {
-                            view_matrix: self.orbit_camera.view_matrix().into_2d_arr(),
-                            proj_matrix: self.orbit_camera.projection_matrix().into_2d_arr(),
-                        },
+                let camera_data = {
+                    let cur_camera = match self.camera_in_use {
+                        CameraInUse::Fps => &self.fps_camera,
+                        CameraInUse::Orbit => &self.orbit_camera,
                     };
-                    let alignment = frame.camera_data_element_size();
-                    let model_camera_offset = frame
-                        .allocator_mut()
-                        .upload_uniform_data(&[camera_data], alignment)?;
 
-                    let mut command_data = Vec::<vk::DrawIndexedIndirectCommand>::with_capacity(32);
-
-                    for (submesh, material_index) in self.model_submeshes.iter() {
-                        let instance_data =
-                            calc_instance_data(&self.model_transform, *material_index);
-                        let alignment = frame.instance_data_element_size();
-                        let first_instance_offset = frame
-                            .allocator_mut()
-                            .upload_storage_data(&[instance_data], alignment)?;
-                        let first_instance_index =
-                            first_instance_offset / frame.instance_data_element_size();
-
-                        let command = vk::DrawIndexedIndirectCommand {
-                            index_count: submesh.index_count,
-                            instance_count: 1,
-                            first_index: submesh.first_index,
-                            vertex_offset: 0,
-                            first_instance: first_instance_index as u32,
-                        };
-                        command_data.push(command);
+                    CameraUBO {
+                        view_matrix: cur_camera.view_matrix().as_2d_arr(),
+                        proj_matrix: cur_camera.projection_matrix().as_2d_arr(),
                     }
-
-                    frame.allocator_mut().upload_indirect_data(
-                        &command_data,
-                        std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u64,
-                    )?;
-
-                    let model_command_data_count = command_data.len();
-
-                    let camera_data = CameraUBO {
-                        view_matrix: self.arrow_camera.view_matrix().into_2d_arr(),
-                        proj_matrix: self.arrow_camera.projection_matrix().into_2d_arr(),
-                    };
-                    let alignment = frame.camera_data_element_size();
-                    let arrow_camera_offset = frame
-                        .allocator_mut()
-                        .upload_uniform_data(&[camera_data], alignment)?;
-                    let instance_data = {
-                        let x_arrow_data =
-                            calc_instance_data(&self.x_arrow_transform, self.red_material_index);
-                        let y_arrow_data =
-                            calc_instance_data(&self.y_arrow_transform, self.green_material_index);
-                        let z_arrow_data =
-                            calc_instance_data(&self.z_arrow_transform, self.blue_material_index);
-
-                        [x_arrow_data, y_arrow_data, z_arrow_data]
-                    };
-                    let alignment = frame.instance_data_element_size();
-                    let first_instance_offset = frame
-                        .allocator_mut()
-                        .upload_storage_data(&instance_data, alignment)?;
-                    let first_instance_index =
-                        first_instance_offset / frame.instance_data_element_size();
-
-                    let command_data = vk::DrawIndexedIndirectCommand {
-                        index_count: self.arrow_submesh.index_count,
-                        instance_count: instance_data.len() as u32,
-                        first_instance: first_instance_index as u32,
-                        first_index: self.arrow_submesh.first_index,
-                        vertex_offset: 0,
-                    };
-                    let alignment = frame.indirect_command_data_element_size();
-                    frame
-                        .allocator_mut()
-                        .upload_indirect_data(&[command_data], alignment)?;
-
-                    let arrow_command_data_count = 1;
-
-                    (
-                        swapchain_extent,
-                        model_camera_offset as u32,
-                        arrow_camera_offset as u32,
-                        frame.allocator_mut().indirect_buffer_raw(),
-                        model_command_data_count as u32,
-                        arrow_command_data_count as u32,
-                        frame.main_per_frame_descriptor_set(),
-                        frame.grid_per_frame_descriptor_set(),
-                    )
                 };
 
-                let main_pipeline = context.get_main_pipeline();
-                let grid_pipeline = context.get_grid_pipeline();
+                let swapchain_extent = context.swapchain_extent();
 
-                let record_draw_commands = |cmd: vk::CommandBuffer| unsafe {
+                let record_draw_commands = |ctx: &mut FrameContext| -> renderer::Result<()> {
+                    ctx.get_current_frame_mut().allocator_mut().reset();
+                    let cmd = ctx.get_current_frame().command_buffer();
+
                     // PART 1 - MAIN SCENE
-                    self.renderer.bind_pipeline(
-                        cmd,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        main_pipeline,
-                    );
-
-                    let (vb, ib) = {
-                        let mesh_arena = self
-                            .renderer
-                            .access_mesh_arena(self.mesh_arena_handle)
-                            .unwrap();
-                        (
-                            mesh_arena.vertex_buffer.handle,
-                            mesh_arena.index_buffer.handle,
-                        )
-                    };
-
-                    let (buffers, offsets) = {
-                        let b = [vb];
-                        let o = [0];
-
-                        (b, o)
-                    };
-
-                    {
-                        let sets = [self.renderer.main_other_descriptor_set()];
-                        self.renderer.bind_descriptor_sets(
-                            cmd,
-                            self.renderer.main_pipeline_layout(),
-                            1,
-                            &sets,
-                            &[],
-                        );
-
-                        self.renderer
-                            .device
-                            .cmd_bind_vertex_buffers(cmd, 0, &buffers, &offsets);
-                        self.renderer.device.cmd_bind_index_buffer(
-                            cmd,
-                            ib,
-                            0,
-                            vk::IndexType::UINT32,
-                        );
-                    }
-
-                    {
+                    unsafe {
                         let scissor = vk::Rect2D {
                             offset: vk::Offset2D { x: 0, y: 0 },
                             extent: swapchain_extent,
@@ -920,204 +697,40 @@ impl Application {
                         self.renderer.device.cmd_set_viewport(cmd, 0, &[viewport]);
                         self.renderer.device.cmd_set_scissor(cmd, 0, &[scissor]);
 
-                        let sets = [main_per_frame_descriptor_set];
-                        self.renderer.bind_descriptor_sets(
-                            cmd,
-                            self.renderer.main_pipeline_layout(),
-                            0,
-                            &sets,
-                            &[model_camera_offset],
-                        );
-                        self.renderer.device.cmd_draw_indexed_indirect(
-                            cmd,
-                            indirect_command_data,
-                            0,
-                            model_indirect_command_data_count,
-                            std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u32,
-                        );
+                        self.main_scene.reset();
+
+                        // let x_arrow_instance = self
+                        //     .main_scene
+                        //     .add_instance(self.x_arrow_transform, self.red_material_index);
+                        // let (arrow_first_index, arrow_index_count) = self.arrow_shape_info;
+                        // let arrow_submesh = self
+                        //     .main_scene
+                        //     .add_submesh(arrow_first_index, arrow_index_count);
+                        // let _draw = self.main_scene.add_draw(x_arrow_instance, arrow_submesh);
+
+                        for (first_index, index_count, material_index) in
+                            self.model_shape_info.iter()
+                        {
+                            let submesh_index =
+                                self.main_scene.add_submesh(*first_index, *index_count);
+                            let transform = self
+                                .model_transform
+                                .as_mat4()
+                                .mul(&self.model_import_transform);
+
+                            let instance_index =
+                                self.main_scene.add_instance(transform, *material_index);
+                            let _draw = self.main_scene.add_draw(instance_index, submesh_index);
+                        }
+
+                        self.renderer.render_scene(
+                            ctx,
+                            &self.main_scene,
+                            &self.main_pass,
+                            camera_data,
+                        )?;
                     }
-
-                    // PART 2 - GRID
-                    self.renderer.bind_pipeline(
-                        cmd,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        grid_pipeline,
-                    );
-                    let (vb, ib) = {
-                        let mesh_arena = self
-                            .renderer
-                            .access_mesh_arena(self.plane_arena_handle)
-                            .unwrap();
-
-                        (
-                            mesh_arena.vertex_buffer.handle,
-                            mesh_arena.index_buffer.handle,
-                        )
-                    };
-
-                    let (buffers, offsets) = {
-                        let b = [vb];
-                        let o = [0];
-
-                        (b, o)
-                    };
-
-                    {
-                        let sets = [self.renderer.grid_other_descriptor_set()];
-                        self.renderer.bind_descriptor_sets(
-                            cmd,
-                            self.renderer.grid_pipeline_layout(),
-                            1,
-                            &sets,
-                            &[],
-                        );
-
-                        self.renderer
-                            .device
-                            .cmd_bind_vertex_buffers(cmd, 0, &buffers, &offsets);
-                        self.renderer.device.cmd_bind_index_buffer(
-                            cmd,
-                            ib,
-                            0,
-                            vk::IndexType::UINT32,
-                        );
-                    }
-
-                    {
-                        let scissor = vk::Rect2D {
-                            offset: vk::Offset2D { x: 0, y: 0 },
-                            extent: swapchain_extent,
-                        };
-                        let viewport = ash::vk::Viewport {
-                            x: 0.0,
-                            y: 0.0,
-                            width: scissor.extent.width as f32,
-                            height: scissor.extent.height as f32,
-                            min_depth: 0.0,
-                            max_depth: 1.0,
-                        };
-                        self.renderer.device.cmd_set_viewport(cmd, 0, &[viewport]);
-                        self.renderer.device.cmd_set_scissor(cmd, 0, &[scissor]);
-
-                        let sets = [grid_per_frame_descriptor_set];
-                        self.renderer.bind_descriptor_sets(
-                            cmd,
-                            self.renderer.grid_pipeline_layout(),
-                            0,
-                            &sets,
-                            &[model_camera_offset],
-                        );
-                        self.renderer.device.cmd_draw_indexed(
-                            cmd, 6, // index_count
-                            1, 0, 0, 0,
-                        );
-                    }
-
-                    // arrow
-                    self.renderer.bind_pipeline(
-                        cmd,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        main_pipeline,
-                    );
-
-                    let (vb, ib) = {
-                        let mesh_arena = self
-                            .renderer
-                            .access_mesh_arena(self.mesh_arena_handle)
-                            .unwrap();
-                        (
-                            mesh_arena.vertex_buffer.handle,
-                            mesh_arena.index_buffer.handle,
-                        )
-                    };
-
-                    let (buffers, offsets) = {
-                        let b = [vb];
-                        let o = [0];
-
-                        (b, o)
-                    };
-
-                    {
-                        let sets = [self.renderer.main_other_descriptor_set()];
-                        self.renderer.bind_descriptor_sets(
-                            cmd,
-                            self.renderer.main_pipeline_layout(),
-                            1,
-                            &sets,
-                            &[],
-                        );
-
-                        self.renderer
-                            .device
-                            .cmd_bind_vertex_buffers(cmd, 0, &buffers, &offsets);
-                        self.renderer.device.cmd_bind_index_buffer(
-                            cmd,
-                            ib,
-                            0,
-                            vk::IndexType::UINT32,
-                        );
-                    }
-
-                    {
-                        let gizmo_size =
-                            (swapchain_extent.width.min(swapchain_extent.height) / 4).max(128);
-                        let scissor = vk::Rect2D {
-                            offset: vk::Offset2D { x: 0, y: 0 },
-                            extent: vk::Extent2D {
-                                width: gizmo_size,
-                                height: gizmo_size,
-                            },
-                        };
-                        let viewport = ash::vk::Viewport {
-                            x: 0.0,
-                            y: 0.0,
-                            width: scissor.extent.width as f32,
-                            height: scissor.extent.height as f32,
-                            min_depth: 0.0,
-                            max_depth: 1.0,
-                        };
-                        let attachments = [vk::ClearAttachment {
-                            aspect_mask: vk::ImageAspectFlags::DEPTH,
-                            color_attachment: 0,
-                            clear_value: vk::ClearValue {
-                                depth_stencil: vk::ClearDepthStencilValue {
-                                    depth: 1.0,
-                                    stencil: 0,
-                                },
-                            },
-                        }];
-                        let rects = [vk::ClearRect {
-                            rect: scissor,
-                            base_array_layer: 0,
-                            layer_count: 1,
-                        }];
-                        self.renderer
-                            .device
-                            .cmd_clear_attachments(cmd, &attachments, &rects);
-
-                        self.renderer.device.cmd_set_viewport(cmd, 0, &[viewport]);
-                        self.renderer.device.cmd_set_scissor(cmd, 0, &[scissor]);
-
-                        let sets = [main_per_frame_descriptor_set];
-                        self.renderer.bind_descriptor_sets(
-                            cmd,
-                            self.renderer.main_pipeline_layout(),
-                            0,
-                            &sets,
-                            &[arrow_camera_offset],
-                        );
-                        let offset = model_indirect_command_data_count as u64
-                            * std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u64;
-
-                        self.renderer.device.cmd_draw_indexed_indirect(
-                            cmd,
-                            indirect_command_data,
-                            offset,
-                            arrow_indirect_command_data_count,
-                            std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u32,
-                        );
-                    }
+                    Ok(())
                 };
 
                 unsafe { context.draw(record_draw_commands) }?;
@@ -1169,7 +782,7 @@ impl ApplicationHandler for Application {
 
         let window_id = window.id();
 
-        let context = match self.renderer.create_render_context(&window) {
+        let context = match self.renderer.create_frame_context(&window, &self.main_pass) {
             Ok(context) => context,
             Err(e) => {
                 tracing::error!("{}", e);
@@ -1185,14 +798,6 @@ impl ApplicationHandler for Application {
             self.orbit_camera.set_aspect_ratio(aspect_ratio);
         };
 
-        self.renderer
-            .update_world_light(
-                self.global_ambient_light,
-                self.global_light_direction,
-                self.global_light_color,
-            )
-            .unwrap();
-        let _new_pipeline = context.get_main_pipeline();
         if let Some((_old_context, _)) = self.windows.insert(window_id, (context, window)) {
             //
         }

@@ -5,7 +5,6 @@ pub mod device;
 pub mod image;
 mod instance;
 pub mod result;
-pub mod shader_module;
 pub mod swapchain;
 
 // pub use allocator::*;
@@ -16,5 +15,4 @@ pub use device::SharedDeviceRef;
 pub use image::*;
 pub use instance::*;
 pub use result::*;
-pub use shader_module::*;
 pub use swapchain::*;
