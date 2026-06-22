@@ -1,8 +1,8 @@
 mod frame_context;
 mod render_pass;
 mod resource_manager;
-mod resources;
 mod result;
+mod scene;
 
 include!(concat!(env!("OUT_DIR"), "/variable_types.rs"));
 include!(concat!(env!("OUT_DIR"), "/shader_paths.rs"));
@@ -11,9 +11,9 @@ include!(concat!(env!("OUT_DIR"), "/entry_points.rs"));
 pub use frame_context::*;
 pub use render_pass::*;
 pub(crate) use resource_manager::*;
-pub use resources::*;
 pub use result::Error;
 pub use result::Result;
+pub use scene::*;
 
 use ash::vk;
 use std::rc::Rc;
@@ -67,13 +67,6 @@ pub struct Renderer {
     repeat_sampler: vk::Sampler,
     mesh_arenas: slotmap::DenseSlotMap<MeshArenaHandle, MeshArena>,
 }
-
-// TODO: convert crate::VERT_SHADER_PATH and crate::FRAG_SHADER_PATH into macros?
-const COMPILED_MAIN_VERT_SHADER: &[u8] = include_bytes!("../shaders/shader.vert.spv");
-const COMPILED_MAIN_FRAG_SHADER: &[u8] = include_bytes!("../shaders/shader.frag.spv");
-
-// const COMPILED_GRID_VERT_SHADER: &[u8] = include_bytes!("../shaders/grid.vert.spv");
-// const COMPILED_GRID_FRAG_SHADER: &[u8] = include_bytes!("../shaders/grid.frag.spv");
 
 impl Renderer {
     pub fn new(
@@ -134,23 +127,31 @@ impl Renderer {
             repeat_sampler,
         })
     }
-    pub fn create_frame_context(
-        &mut self,
-        window: &winit::window::Window,
-        render_pass: &MainRenderPass,
-    ) -> Result<FrameContext> {
-        let ctx = FrameContext::new(self.device.clone(), window)?;
-
-        render_pass.update_context(&ctx);
-
-        Ok(ctx)
-    }
+    // TODO: Add RenderPass trait
     #[inline]
-    pub fn render_scene(
+    pub fn render_main_scene(
         &mut self,
         ctx: &mut FrameContext,
-        scene: &MainScene,
+        scene: &Scene,
         pass: &MainRenderPass,
+        camera_data: CameraUBO,
+    ) -> Result<()> {
+        pass.render(
+            ctx,
+            &mut self.pipelines,
+            &mut self.pipeline_layouts,
+            &mut self.shader_modules,
+            &self.mesh_arenas,
+            scene,
+            camera_data,
+        )
+    }
+    #[inline]
+    pub fn render_grid_scene(
+        &mut self,
+        ctx: &mut FrameContext,
+        scene: &Scene,
+        pass: &GridRenderPass,
         camera_data: CameraUBO,
     ) -> Result<()> {
         pass.render(

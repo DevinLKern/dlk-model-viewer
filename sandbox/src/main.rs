@@ -9,7 +9,7 @@ use constants::*;
 use input_manager::{Input, InputEvent, InputManager};
 use obj_mtl::{Vertex, VertexNormal};
 use renderer::{
-    CameraUBO, FrameContext, MainRenderPass, MainScene, MainSceneBuilder, ShaderVertVertex,
+    CameraUBO, FrameContext, GridRenderPass, MainRenderPass, Scene, SceneBuilder, ShaderVertVertex,
 };
 use result::{Error, Result};
 use settings::{Command, Event, Settings};
@@ -30,7 +30,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
-use math::{AffineTransform, Identity, Mat4, Quat, Vec3, Vec4, Zero};
+use math::{Identity, Mat4, Quat, Vec3, Vec4, Zero};
 
 include!(concat!(env!("OUT_DIR"), "/arrow.rs"));
 
@@ -56,18 +56,13 @@ struct Application {
     arrow_camera: Camera,
     windows: HashMap<WindowId, (renderer::FrameContext, Window)>,
     renderer: renderer::Renderer,
-    main_scene: MainScene,
+    main_scene: Scene,
     main_pass: MainRenderPass,
+    grid_pass: GridRenderPass,
     default_texture_index: usize,
-    grid_arena_handle: renderer::MeshArenaHandle,
-    // (first_index, index_count)
-    arrow_shape_info: (usize, usize),
-    x_arrow_transform: AffineTransform,
-    red_material_index: usize,
-    y_arrow_transform: AffineTransform,
-    green_material_index: usize,
-    z_arrow_transform: AffineTransform,
-    blue_material_index: usize,
+    grid_first_vertex: usize,
+    grid_index_count: usize,
+    grid_first_index: usize,
     // (first_index_count, index_count, material_index)
     model_shape_info: Vec<(usize, usize, usize)>,
     model_import_transform: math::Mat4<f32>,
@@ -134,7 +129,7 @@ impl Application {
         // or printing validation error info.
         let mut renderer = renderer::Renderer::new(debug_enabled, display_handle)?;
 
-        let mut scene_builder = MainSceneBuilder::new();
+        let mut scene_builder = SceneBuilder::new();
 
         scene_builder.set_light_color(Vec4::new(1.0, 1.0, 1.0, 1.0));
         scene_builder.set_light_direction(ENGINE_RIGHT.sub(ENGINE_UP));
@@ -153,12 +148,6 @@ impl Application {
 
         let default_material_index =
             scene_builder.add_material(Vec4::new(1.0, 0.2, 0.2, 1.0), None, false);
-        let red_material_index =
-            scene_builder.add_material(Vec4::new(1.0, 0.0, 0.0, 1.0), None, true);
-        let green_material_index =
-            scene_builder.add_material(Vec4::new(0.0, 1.0, 0.0, 1.0), None, true);
-        let blue_material_index =
-            scene_builder.add_material(Vec4::new(0.0, 1.0, 0.0, 1.0), None, true);
 
         for material in mtl_materials.iter() {
             if let Some(_material_index) = material_name_to_index.get(&material.name) {
@@ -197,40 +186,8 @@ impl Application {
             material_name_to_index.insert(material.name.clone(), material_index);
         }
 
-        // main - add arrow vertices
-
-        let arrow_iter = crate::ARROW_VERTICES
-            .iter()
-            .zip(crate::ARROW_NORMALS.iter())
-            .map(|(pos, normal)| renderer::ShaderVertVertex {
-                position: *pos,
-                tex_coord: [0.0, 0.0],
-                normal: *normal,
-            });
-        let (arrow_first_vertex, arrow_vertex_count) = scene_builder.add_vertices(arrow_iter);
-        let (arrow_first_index, arrow_index_count) =
-            scene_builder.add_indices(ARROW_INDICES.iter().map(|idx| *idx));
-        let arrow_shape_info = (arrow_first_index, arrow_index_count);
-
-        const ARROW_SCALAR: Vec3<f32> = Vec3::new(0.05, 0.1, 0.05);
-        let x_arrow_transform = AffineTransform {
-            position: Vec3::ZERO,
-            orientation: Quat::unit_from_angle_axis(std::f32::consts::FRAC_PI_2, Vec3::Z),
-            scalar: ARROW_SCALAR,
-        };
-        let y_arrow_transform = AffineTransform {
-            position: Vec3::ZERO,
-            orientation: Quat::unit_from_angle_axis(std::f32::consts::PI, Vec3::Z),
-            scalar: ARROW_SCALAR,
-        };
-        let z_arrow_transform = AffineTransform {
-            position: Vec3::ZERO,
-            orientation: Quat::unit_from_angle_axis(std::f32::consts::FRAC_PI_2, Vec3::X),
-            scalar: ARROW_SCALAR,
-        };
-
         // main - add model vertices
-        let shape_vertex_offset = arrow_first_vertex + arrow_vertex_count;
+        let shape_vertex_offset = 0;
         let mut vertex_map = HashMap::<obj_mtl::VtnIndex, usize>::new();
         let mut model_min = Vec3::scalar(f32::MAX);
         let mut model_max = Vec3::scalar(f32::MIN);
@@ -241,7 +198,7 @@ impl Application {
                 obj_mtl::Primitive::Triangle { v0, v1, v2 } => vec![(*v0, *v1, *v2)].into_iter(),
                 obj_mtl::Primitive::Polygon(indices) => (2..indices.len())
                     .map(move |i| (indices[0], indices[i - 1], indices[i]))
-                    .collect::<Vec<_>>()
+                    .collect::<Box<[_]>>()
                     .into_iter(),
                 _ => Vec::new().into_iter(),
             });
@@ -376,7 +333,7 @@ impl Application {
 
         // grid - add vertices
         const PS: f32 = 1000.0;
-        const PLANE_VERTEX_BUFFER_DATA: &[renderer::GridVertVertex] = {
+        const PLANE_VERTEX_BUFFER_DATA: &[renderer::ShaderVertVertex] = {
             const F: Vec3<f32> = ENGINE_FORWARDS;
             const B: Vec3<f32> = Vec3::ZERO.sub(ENGINE_FORWARDS);
             const R: Vec3<f32> = ENGINE_RIGHT;
@@ -388,39 +345,50 @@ impl Application {
             const BL: Vec3<f32> = B.add(L);
 
             &[
-                renderer::GridVertVertex {
+                renderer::ShaderVertVertex {
                     position: FL.scaled(PS).into_arr(),
+                    tex_coord: [0.0; 2],
+                    normal: [0.0; 3],
                 },
-                renderer::GridVertVertex {
+                renderer::ShaderVertVertex {
                     position: FR.scaled(PS).into_arr(),
+                    tex_coord: [0.0; 2],
+                    normal: [0.0; 3],
                 },
-                renderer::GridVertVertex {
+                renderer::ShaderVertVertex {
                     position: BR.scaled(PS).into_arr(),
+                    tex_coord: [0.0; 2],
+                    normal: [0.0; 3],
                 },
-                renderer::GridVertVertex {
+                renderer::ShaderVertVertex {
                     position: BL.scaled(PS).into_arr(),
+                    tex_coord: [0.0; 2],
+                    normal: [0.0; 3],
                 },
             ]
         };
         const PLANE_INDEX_BUFFER_DATA: &[u32] = &[0, 1, 2, 2, 3, 0];
 
-        let grid_arena_handle = {
-            let vertex_buffer_data = unsafe {
-                std::slice::from_raw_parts(
-                    PLANE_VERTEX_BUFFER_DATA.as_ptr() as *const u8,
-                    PLANE_VERTEX_BUFFER_DATA.len()
-                        * std::mem::size_of::<renderer::GridVertVertex>(),
-                )
-            };
-
-            renderer.create_mesh_arena(vertex_buffer_data, &PLANE_INDEX_BUFFER_DATA)?
-        };
+        let (grid_first_vertex, _grid_vertex_count) =
+            scene_builder.add_vertices(PLANE_VERTEX_BUFFER_DATA.iter().map(|v| ShaderVertVertex {
+                position: v.position,
+                tex_coord: v.tex_coord,
+                normal: v.normal,
+            }));
+        let (grid_first_index, grid_index_count) = scene_builder.add_indices(
+            PLANE_INDEX_BUFFER_DATA
+                .iter()
+                .map(|i| *i + grid_first_vertex as u32),
+        );
 
         let main_scene =
             scene_builder.build(renderer.device.clone(), renderer.mesh_arenas_mut())?;
 
         let main_pass =
             renderer::MainRenderPass::new(renderer.device.clone(), &main_scene, &mut renderer)?;
+
+        let grid_pass =
+            renderer::GridRenderPass::new(renderer.device.clone(), &main_scene, &mut renderer)?;
 
         Ok(Self {
             last: std::time::Instant::now(),
@@ -439,15 +407,11 @@ impl Application {
             windows: HashMap::new(),
             main_scene,
             main_pass,
+            grid_pass,
+            grid_first_vertex,
+            grid_index_count,
+            grid_first_index,
             default_texture_index,
-            grid_arena_handle,
-            arrow_shape_info,
-            x_arrow_transform,
-            red_material_index,
-            y_arrow_transform,
-            green_material_index,
-            z_arrow_transform,
-            blue_material_index,
             model_shape_info,
             model_import_transform,
             model_transform,
@@ -647,9 +611,12 @@ impl Application {
                     self.orbit_camera.set_aspect_ratio(aspect_ratio);
                 }
 
-                let new_context = self
-                    .renderer
-                    .create_frame_context(window, &self.main_pass)?;
+                let new_context = {
+                    let ctx = renderer::FrameContext::new(self.renderer.device.clone(), &window)?;
+                    self.main_pass.update_context(&ctx);
+                    self.grid_pass.update_context(&ctx);
+                    ctx
+                };
                 *context = new_context;
 
                 return Ok(false);
@@ -680,7 +647,7 @@ impl Application {
                     ctx.get_current_frame_mut().allocator_mut().reset();
                     let cmd = ctx.get_current_frame().command_buffer();
 
-                    // PART 1 - MAIN SCENE
+                    // PART 1 - MODEL
                     unsafe {
                         let scissor = vk::Rect2D {
                             offset: vk::Offset2D { x: 0, y: 0 },
@@ -699,15 +666,6 @@ impl Application {
 
                         self.main_scene.reset();
 
-                        // let x_arrow_instance = self
-                        //     .main_scene
-                        //     .add_instance(self.x_arrow_transform, self.red_material_index);
-                        // let (arrow_first_index, arrow_index_count) = self.arrow_shape_info;
-                        // let arrow_submesh = self
-                        //     .main_scene
-                        //     .add_submesh(arrow_first_index, arrow_index_count);
-                        // let _draw = self.main_scene.add_draw(x_arrow_instance, arrow_submesh);
-
                         for (first_index, index_count, material_index) in
                             self.model_shape_info.iter()
                         {
@@ -723,13 +681,46 @@ impl Application {
                             let _draw = self.main_scene.add_draw(instance_index, submesh_index);
                         }
 
-                        self.renderer.render_scene(
+                        self.renderer.render_main_scene(
                             ctx,
                             &self.main_scene,
                             &self.main_pass,
                             camera_data,
                         )?;
                     }
+
+                    // PART 2 - GRID
+                    unsafe {
+                        let scissor = vk::Rect2D {
+                            offset: vk::Offset2D { x: 0, y: 0 },
+                            extent: swapchain_extent,
+                        };
+                        let viewport = ash::vk::Viewport {
+                            x: 0.0,
+                            y: 0.0,
+                            width: scissor.extent.width as f32,
+                            height: scissor.extent.height as f32,
+                            min_depth: 0.0,
+                            max_depth: 1.0,
+                        };
+                        self.renderer.device.cmd_set_viewport(cmd, 0, &[viewport]);
+                        self.renderer.device.cmd_set_scissor(cmd, 0, &[scissor]);
+
+                        self.main_scene.reset();
+
+                        let submesh_index = self
+                            .main_scene
+                            .add_submesh(self.grid_first_index, self.grid_index_count);
+                        self.main_scene.add_draw(0, submesh_index);
+
+                        self.renderer.render_grid_scene(
+                            ctx,
+                            &self.main_scene,
+                            &self.grid_pass,
+                            camera_data,
+                        )?;
+                    }
+
                     Ok(())
                 };
 
@@ -782,8 +773,12 @@ impl ApplicationHandler for Application {
 
         let window_id = window.id();
 
-        let context = match self.renderer.create_frame_context(&window, &self.main_pass) {
-            Ok(context) => context,
+        let context = match renderer::FrameContext::new(self.renderer.device.clone(), &window) {
+            Ok(ctx) => {
+                self.main_pass.update_context(&ctx);
+                self.grid_pass.update_context(&ctx);
+                ctx
+            }
             Err(e) => {
                 tracing::error!("{}", e);
                 return self.exiting(event_loop);

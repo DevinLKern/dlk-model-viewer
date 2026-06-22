@@ -17,7 +17,7 @@ impl PerspectiveProjection {
             fov_y,
             aspect_ratio: 1.0,
             near: 0.1,
-            far: 10.0,
+            far: 4000.0,
         }
     }
     #[inline]
