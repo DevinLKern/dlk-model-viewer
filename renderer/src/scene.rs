@@ -22,14 +22,26 @@ pub struct SubMesh {
 }
 slotmap::new_key_type! { pub struct SubMeshHandle; }
 
+pub struct TextureIndexValue<T> {
+    pub value: T,
+    pub index: Option<usize>,
+}
+
+pub struct MaterialBuilderData {
+    pub diffuse: TextureIndexValue<[f32; 3]>,
+    pub ambient: TextureIndexValue<[f32; 3]>,
+    pub specular: TextureIndexValue<[f32; 3]>,
+    pub shininess: f32,
+}
+
 #[allow(dead_code)]
 pub struct SceneBuilder {
     pub(crate) vertices: Vec<ShaderVertVertex>,
     pub(crate) indices: Vec<u32>,
     // first_index, index_count
     pub(crate) images: Vec<(vk::Sampler, vulkan::Image)>,
-    // base_color, texture_index, is_unlit
-    pub(crate) materials: Vec<(math::Vec4<f32>, Option<usize>, bool)>,
+    // base_color, diffuse_texture_index
+    pub(crate) materials: Vec<MaterialBuilderData>,
     pub(crate) light_direction: math::Vec3<f32>,
     pub(crate) light_color: math::Vec4<f32>,
     pub(crate) ambient_light_intensity: f32,
@@ -85,14 +97,9 @@ impl SceneBuilder {
         return res;
     }
     #[inline]
-    pub fn add_material(
-        &mut self,
-        base_color: math::Vec4<f32>,
-        texture: Option<usize>,
-        unlit: bool,
-    ) -> usize {
+    pub fn add_material(&mut self, data: MaterialBuilderData) -> usize {
         let res = self.materials.len();
-        self.materials.push((base_color, texture, unlit));
+        self.materials.push(data);
         return res;
     }
     #[allow(unused)]
@@ -211,21 +218,42 @@ impl SceneBuilder {
         let material_data: Box<[MaterialUBO]> = self
             .materials
             .into_iter()
-            .map(|(base_color, texture_index, unlit)| {
-                const MATERIAL_FLAG_TEXTURED_BIT: u32 = (1 << 0);
-                const MATERIAL_FLAG_UNLIT_BIT: u32 = (1 << 1);
+            .map(|material_data| {
+                const MATERIAL_FLAG_DIFFUSE_TEXTURE_BIT: u32 = (1 << 0);
+                const MATERIAL_FLAG_AMBIENT_TEXTURE_BIT: u32 = (1 << 1);
+                const MATERIAL_FLAG_SPECULAR_TEXTURE_BIT: u32 = (1 << 2);
                 let mut flags: u32 = 0;
-                if texture_index.is_some() {
-                    flags |= MATERIAL_FLAG_TEXTURED_BIT;
-                }
-                if unlit {
-                    flags |= MATERIAL_FLAG_UNLIT_BIT;
-                }
+
+                let diffuse_texture_index = if let Some(idx) = material_data.diffuse.index {
+                    flags |= MATERIAL_FLAG_DIFFUSE_TEXTURE_BIT;
+                    idx as u32
+                } else {
+                    0
+                };
+                let ambient_texture_index = if let Some(idx) = material_data.ambient.index {
+                    flags |= MATERIAL_FLAG_AMBIENT_TEXTURE_BIT;
+                    idx as u32
+                } else {
+                    0
+                };
+                let specular_texture_index = if let Some(idx) = material_data.specular.index {
+                    flags |= MATERIAL_FLAG_SPECULAR_TEXTURE_BIT;
+                    idx as u32
+                } else {
+                    0
+                };
+
                 MaterialUBO {
+                    diffuse_base: material_data.diffuse.value,
+                    diffuse_texture_index,
+                    ambient_base: material_data.ambient.value,
+                    ambient_texture_index,
+                    specular_base: material_data.specular.value,
+                    specular_texture_index,
+                    shininess: material_data.shininess,
                     flags,
-                    texture_index: texture_index.unwrap_or(0) as u32,
-                    _pad2: [0; 8],
-                    base_color: base_color.as_arr(),
+                    _pad0: 0,
+                    _pad1: 0,
                 }
             })
             .collect();

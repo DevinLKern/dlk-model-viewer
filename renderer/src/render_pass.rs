@@ -52,7 +52,7 @@ impl MainRenderPass {
                     binding: 0,
                     ty: vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
                     count: 1,
-                    stage_flags: vk::ShaderStageFlags::VERTEX,
+                    stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                 },
                 DescriptorSetLayoutBindingInfo {
                     binding: 1,

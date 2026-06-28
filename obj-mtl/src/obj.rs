@@ -152,11 +152,11 @@ impl ObjScene {
                         .entry(material_name.clone())
                         .or_insert_with(|| {
                             let i = material_names.len();
-                            cur_shape_materials.push(material_name.clone());
-                            material_names.push(material_name);
+                            material_names.push(material_name.clone());
                             i
                         });
 
+                    cur_shape_materials.push(material_name);
                     cur_material_index = Some(*index);
                 }
                 Shading(s) => {

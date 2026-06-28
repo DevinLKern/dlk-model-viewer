@@ -4,7 +4,6 @@ pub enum Error {
     WinitExternalError(winit::error::ExternalError),
     WinitEventLoopError(winit::error::EventLoopError),
     WinitHandleError(winit::raw_window_handle::HandleError),
-    VulkanError(vulkan::result::Error),
     ImageError(image::ImageError),
     ObjMtlError(obj_mtl::Error),
     RendererError(renderer::Error),
@@ -22,7 +21,6 @@ impl std::fmt::Display for Error {
             Self::WinitExternalError(e) => write!(f, "ExternalError({e})"),
             Self::WinitEventLoopError(e) => write!(f, "EventLoopError({e})"),
             Self::WinitHandleError(e) => write!(f, "HandleError({e})"),
-            Self::VulkanError(e) => write!(f, "VulkanError({e})"),
             Self::ImageError(e) => write!(f, "ImageError({e})"),
             Self::RendererError(e) => write!(f, "RendererError({e})"),
             Self::WindowIdInvalid => write!(f, "WindowIdInvalid"),
@@ -53,12 +51,6 @@ impl From<winit::raw_window_handle::HandleError> for Error {
     }
 }
 
-impl From<vulkan::result::Error> for Error {
-    fn from(value: vulkan::result::Error) -> Self {
-        Error::VulkanError(value)
-    }
-}
-
 impl From<image::ImageError> for Error {
     fn from(value: image::ImageError) -> Self {
         Error::ImageError(value)
@@ -73,10 +65,8 @@ impl From<obj_mtl::Error> for Error {
 
 impl From<renderer::Error> for Error {
     fn from(value: renderer::Error) -> Self {
-        match value {
-            renderer::Error::VulkanError(e) => Error::VulkanError(e),
-            e => Error::RendererError(e),
-        }
+        Error::RendererError(value)
+        
     }
 }
 

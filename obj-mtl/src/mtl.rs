@@ -108,14 +108,14 @@ impl Default for Texture {
 #[allow(unused)]
 #[derive(Debug)]
 pub struct TexturedValue<T> {
-    pub color: Option<T>,
+    pub value: Option<T>,
     pub texture: Option<Texture>,
 }
 
 impl<T> Default for TexturedValue<T> {
     fn default() -> Self {
         Self {
-            color: None,
+            value: None,
             texture: None,
         }
     }
@@ -181,7 +181,7 @@ pub fn load_materials(file_path: &std::path::Path) -> crate::Result<Box<[MtlMate
                 let mat = materials
                     .last_mut()
                     .ok_or(crate::Error::Parse("Mtl 'Ka' before any 'newmtl' material"))?;
-                mat.ambient.color = Some([r, g, b]);
+                mat.ambient.value = Some([r, g, b]);
             }
             MtlToken::MapKa { options, file_name } => {
                 let mat = materials.last_mut().ok_or(crate::Error::Parse(
@@ -210,7 +210,7 @@ pub fn load_materials(file_path: &std::path::Path) -> crate::Result<Box<[MtlMate
                 let mat = materials
                     .last_mut()
                     .ok_or(crate::Error::Parse("Mtl 'Kd' before any 'newmtl' material"))?;
-                mat.diffuse.color = Some([r, g, b]);
+                mat.diffuse.value = Some([r, g, b]);
             }
             MtlToken::MapKd { options, file_name } => {
                 let mat = materials.last_mut().ok_or(crate::Error::Parse(
@@ -239,7 +239,7 @@ pub fn load_materials(file_path: &std::path::Path) -> crate::Result<Box<[MtlMate
                 let mat = materials
                     .last_mut()
                     .ok_or(crate::Error::Parse("Mtl 'Ks' before any 'newmtl' material"))?;
-                mat.specular.color = Some([r, g, b]);
+                mat.specular.value = Some([r, g, b]);
             }
             MtlToken::MapKs { options, file_name } => {
                 let mat = materials.last_mut().ok_or(crate::Error::Parse(
@@ -269,7 +269,7 @@ pub fn load_materials(file_path: &std::path::Path) -> crate::Result<Box<[MtlMate
                 let mat = materials
                     .last_mut()
                     .ok_or(crate::Error::Parse("Mtl 'Ns' before any 'newmtl' material"))?;
-                mat.shininess.color = Some(specular_exponent);
+                mat.shininess.value = Some(specular_exponent);
             }
             MtlToken::MapNs { options, file_name } => {
                 let mat = materials.last_mut().ok_or(crate::Error::Parse(

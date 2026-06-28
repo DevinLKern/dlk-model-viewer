@@ -6,8 +6,8 @@ edition = "2024"
 [dependencies]
 vulkan = { path = "../vulkan" }
 math = { path = "../math" }
-winit = { version = "0.30.12", default-features = false, features = ["x11", "rwh_06"] }
-# winit = "0.30.12"
+# winit = { version = "0.30.12", default-features = false, features = ["x11", "rwh_06"] }
+winit = "0.30.12"
 ash = "0.38.0"
 ash-window = "0.13.0"
 image = "0.25.9"

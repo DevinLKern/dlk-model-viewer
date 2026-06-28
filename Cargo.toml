@@ -2,7 +2,15 @@
 members = [
     "renderer",
     "spirv",
-    "sandbox", "obj-mtl",
+    "sandbox",
+    "obj-mtl",
 ]
 
 resolver = "3"
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+strip = true
+opt-level = 3
+# panic = "abort"

@@ -9,7 +9,8 @@ use constants::*;
 use input_manager::{Input, InputEvent, InputManager};
 use obj_mtl::{Vertex, VertexNormal};
 use renderer::{
-    CameraUBO, FrameContext, GridRenderPass, MainRenderPass, Scene, SceneBuilder, ShaderVertVertex,
+    CameraUBO, FrameContext, GridRenderPass, MainRenderPass, MaterialBuilderData, Renderer, Scene,
+    SceneBuilder, ShaderVertVertex, TextureIndexValue,
 };
 use result::{Error, Result};
 use settings::{Command, Event, Settings};
@@ -32,7 +33,7 @@ use winit::{
 
 use math::{Identity, Mat4, Quat, Vec3, Vec4, Zero};
 
-include!(concat!(env!("OUT_DIR"), "/arrow.rs"));
+// include!(concat!(env!("OUT_DIR"), "/arrow.rs"));
 
 #[derive(Debug, Copy, Clone)]
 enum CameraInUse {
@@ -78,6 +79,13 @@ const DEFAULT_SETTINGS: &str = include_str!("../../files/default_settings.yaml")
 
 impl Application {
     fn search_for(base: &Path, target: &Path) -> Option<PathBuf> {
+        if let Ok(cwd) = std::env::current_dir() {
+            let cwd_target = cwd.join(target);
+            if cwd_target.exists() {
+                return Some(cwd_target);
+            }
+        }
+
         if !base.is_dir() {
             return None;
         }
@@ -124,9 +132,6 @@ impl Application {
             Err(e) => return Err(e.into()),
         };
 
-        // TODO: one is added to account for the plane, default texture, and default material.
-        // However, this is very unsafe. add bounds checks and return errors instead of crashing
-        // or printing validation error info.
         let mut renderer = renderer::Renderer::new(debug_enabled, display_handle)?;
 
         let mut scene_builder = SceneBuilder::new();
@@ -146,43 +151,89 @@ impl Application {
             scene_builder.add_image(renderer.repeat_sampler(), image)
         };
 
-        let default_material_index =
-            scene_builder.add_material(Vec4::new(1.0, 0.2, 0.2, 1.0), None, false);
+        let default_material_index = scene_builder.add_material(MaterialBuilderData {
+            diffuse: TextureIndexValue {
+                value: [1.0, 0.2, 0.2],
+                index: None,
+            },
+            ambient: TextureIndexValue {
+                value: [0.0; 3],
+                index: None,
+            },
+            specular: TextureIndexValue {
+                value: [0.0; 3],
+                index: None,
+            },
+            shininess: 0.0,
+        });
 
         for material in mtl_materials.iter() {
             if let Some(_material_index) = material_name_to_index.get(&material.name) {
                 continue;
             }
 
-            let base_color = material.diffuse.color.unwrap_or([0.0; 3]);
-            let base_color = Vec4::new(base_color[0], base_color[1], base_color[2], 1.0);
-
-            let diffuse_texture = if let Some(texture) = &material.diffuse.texture {
-                let image_index = if let Some(index) = texture_path_to_index.get(&texture.file_path)
-                {
-                    *index
-                } else {
+            fn get_texture_index_value<T: Copy>(
+                tv: &obj_mtl::TexturedValue<T>,
+                fallback_value: T,
+                renderer: &mut Renderer,
+                scene_builder: &mut SceneBuilder,
+                texture_path_to_index: &mut HashMap<Box<str>, usize>,
+                model_path: &Path,
+            ) -> Result<TextureIndexValue<T>> {
+                let value = tv.value.unwrap_or(fallback_value);
+                let index = if let Some(texture) = &tv.texture {
                     let path = {
                         let base = model_path.with_file_name("");
                         // PathBuf::from_str is infallible
                         let target = PathBuf::from_str(&texture.file_path).unwrap();
 
-                        Self::search_for(&base, &target).ok_or(Error::CouldNotFindFile)?
+                        Application::search_for(&base, &target).ok_or(Error::CouldNotFindFile)?
                     };
+
                     let image = image::open(&path).inspect_err(|e| tracing::error!("{e}"))?;
                     let image = renderer.create_image(image)?;
                     let image_index = scene_builder.add_image(renderer.repeat_sampler(), image);
 
                     texture_path_to_index.insert(texture.file_path.clone(), image_index);
-                    image_index
+
+                    Some(image_index)
+                } else {
+                    None
                 };
 
-                Some(image_index)
-            } else {
-                None
-            };
+                Ok(TextureIndexValue { value, index })
+            }
 
-            let material_index = scene_builder.add_material(base_color, diffuse_texture, false);
+            let diffuse = get_texture_index_value(
+                &material.diffuse,
+                [1.0; 3],
+                &mut renderer,
+                &mut scene_builder,
+                &mut texture_path_to_index,
+                model_path,
+            )?;
+            let ambient = get_texture_index_value(
+                &material.ambient,
+                [0.0; 3],
+                &mut renderer,
+                &mut scene_builder,
+                &mut texture_path_to_index,
+                model_path,
+            )?;
+            let specular = get_texture_index_value(
+                &material.specular,
+                [0.0; 3],
+                &mut renderer,
+                &mut scene_builder,
+                &mut texture_path_to_index,
+                model_path,
+            )?;
+            let material_index = scene_builder.add_material(MaterialBuilderData {
+                diffuse,
+                ambient,
+                specular,
+                shininess: material.shininess.value.unwrap_or(0.0),
+            });
             material_name_to_index.insert(material.name.clone(), material_index);
         }
 
