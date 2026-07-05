@@ -342,6 +342,9 @@ impl MainRenderPass {
         mesh_arenas: &slotmap::DenseSlotMap<MeshArenaHandle, MeshArena>,
         scene: &Scene,
         camera_data: CameraUBO,
+        indirect_offset: u64,
+        draw_count: u32,
+        stride: u32,
     ) -> Result<()> {
         let (pipeline, layout) = {
             let layout = pipeline_layouts
@@ -376,55 +379,6 @@ impl MainRenderPass {
             as u32;
 
         let cmd = frame.command_buffer();
-
-        let mut indirect_command_data = Vec::<vk::DrawIndexedIndirectCommand>::with_capacity(64);
-        let mut instance_data = Vec::<InstanceData>::with_capacity(64);
-        let stride = {
-            let size = std::mem::size_of::<InstanceData>();
-            let align = std::mem::align_of::<InstanceData>();
-
-            size.next_multiple_of(align) as u64
-        };
-        let first_instance_offset = frame
-            .allocator_mut()
-            .storage_buffer_offset()
-            .next_multiple_of(stride)
-            / stride;
-        for (instance_index, submesh_index) in scene.draws.iter() {
-            let (first_index, index_count) = scene.submeshes.get(*submesh_index).unwrap();
-            let (transform, material_index) = scene.instances.get(*instance_index).unwrap();
-
-            indirect_command_data.push(vk::DrawIndexedIndirectCommand {
-                index_count: *index_count as u32,
-                instance_count: 1,
-                first_index: *first_index as u32,
-                vertex_offset: 0,
-                first_instance: instance_data.len() as u32 + first_instance_offset as u32,
-            });
-            let model_matrix = transform;
-            let normal_matrix = model_matrix
-                .as_mat3()
-                .transposed()
-                .inverse()
-                .unwrap()
-                .into_mat4(1.0);
-
-            instance_data.push(InstanceData {
-                model_matrix: model_matrix.as_2d_arr(),
-                normal_matrix: normal_matrix.as_2d_arr(),
-                material_index: *material_index as u32,
-                _pad0: 0,
-                _pad1: 0,
-                _pad2: 0,
-            });
-        }
-        let _instance_offset = frame
-            .allocator_mut()
-            .upload_storage_data(&instance_data, std::mem::size_of::<InstanceData>() as u64)?;
-        let indirect_offset = frame.allocator_mut().upload_indirect_data(
-            &indirect_command_data,
-            std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u64,
-        )?;
 
         unsafe {
             self.device
@@ -468,8 +422,8 @@ impl MainRenderPass {
                 cmd,
                 frame.allocator_mut().indirect_buffer_raw(),
                 indirect_offset,
-                indirect_command_data.len() as u32,
-                std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u32,
+                draw_count,
+                stride,
             );
         };
 
@@ -701,6 +655,9 @@ impl GridRenderPass {
         mesh_arenas: &slotmap::DenseSlotMap<MeshArenaHandle, MeshArena>,
         scene: &Scene,
         camera_data: CameraUBO,
+        indirect_offset: u64,
+        draw_count: u32,
+        stride: u32,
     ) -> Result<()> {
         let (pipeline, layout) = {
             let layout = pipeline_layouts
@@ -735,24 +692,6 @@ impl GridRenderPass {
             as u32;
 
         let cmd = frame.command_buffer();
-
-        let mut indirect_command_data = Vec::<vk::DrawIndexedIndirectCommand>::with_capacity(64);
-        for (_instance_index, submesh_index) in scene.draws.iter() {
-            let (first_index, index_count) = scene.submeshes.get(*submesh_index).unwrap();
-            // let (transform, material_index) = scene.instances.get(*instance_index).unwrap();
-
-            indirect_command_data.push(vk::DrawIndexedIndirectCommand {
-                index_count: *index_count as u32,
-                instance_count: 1,
-                first_index: *first_index as u32,
-                vertex_offset: 0,
-                first_instance: 0,
-            });
-        }
-        let indirect_offset = frame.allocator_mut().upload_indirect_data(
-            &indirect_command_data,
-            std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u64,
-        )?;
 
         unsafe {
             self.device
@@ -796,8 +735,8 @@ impl GridRenderPass {
                 cmd,
                 frame.allocator_mut().indirect_buffer_raw(),
                 indirect_offset,
-                indirect_command_data.len() as u32,
-                std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u32,
+                draw_count,
+                stride,
             );
         };
 

@@ -135,6 +135,9 @@ impl Renderer {
         scene: &Scene,
         pass: &MainRenderPass,
         camera_data: CameraUBO,
+        indirect_offset: u64,
+        draw_count: u32,
+        stride: u32,
     ) -> Result<()> {
         pass.render(
             ctx,
@@ -144,6 +147,9 @@ impl Renderer {
             &self.mesh_arenas,
             scene,
             camera_data,
+            indirect_offset,
+            draw_count,
+            stride,
         )
     }
     #[inline]
@@ -153,6 +159,9 @@ impl Renderer {
         scene: &Scene,
         pass: &GridRenderPass,
         camera_data: CameraUBO,
+        indirect_offset: u64,
+        draw_count: u32,
+        stride: u32,
     ) -> Result<()> {
         pass.render(
             ctx,
@@ -162,6 +171,9 @@ impl Renderer {
             &self.mesh_arenas,
             scene,
             camera_data,
+            indirect_offset,
+            draw_count,
+            stride,
         )
     }
     pub fn access_or_create_pipeline_layout(

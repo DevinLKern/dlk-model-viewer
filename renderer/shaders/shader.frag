@@ -24,6 +24,16 @@ layout(std430, set = 0, binding = 1) buffer InstanceBuffer {
     InstanceData arr [];
 } instances;
 
+// struct PointLightData {
+//     // w is intensity / brightness
+//     vec4 color;
+//     vec3 position;
+// };
+// 
+// layout(std140, set = 0, binding = 2) buffer PointLightBuffer {
+//     PointLightData arr [];
+// } point_lights;
+
 // irregular
 layout(std140, set = 1, binding = 0) uniform GlobalLightUBO {
     vec4 direction;
@@ -31,7 +41,7 @@ layout(std140, set = 1, binding = 0) uniform GlobalLightUBO {
     float ambient;
 } world_light;
 
-layout (set = 1, binding = 1) uniform sampler2D global_textures[];
+layout(set = 1, binding = 1) uniform sampler2D global_textures[];
 
 struct MaterialUBO {
     vec3 diffuse_base;

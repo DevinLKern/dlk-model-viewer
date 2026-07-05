@@ -66,7 +66,6 @@ impl From<obj_mtl::Error> for Error {
 impl From<renderer::Error> for Error {
     fn from(value: renderer::Error) -> Self {
         Error::RendererError(value)
-        
     }
 }
 

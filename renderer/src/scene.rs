@@ -6,6 +6,7 @@ use vulkan::SharedDeviceRef;
 use ash::vk;
 
 pub(crate) const MAX_SCENE_IMAGE_COUNT: u32 = 32;
+pub(crate) const MAX_POINT_LIGHT_COUNT: u32 = 32;
 
 #[allow(dead_code)]
 pub struct MeshArena {
@@ -276,8 +277,8 @@ impl SceneBuilder {
             uniform_buffer,
             storage_buffer,
             submeshes: Vec::new(),
-            instances: Vec::new(),
-            draws: Vec::new(),
+            // instances: Vec::new(),
+            // draws: Vec::new(),
         })
     }
 }
@@ -290,24 +291,14 @@ pub struct Scene {
     pub(crate) uniform_buffer: vulkan::Buffer,
     pub(crate) storage_buffer: vulkan::Buffer,
     // (first_index, index_count)
-    pub(crate) submeshes: Vec<(usize, usize)>,
+    pub submeshes: Vec<(usize, usize)>,
     // (model_transform, material_index)
-    pub(crate) instances: Vec<(math::Mat4<f32>, usize)>,
+    // pub(crate) instances: Vec<(math::Mat4<f32>, usize)>,
     // (instance_index, submesh_index)
-    pub(crate) draws: Vec<(usize, usize)>,
+    // pub(crate) draws: Vec<(usize, usize)>,
 }
 
 impl Scene {
-    #[inline]
-    pub fn add_instance(&mut self, transform: math::Mat4<f32>, material_index: usize) -> usize {
-        let res = self.instances.len();
-        self.instances.push((transform, material_index));
-        return res;
-    }
-    #[inline]
-    pub fn add_draw(&mut self, instance_index: usize, submesh_index: usize) {
-        self.draws.push((instance_index, submesh_index));
-    }
     #[inline]
     pub fn add_submesh(&mut self, first_index: usize, index_count: usize) -> usize {
         let res = self.submeshes.len();
@@ -315,13 +306,7 @@ impl Scene {
         return res;
     }
     #[inline]
-    pub fn reset_draws(&mut self) {
-        self.draws.clear();
-    }
-    #[inline]
     pub fn reset(&mut self) {
-        self.instances.clear();
-        self.draws.clear();
         self.submeshes.clear();
     }
 }

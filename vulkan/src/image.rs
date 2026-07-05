@@ -176,8 +176,7 @@ impl Image {
         let allocate_info = {
             let memory_properties = unsafe { device.get_physical_device_memory_properties() };
             let memory_requirements = unsafe { device.get_image_memory_requirements(image) };
-            let memory_property_flags = ash::vk::MemoryPropertyFlags::HOST_VISIBLE
-                | ash::vk::MemoryPropertyFlags::HOST_COHERENT;
+            let memory_property_flags = create_info.memory_property_flags;
             let memory_type_index = find_memory_index(
                 memory_properties,
                 memory_requirements,

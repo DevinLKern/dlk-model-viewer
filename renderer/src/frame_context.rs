@@ -69,47 +69,68 @@ impl FrameAllocator {
         })
     }
     pub fn upload_uniform_data<T>(&mut self, data: &[T], alignment: u64) -> Result<u64> {
+        debug_assert!(std::mem::size_of::<T>() != 0);
+
+        self.uniform_buffer_offset = self.uniform_buffer_offset.next_multiple_of(alignment);
+
         let (buffer, offset) = (&self.uniform_buffer, &mut self.uniform_buffer_offset);
         let res = *offset;
 
         let size = (data.len() * std::mem::size_of::<T>()) as u64;
+
+        // TODO: replace with error?
+        debug_assert!(*offset + size <= buffer.size);
+
         unsafe {
             let dst = buffer.map_memory(*offset, size)? as *mut T;
             dst.copy_from_nonoverlapping(data.as_ptr(), data.len());
             buffer.unmap();
         }
         *offset += size;
-        *offset = offset.next_multiple_of(alignment);
 
         Ok(res)
     }
     pub fn upload_storage_data<T>(&mut self, data: &[T], alignment: u64) -> Result<u64> {
+        debug_assert!(std::mem::size_of::<T>() != 0);
+
+        self.storage_buffer_offset = self.storage_buffer_offset.next_multiple_of(alignment);
+
         let (buffer, offset) = (&self.storage_buffer, &mut self.storage_buffer_offset);
         let res = *offset;
 
         let size = (data.len() * std::mem::size_of::<T>()) as u64;
+
+        // TODO: replace with error?
+        debug_assert!(*offset + size <= buffer.size);
+
         unsafe {
             let dst = buffer.map_memory(*offset, size)? as *mut T;
             dst.copy_from_nonoverlapping(data.as_ptr(), data.len());
             buffer.unmap();
         }
         *offset += size;
-        *offset = offset.next_multiple_of(alignment);
 
         Ok(res)
     }
     pub fn upload_indirect_data<T>(&mut self, data: &[T], alignment: u64) -> Result<u64> {
+        debug_assert!(std::mem::size_of::<T>() != 0);
+
+        self.indirect_buffer_offset = self.indirect_buffer_offset.next_multiple_of(alignment);
+
         let (buffer, offset) = (&self.indirect_buffer, &mut self.indirect_buffer_offset);
         let res = *offset;
 
         let size = (data.len() * std::mem::size_of::<T>()) as u64;
+
+        // TODO: replace with error?
+        debug_assert!(*offset + size <= buffer.size);
+
         unsafe {
             let dst = buffer.map_memory(*offset, size)? as *mut T;
             dst.copy_from_nonoverlapping(data.as_ptr(), data.len());
             buffer.unmap();
         }
         *offset += size;
-        *offset = offset.next_multiple_of(alignment);
 
         Ok(res)
     }
@@ -286,6 +307,7 @@ pub struct FrameContext {
     depth_format: vk::Format,
     frames: [FrameData; MAX_FRAME_COUNT as usize],
     pub index: usize,
+    image_index: usize,
 }
 
 impl FrameContext {
@@ -301,8 +323,7 @@ impl FrameContext {
             let mut images = Vec::with_capacity(swapchain.get_image_count());
 
             let depth_image_create_info = vulkan::image::ImageCreateInfo {
-                memory_property_flags: vk::MemoryPropertyFlags::HOST_VISIBLE
-                    | vk::MemoryPropertyFlags::HOST_COHERENT,
+                memory_property_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
                 mip_levels: 1,
                 image_type: vk::ImageType::TYPE_2D,
                 format: depth_stencil_format,
@@ -337,6 +358,7 @@ impl FrameContext {
             depth_images,
             depth_format: depth_stencil_format,
             index: 0,
+            image_index: 0,
         })
     }
 }
@@ -371,10 +393,7 @@ impl FrameContext {
     pub fn swapchain_extent(&self) -> vk::Extent2D {
         *self.swapchain.get_extent()
     }
-    pub unsafe fn draw<F>(&mut self, record_draw_commands: F) -> Result<()>
-    where
-        F: FnOnce(&mut FrameContext) -> Result<()>,
-    {
+    pub fn begin_drawing(&mut self) -> Result<()> {
         // Acquire image
         let (swapchain_image_index, swapchain_image_view) = {
             let frame = self.get_current_frame();
@@ -395,6 +414,8 @@ impl FrameContext {
                 self.swapchain.get_image_view(image_index as usize).unwrap(),
             )
         };
+
+        self.image_index = swapchain_image_index;
 
         // Begin command buffer
         let begin_info = vk::CommandBufferBeginInfo {
@@ -437,7 +458,7 @@ impl FrameContext {
                 dst_access_mask: vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
                 old_layout: vk::ImageLayout::UNDEFINED,
                 new_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                image: self.depth_images.get(swapchain_image_index).unwrap().handle,
+                image: self.depth_images[swapchain_image_index].handle,
                 subresource_range: vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL,
                     base_mip_level: 0,
@@ -511,7 +532,9 @@ impl FrameContext {
             };
         }
 
-        record_draw_commands(self)?;
+        Ok(())
+    }
+    pub fn end_draw(&mut self) -> Result<()> {
         let frame = self.get_current_frame();
 
         // End rendering & end command buffer
@@ -528,7 +551,7 @@ impl FrameContext {
                 dst_access_mask: vk::AccessFlags2::empty(),
                 old_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                 new_layout: vk::ImageLayout::PRESENT_SRC_KHR,
-                image: *self.swapchain.get_image(swapchain_image_index).unwrap(),
+                image: *self.swapchain.get_image(self.image_index).unwrap(),
                 subresource_range: vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
                     base_mip_level: 0,
@@ -588,7 +611,7 @@ impl FrameContext {
                 p_wait_semaphores: present_wait_semaphores.as_ptr(),
                 swapchain_count: 1,
                 p_swapchains: unsafe { self.swapchain.get_swapchain_ptr() },
-                p_image_indices: &(swapchain_image_index as u32),
+                p_image_indices: &(self.image_index as u32),
                 ..Default::default()
             };
             unsafe { self.device.queue_present(&present_info)? };
