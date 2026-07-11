@@ -9,8 +9,8 @@ use constants::*;
 use input_manager::{Input, InputEvent, InputManager};
 use obj_mtl::{Vertex, VertexNormal};
 use renderer::{
-    CameraUBO, GridRenderPass, InstanceData, MainRenderPass, MaterialBuilderData, Renderer, Scene,
-    SceneBuilder, ShaderVertVertex, TextureIndexValue,
+    AllocationRange, CameraUBO, GridRenderPass, InstanceData, MainRenderPass, MaterialBuilderData,
+    Renderer, Scene, SceneBuilder, ShaderVertVertex, TextureIndexValue,
 };
 use result::{Error, Result};
 use settings::{Command, Event, Settings};
@@ -55,6 +55,10 @@ struct Application {
     arrow_camera: Camera,
     windows: HashMap<WindowId, (renderer::FrameContext, Window)>,
     renderer: renderer::Renderer,
+    camera_data_range: AllocationRange,
+    instance_data_range: AllocationRange,
+    point_light_count_data_range: AllocationRange,
+    point_light_data_range: AllocationRange,
     main_scene: Scene,
     main_pass: MainRenderPass,
     grid_pass: GridRenderPass,
@@ -454,6 +458,10 @@ impl Application {
             orbit_controller,
             arrow_camera: Camera::orthographic(1.5, 1.5, 10.0),
             windows: HashMap::new(),
+            camera_data_range: AllocationRange { offset: 0, size: 0 },
+            instance_data_range: AllocationRange { offset: 0, size: 0 },
+            point_light_count_data_range: AllocationRange { offset: 0, size: 0 },
+            point_light_data_range: AllocationRange { offset: 0, size: 0 },
             main_scene,
             main_pass,
             grid_pass,
@@ -630,6 +638,74 @@ impl Application {
 
         Ok(())
     }
+    fn resumed_inner(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+        if !self.windows.is_empty() {
+            return Ok(());
+        }
+
+        let window_attributes = winit::window::WindowAttributes::default()
+            .with_title(self.window_name.clone())
+            .with_min_inner_size(winit::dpi::Size::Physical(winit::dpi::PhysicalSize {
+                width: 256,
+                height: 256,
+            }));
+        let window = event_loop.create_window(window_attributes)?;
+
+        let window_id = window.id();
+        let context = {
+            const CAMERA_SIZE: u64 = std::mem::size_of::<CameraUBO>() as u64;
+            const INSTANCE_SIZE: u64 = std::mem::size_of::<InstanceData>() as u64;
+            const POINT_LIGHT_COUNT_SIZE: u64 =
+                std::mem::size_of::<renderer::PointLightCount>() as u64;
+            const POINT_LIGHT_SIZE: u64 = std::mem::size_of::<renderer::PointLightData>() as u64;
+
+            let mut ctx = renderer::FrameContext::new(self.renderer.device.clone(), &window)?;
+            self.camera_data_range = ctx
+                .reserve_uniform_data(CAMERA_SIZE, CAMERA_SIZE)
+                .ok_or(renderer::Error::BufferCapacityExceeded)?;
+            self.instance_data_range = ctx
+                .reserve_storage_data(
+                    renderer::MAX_INSTANCE_DATA_COUNT * INSTANCE_SIZE,
+                    INSTANCE_SIZE,
+                )
+                .ok_or(renderer::Error::BufferCapacityExceeded)?;
+            self.point_light_count_data_range = ctx
+                .reserve_uniform_data(POINT_LIGHT_COUNT_SIZE, POINT_LIGHT_COUNT_SIZE)
+                .ok_or(renderer::Error::BufferCapacityExceeded)?;
+            self.point_light_data_range = ctx
+                .reserve_storage_data(
+                    renderer::MAX_POINT_LIGHT_COUNT * POINT_LIGHT_SIZE,
+                    POINT_LIGHT_SIZE,
+                )
+                .ok_or(renderer::Error::BufferCapacityExceeded)?;
+
+            self.main_pass.update_context(
+                &mut ctx,
+                &self.camera_data_range,
+                &self.instance_data_range,
+                &self.point_light_count_data_range,
+                &self.point_light_data_range,
+            )?;
+            self.grid_pass.update_context(&ctx, &self.camera_data_range);
+
+            ctx
+        };
+
+        {
+            let s = window.inner_size();
+            let (w, h) = (s.width as f32, s.height as f32);
+            let aspect_ratio = w / h;
+
+            self.fps_camera.set_aspect_ratio(aspect_ratio);
+            self.orbit_camera.set_aspect_ratio(aspect_ratio);
+        };
+
+        if let Some((_old_context, _)) = self.windows.insert(window_id, (context, window)) {
+            //
+        }
+
+        Ok(())
+    }
     fn handle_window_event(
         &mut self,
         event: winit::event::WindowEvent,
@@ -661,9 +737,42 @@ impl Application {
                 }
 
                 let new_context = {
-                    let ctx = renderer::FrameContext::new(self.renderer.device.clone(), &window)?;
-                    self.main_pass.update_context(&ctx);
-                    self.grid_pass.update_context(&ctx);
+                    const CAMERA_SIZE: u64 = std::mem::size_of::<CameraUBO>() as u64;
+                    const INSTANCE_SIZE: u64 = std::mem::size_of::<InstanceData>() as u64;
+                    const POINT_LIGHT_COUNT_SIZE: u64 =
+                        std::mem::size_of::<renderer::PointLightCount>() as u64;
+                    const POINT_LIGHT_SIZE: u64 =
+                        std::mem::size_of::<renderer::PointLightData>() as u64;
+
+                    let mut ctx =
+                        renderer::FrameContext::new(self.renderer.device.clone(), &window)?;
+                    self.camera_data_range = ctx
+                        .reserve_uniform_data(CAMERA_SIZE, CAMERA_SIZE)
+                        .ok_or(renderer::Error::BufferCapacityExceeded)?;
+                    self.instance_data_range = ctx
+                        .reserve_storage_data(
+                            renderer::MAX_INSTANCE_DATA_COUNT * INSTANCE_SIZE,
+                            INSTANCE_SIZE,
+                        )
+                        .ok_or(renderer::Error::BufferCapacityExceeded)?;
+                    self.point_light_count_data_range = ctx
+                        .reserve_uniform_data(POINT_LIGHT_COUNT_SIZE, POINT_LIGHT_COUNT_SIZE)
+                        .ok_or(renderer::Error::BufferCapacityExceeded)?;
+                    self.point_light_data_range = ctx
+                        .reserve_storage_data(
+                            renderer::MAX_POINT_LIGHT_COUNT * POINT_LIGHT_SIZE,
+                            POINT_LIGHT_SIZE,
+                        )
+                        .ok_or(renderer::Error::BufferCapacityExceeded)?;
+
+                    self.main_pass.update_context(
+                        &mut ctx,
+                        &self.camera_data_range,
+                        &self.instance_data_range,
+                        &self.point_light_count_data_range,
+                        &self.point_light_data_range,
+                    )?;
+                    self.grid_pass.update_context(&ctx, &self.camera_data_range);
                     ctx
                 };
                 *context = new_context;
@@ -692,11 +801,12 @@ impl Application {
 
                 let swapchain_extent = context.swapchain_extent();
 
-                context.get_current_frame_mut().allocator_mut().reset();
+                // context.get_current_frame_mut().allocator_mut().reset();
                 let cmd = context.get_current_frame().command_buffer();
 
                 // PART 1 - MODEL
                 self.main_scene.reset();
+                context.get_current_frame_mut().allocator_mut().reset_indirect();
 
                 context.begin_drawing()?;
 
@@ -721,19 +831,7 @@ impl Application {
                     self.renderer.device.cmd_set_scissor(cmd, 0, &[scissor]);
                 }
 
-                let stride = {
-                    let size = std::mem::size_of::<vk::DrawIndexedIndirectCommand>();
-                    // let align = std::mem::align_of::<InstanceData>();
-
-                    // size.next_multiple_of(align) as u64
-                    size as u64
-                };
-                let first_instance_offset = context
-                    .get_current_frame()
-                    .allocator()
-                    .storage_buffer_offset()
-                    .next_multiple_of(stride)
-                    / stride;
+                let stride = std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u64;
                 for (first_index, index_count, material_index) in self.model_shape_info.iter() {
                     self.main_scene.add_submesh(*first_index, *index_count);
 
@@ -754,7 +852,7 @@ impl Application {
                         instance_count: 1,
                         first_index: *first_index as u32,
                         vertex_offset: 0,
-                        first_instance: instance_data.len() as u32 + first_instance_offset as u32,
+                        first_instance: instance_data.len() as u32,
                     });
                     instance_data.push(InstanceData {
                         model_matrix: model_matrix.as_2d_arr(),
@@ -766,24 +864,60 @@ impl Application {
                     });
                 }
 
-                let _ = context
-                    .get_current_frame_mut()
-                    .allocator_mut()
-                    .upload_storage_data(
-                        &instance_data,
-                        std::mem::size_of::<InstanceData>() as u64,
-                    )?;
+                let indirect_offset = unsafe {
+                    context
+                        .get_current_frame_mut()
+                        .allocator_mut()
+                        .upload_storage_data(self.instance_data_range.offset, &instance_data)?;
 
-                let indirect_offset = context
-                    .get_current_frame_mut()
-                    .allocator_mut()
-                    .upload_indirect_data(&indirect_command_data, stride)?;
+                    let offset = context
+                        .get_current_frame_mut()
+                        .allocator_mut()
+                        .upload_indirect_data(&indirect_command_data, stride)?;
+
+                    offset
+                };
+                unsafe {
+                    context
+                        .get_current_frame_mut()
+                        .allocator_mut()
+                        .upload_uniform_data(self.camera_data_range.offset, &[camera_data])
+                }?;
+
+                {
+                    let camera = match self.camera_in_use {
+                        CameraInUse::Fps => &self.fps_camera,
+                        CameraInUse::Orbit => &self.orbit_camera,
+                    };
+                    let point_light_data = [renderer::PointLightData {
+                        color: [1.0, 1.0, 1.0, 1.0],
+                        position: camera.transform.position.as_arr(),
+                    }];
+                    unsafe {
+                        context
+                            .get_current_frame_mut()
+                            .allocator_mut()
+                            .upload_storage_data(
+                                self.point_light_data_range.offset,
+                                &point_light_data,
+                            )
+                    }?;
+                    let point_light_count_data = [renderer::PointLightCount { integer: point_light_data.len() as u32 }];
+                    unsafe {
+                        context
+                            .get_current_frame_mut()
+                            .allocator_mut()
+                            .upload_uniform_data(
+                                self.point_light_count_data_range.offset,
+                                &point_light_count_data,
+                            )
+                    }?;
+                }
 
                 self.renderer.render_main_scene(
                     context,
                     &self.main_scene,
                     &self.main_pass,
-                    camera_data,
                     indirect_offset,
                     indirect_command_data.len() as u32,
                     stride as u32,
@@ -829,17 +963,19 @@ impl Application {
                         .next_multiple_of(stride)
                         / stride;
                     indirect_command_data.push(vk::DrawIndexedIndirectCommand {
-                        index_count: self.grid_first_index as u32,
+                        index_count: self.grid_index_count as u32,
                         instance_count: 1,
                         first_index: self.grid_first_index as u32,
                         vertex_offset: 0,
                         first_instance: 1 + first_instance_offset as u32,
                     });
 
-                    let indirect_offset = frame.allocator_mut().upload_indirect_data(
-                        &indirect_command_data,
-                        std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u64,
-                    )?;
+                    let indirect_offset = unsafe {
+                        frame.allocator_mut().upload_indirect_data(
+                            &indirect_command_data,
+                            std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u64,
+                        )
+                    }?;
 
                     let draw_count = indirect_command_data.len() as u32;
                     let stride = std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u32;
@@ -851,7 +987,6 @@ impl Application {
                     context,
                     &self.main_scene,
                     &self.grid_pass,
-                    camera_data,
                     indirect_offset,
                     draw_count,
                     stride,
@@ -886,48 +1021,10 @@ impl ApplicationHandler for Application {
         self.input_manager.start_frame();
     }
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if !self.windows.is_empty() {
-            return;
-        }
-
-        let window_attributes = winit::window::WindowAttributes::default()
-            .with_title(self.window_name.clone())
-            .with_min_inner_size(winit::dpi::Size::Physical(winit::dpi::PhysicalSize {
-                width: 256,
-                height: 256,
-            }));
-        let window = match event_loop.create_window(window_attributes) {
-            Ok(w) => w,
-            Err(e) => {
-                tracing::error!("{}", e);
-                return self.exiting(event_loop);
-            }
-        };
-
-        let window_id = window.id();
-
-        let context = match renderer::FrameContext::new(self.renderer.device.clone(), &window) {
-            Ok(ctx) => {
-                self.main_pass.update_context(&ctx);
-                self.grid_pass.update_context(&ctx);
-                ctx
-            }
-            Err(e) => {
-                tracing::error!("{}", e);
-                return self.exiting(event_loop);
-            }
-        };
-        {
-            let s = window.inner_size();
-            let (w, h) = (s.width as f32, s.height as f32);
-            let aspect_ratio = w / h;
-
-            self.fps_camera.set_aspect_ratio(aspect_ratio);
-            self.orbit_camera.set_aspect_ratio(aspect_ratio);
-        };
-
-        if let Some((_old_context, _)) = self.windows.insert(window_id, (context, window)) {
-            //
+        if let Err(e) = self.resumed_inner(event_loop) {
+            tracing::error!("{}", e);
+            self.exiting = true;
+            event_loop.exit();
         }
     }
     #[allow(unused_variables)]

@@ -2,14 +2,13 @@ use ash::vk;
 use vulkan::SharedDeviceRef;
 
 use crate::{
-    CameraUBO, DescriptorSetLayoutBindingInfo, DescriptorSetLayoutDescription,
+    AllocationRange, CameraUBO, DescriptorSetLayoutBindingInfo, DescriptorSetLayoutDescription,
     DescriptorSetLayoutResourceHandle, ENTRY_POINT_NAME_GRID_FRAG, ENTRY_POINT_NAME_GRID_VERT,
     ENTRY_POINT_NAME_SHADER_FRAG, ENTRY_POINT_NAME_SHADER_VERT, Error, FrameContext, InstanceData,
-    MAX_FRAME_COUNT, MAX_INSTANCE_DATA_COUNT, MAX_SCENE_IMAGE_COUNT, MeshArena, MeshArenaHandle,
-    PipelineDescription, PipelineLayoutDescription, PipelineLayoutResourceHandle,
-    PipelineLayoutResourceManager, PipelineResourceManager, Renderer, Result, Scene,
-    ShaderModuleDescription, ShaderModuleResourceHandle, ShaderModuleResourceManager,
-    ShaderVertVertex,
+    MAX_FRAME_COUNT, MAX_SCENE_IMAGE_COUNT, MeshArena, MeshArenaHandle, PipelineDescription,
+    PipelineLayoutDescription, PipelineLayoutResourceHandle, PipelineLayoutResourceManager,
+    PipelineResourceManager, Renderer, Result, Scene, ShaderModuleDescription,
+    ShaderModuleResourceHandle, ShaderModuleResourceManager, ShaderVertVertex,
 };
 
 slotmap::new_key_type! { pub struct InstanceDataHandle; }
@@ -50,7 +49,7 @@ impl MainRenderPass {
             &[
                 DescriptorSetLayoutBindingInfo {
                     binding: 0,
-                    ty: vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
+                    ty: vk::DescriptorType::UNIFORM_BUFFER,
                     count: 1,
                     stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                 },
@@ -59,6 +58,18 @@ impl MainRenderPass {
                     ty: vk::DescriptorType::STORAGE_BUFFER,
                     count: 1,
                     stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                },
+                DescriptorSetLayoutBindingInfo {
+                    binding: 2,
+                    ty: vk::DescriptorType::UNIFORM_BUFFER,
+                    count: 1,
+                    stage_flags: vk::ShaderStageFlags::FRAGMENT,
+                },
+                DescriptorSetLayoutBindingInfo {
+                    binding: 3,
+                    ty: vk::DescriptorType::STORAGE_BUFFER,
+                    count: 1,
+                    stage_flags: vk::ShaderStageFlags::FRAGMENT,
                 },
             ],
             // SET 1 - other
@@ -162,15 +173,11 @@ impl MainRenderPass {
             let pool_sizes = [
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::UNIFORM_BUFFER,
-                    descriptor_count: 1,
-                },
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
-                    descriptor_count: MAX_FRAME_COUNT as u32,
+                    descriptor_count: MAX_FRAME_COUNT as u32 * 2,
                 },
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::STORAGE_BUFFER,
-                    descriptor_count: MAX_FRAME_COUNT as u32 + 1,
+                    descriptor_count: MAX_FRAME_COUNT as u32 * 2,
                 },
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
@@ -178,7 +185,7 @@ impl MainRenderPass {
                 },
             ];
             let create_info = vk::DescriptorPoolCreateInfo {
-                max_sets: MAX_FRAME_COUNT as u32 + 3,
+                max_sets: (MAX_FRAME_COUNT as u32 * 2) + MAX_SCENE_IMAGE_COUNT,
                 pool_size_count: pool_sizes.len() as u32,
                 p_pool_sizes: pool_sizes.as_ptr(),
                 ..Default::default()
@@ -287,23 +294,44 @@ impl MainRenderPass {
             frag_module,
         })
     }
-    pub fn update_context(&self, ctx: &FrameContext) {
-        const CAMERA_SIZE: u64 = std::mem::size_of::<CameraUBO>() as u64;
-        const INSTANCE_SIZE: u64 = std::mem::size_of::<InstanceData>() as u64;
-
+    pub fn update_context(
+        &mut self,
+        ctx: &mut FrameContext,
+        camera_data_range: &AllocationRange,
+        instance_data_range: &AllocationRange,
+        point_light_count_data_range: &AllocationRange,
+        point_light_data_range: &AllocationRange,
+    ) -> Result<()> {
         let camera_infos: Box<[vk::DescriptorBufferInfo]> = (0..MAX_FRAME_COUNT as usize)
             .map(|i| vk::DescriptorBufferInfo {
                 buffer: ctx.frames()[i].allocator().uniform_buffer_raw(),
-                offset: 0,
-                range: CAMERA_SIZE,
+                offset: camera_data_range.offset,
+                range: camera_data_range.size,
             })
             .collect();
 
         let instance_infos: Box<[vk::DescriptorBufferInfo]> = (0..MAX_FRAME_COUNT as usize)
             .map(|i| vk::DescriptorBufferInfo {
                 buffer: ctx.frames()[i].allocator().storage_buffer_raw(),
-                offset: 0,
-                range: INSTANCE_SIZE * MAX_INSTANCE_DATA_COUNT,
+                offset: instance_data_range.offset,
+                range: instance_data_range.size,
+            })
+            .collect();
+
+        let point_light_count_infos: Box<[vk::DescriptorBufferInfo]> = (0..MAX_FRAME_COUNT
+            as usize)
+            .map(|i| vk::DescriptorBufferInfo {
+                buffer: ctx.frames()[i].allocator().uniform_buffer_raw(),
+                offset: point_light_count_data_range.offset,
+                range: point_light_count_data_range.size,
+            })
+            .collect();
+
+        let point_light_infos: Box<[vk::DescriptorBufferInfo]> = (0..MAX_FRAME_COUNT as usize)
+            .map(|i| vk::DescriptorBufferInfo {
+                buffer: ctx.frames()[i].allocator().storage_buffer_raw(),
+                offset: point_light_data_range.offset,
+                range: point_light_data_range.size,
             })
             .collect();
 
@@ -315,7 +343,7 @@ impl MainRenderPass {
                         dst_binding: 0,
                         descriptor_count: 1,
                         p_buffer_info: &camera_infos[i],
-                        descriptor_type: vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
+                        descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
                         ..Default::default()
                     },
                     vk::WriteDescriptorSet {
@@ -326,12 +354,30 @@ impl MainRenderPass {
                         descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
                         ..Default::default()
                     },
+                    vk::WriteDescriptorSet {
+                        dst_set: self.per_frame_descriptor_sets[i],
+                        dst_binding: 2,
+                        descriptor_count: 1,
+                        p_buffer_info: &point_light_count_infos[i],
+                        descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
+                        ..Default::default()
+                    },
+                    vk::WriteDescriptorSet {
+                        dst_set: self.per_frame_descriptor_sets[i],
+                        dst_binding: 3,
+                        descriptor_count: 1,
+                        p_buffer_info: &point_light_infos[i],
+                        descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+                        ..Default::default()
+                    },
                 ]
                 .into_iter()
             })
             .collect();
 
         unsafe { self.device.update_descriptor_sets(&writes, &[]) };
+
+        Ok(())
     }
     pub fn render(
         &self,
@@ -341,7 +387,6 @@ impl MainRenderPass {
         shader_modules: &mut ShaderModuleResourceManager,
         mesh_arenas: &slotmap::DenseSlotMap<MeshArenaHandle, MeshArena>,
         scene: &Scene,
-        camera_data: CameraUBO,
         indirect_offset: u64,
         draw_count: u32,
         stride: u32,
@@ -372,12 +417,6 @@ impl MainRenderPass {
         let current_frame_index = ctx.index;
         let frame = ctx.get_current_frame_mut();
 
-        let camera_size_aligned = self.device.get_uniform_buffer_min_size::<CameraUBO>();
-        let camera_offset = frame
-            .allocator_mut()
-            .upload_uniform_data(&[camera_data], camera_size_aligned)?
-            as u32;
-
         let cmd = frame.command_buffer();
 
         unsafe {
@@ -386,7 +425,7 @@ impl MainRenderPass {
 
             // bind per frame ds
             let sets = &[self.per_frame_descriptor_sets[current_frame_index]];
-            let dynamic_offsets = &[camera_offset];
+            let dynamic_offsets = &[];
             self.device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::GRAPHICS,
@@ -459,7 +498,7 @@ impl GridRenderPass {
             // SET 0 - per frame
             &[DescriptorSetLayoutBindingInfo {
                 binding: 0,
-                ty: vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
+                ty: vk::DescriptorType::UNIFORM_BUFFER,
                 count: 1,
                 stage_flags: vk::ShaderStageFlags::VERTEX,
             }],
@@ -533,16 +572,10 @@ impl GridRenderPass {
             .access_or_create(frag_module_desc)?;
 
         let descriptor_pool = {
-            let pool_sizes = [
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::UNIFORM_BUFFER,
-                    descriptor_count: 1,
-                },
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
-                    descriptor_count: MAX_FRAME_COUNT as u32,
-                },
-            ];
+            let pool_sizes = [vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::UNIFORM_BUFFER,
+                descriptor_count: MAX_FRAME_COUNT as u32 + 1,
+            }];
             let create_info = vk::DescriptorPoolCreateInfo {
                 max_sets: MAX_FRAME_COUNT as u32 + 1,
                 pool_size_count: pool_sizes.len() as u32,
@@ -618,15 +651,15 @@ impl GridRenderPass {
             frag_module,
         })
     }
-    pub fn update_context(&self, ctx: &FrameContext) {
+    pub fn update_context(&self, ctx: &FrameContext, camera_data_range: &AllocationRange) {
         const CAMERA_SIZE: u64 = std::mem::size_of::<CameraUBO>() as u64;
         const INSTANCE_SIZE: u64 = std::mem::size_of::<InstanceData>() as u64;
 
         let camera_infos: Box<[vk::DescriptorBufferInfo]> = (0..MAX_FRAME_COUNT as usize)
             .map(|i| vk::DescriptorBufferInfo {
                 buffer: ctx.frames()[i].allocator().uniform_buffer_raw(),
-                offset: 0,
-                range: CAMERA_SIZE,
+                offset: camera_data_range.offset,
+                range: camera_data_range.size,
             })
             .collect();
 
@@ -637,7 +670,7 @@ impl GridRenderPass {
                     dst_binding: 0,
                     descriptor_count: 1,
                     p_buffer_info: &camera_infos[i],
-                    descriptor_type: vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
+                    descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
                     ..Default::default()
                 }]
                 .into_iter()
@@ -654,7 +687,6 @@ impl GridRenderPass {
         shader_modules: &mut ShaderModuleResourceManager,
         mesh_arenas: &slotmap::DenseSlotMap<MeshArenaHandle, MeshArena>,
         scene: &Scene,
-        camera_data: CameraUBO,
         indirect_offset: u64,
         draw_count: u32,
         stride: u32,
@@ -684,13 +716,6 @@ impl GridRenderPass {
 
         let current_frame_index = ctx.index;
         let frame = ctx.get_current_frame_mut();
-
-        let camera_size_aligned = self.device.get_uniform_buffer_min_size::<CameraUBO>();
-        let camera_offset = frame
-            .allocator_mut()
-            .upload_uniform_data(&[camera_data], camera_size_aligned)?
-            as u32;
-
         let cmd = frame.command_buffer();
 
         unsafe {
@@ -699,26 +724,24 @@ impl GridRenderPass {
 
             // bind per frame ds
             let sets = &[self.per_frame_descriptor_sets[current_frame_index]];
-            let dynamic_offsets = &[camera_offset];
             self.device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::GRAPHICS,
                 layout,
                 0,
                 sets,
-                dynamic_offsets,
+                &[],
             );
 
             // bind other ds
             let sets = &[self.other_descriptor_set];
-            let dynamic_offsets = &[];
             self.device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::GRAPHICS,
                 layout,
                 1,
                 sets,
-                dynamic_offsets,
+                &[],
             );
 
             let mesh_arena = mesh_arenas.get(scene.mesh_arena_handle).unwrap();

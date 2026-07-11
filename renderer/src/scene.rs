@@ -6,7 +6,7 @@ use vulkan::SharedDeviceRef;
 use ash::vk;
 
 pub(crate) const MAX_SCENE_IMAGE_COUNT: u32 = 32;
-pub(crate) const MAX_POINT_LIGHT_COUNT: u32 = 32;
+pub const MAX_POINT_LIGHT_COUNT: u64 = 32;
 
 #[allow(dead_code)]
 pub struct MeshArena {

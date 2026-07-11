@@ -3,6 +3,7 @@ pub enum Error {
     IoError(std::io::Error),
     WinitExternalError(winit::error::ExternalError),
     WinitEventLoopError(winit::error::EventLoopError),
+    WinitOsError(winit::error::OsError),
     WinitHandleError(winit::raw_window_handle::HandleError),
     ImageError(image::ImageError),
     ObjMtlError(obj_mtl::Error),
@@ -20,6 +21,7 @@ impl std::fmt::Display for Error {
             Self::IoError(e) => write!(f, "IoError: {}", e),
             Self::WinitExternalError(e) => write!(f, "ExternalError({e})"),
             Self::WinitEventLoopError(e) => write!(f, "EventLoopError({e})"),
+            Self::WinitOsError(e) => write!(f, "OsError({e})"),
             Self::WinitHandleError(e) => write!(f, "HandleError({e})"),
             Self::ImageError(e) => write!(f, "ImageError({e})"),
             Self::RendererError(e) => write!(f, "RendererError({e})"),
@@ -84,6 +86,12 @@ impl From<yaml_rust2::EmitError> for Error {
 impl From<yaml_rust2::ScanError> for Error {
     fn from(value: yaml_rust2::ScanError) -> Self {
         Error::YamlScanError(value)
+    }
+}
+
+impl From<winit::error::OsError> for Error {
+    fn from(value: winit::error::OsError) -> Self {
+        Error::WinitOsError(value)
     }
 }
 

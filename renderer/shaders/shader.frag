@@ -24,15 +24,18 @@ layout(std430, set = 0, binding = 1) buffer InstanceBuffer {
     InstanceData arr [];
 } instances;
 
-// struct PointLightData {
-//     // w is intensity / brightness
-//     vec4 color;
-//     vec3 position;
-// };
-// 
-// layout(std140, set = 0, binding = 2) buffer PointLightBuffer {
-//     PointLightData arr [];
-// } point_lights;
+layout(std140, set = 0, binding = 2) uniform PointLightCount {
+    uint integer;
+} point_light_count;
+
+struct PointLightData {
+    // w is intensity / brightness
+    vec4 color;
+    vec3 position;
+};
+layout(std140, set = 0, binding = 3) buffer PointLightBuffer {
+    PointLightData arr [];
+} point_lights;
 
 // irregular
 layout(std140, set = 1, binding = 0) uniform GlobalLightUBO {
@@ -68,6 +71,30 @@ layout (location = 3) flat in uint v_material_index;
 
 layout (location = 0) out vec4 f_color;
 
+
+vec3 calc_point_light(PointLightData light, MaterialUBO mat, vec3 view_dir) {
+    vec3 light_dir = normalize(light.position - v_pos);
+    vec3 reflect_dir = reflect(-light_dir, v_normal_world_space);
+
+    float diff = max(dot(v_normal_world_space, light_dir), 0.0);
+    float spec = pow(max(dot(view_dir, reflect_dir), 0.0), mat.shininess);
+
+    vec3 diffuse = mat.diffuse_base * diff * light.color.xyz;
+    if ((mat.flags & MATERIAL_FLAG_DIFFUSE_TEXTURE_BIT) != 0) {
+        diffuse *= texture(global_textures[nonuniformEXT(mat.diffuse_texture_index)], v_tex_coord).rgb;
+    }
+
+    vec3 specular = mat.specular_base * spec;
+    if ((mat.flags & MATERIAL_FLAG_SPECULAR_TEXTURE_BIT) != 0) {
+        specular *= texture(global_textures[nonuniformEXT(mat.specular_texture_index)], v_tex_coord).rgb;
+    }
+
+    float distance = length(v_pos - light.position);
+    diffuse *= 1.0 / distance;
+    specular *= 1.0 / distance;
+
+    return (diffuse + specular) * light.color.a;
+}
 
 void main() {
     MaterialUBO mat = materials.arr[nonuniformEXT(v_material_index)];
@@ -105,5 +132,11 @@ void main() {
     }
 
     vec3 res = diffuse + specular;
+        
+    for (int i = 0; i < point_light_count.integer; i++) {
+        PointLightData light = point_lights.arr[i];
+        res += calc_point_light(light, mat, view_dir);
+    }
+
     f_color = vec4(res, 1.0);
 }

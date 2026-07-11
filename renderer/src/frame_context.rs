@@ -8,6 +8,12 @@ pub const MAX_CAMERA_DATA_COUNT: u64 = 32;
 pub const MAX_INSTANCE_DATA_COUNT: u64 = 128;
 pub const MAX_INDIRECT_COMMAND_DATA_COUNT: u64 = MAX_INSTANCE_DATA_COUNT * 4;
 
+#[derive(PartialEq)]
+pub struct AllocationRange {
+    pub offset: u64,
+    pub size: u64,
+}
+
 #[allow(dead_code)]
 pub struct FrameAllocator {
     uniform_buffer: vulkan::Buffer,
@@ -68,51 +74,117 @@ impl FrameAllocator {
             indirect_buffer_offset: 0,
         })
     }
-    pub fn upload_uniform_data<T>(&mut self, data: &[T], alignment: u64) -> Result<u64> {
-        debug_assert!(std::mem::size_of::<T>() != 0);
+    #[inline]
+    pub fn can_reserve_uniform_data(
+        &self,
+        byte_count: u64,
+        alignment: u64,
+    ) -> Option<AllocationRange> {
+        let offset = self.uniform_buffer_offset.next_multiple_of(alignment);
+        if offset + byte_count > self.uniform_buffer.size {
+            return None;
+        }
+
+        Some(AllocationRange {
+            offset,
+            size: byte_count,
+        })
+    }
+    pub unsafe fn reserve_uniform_data(
+        &mut self,
+        byte_count: u64,
+        alignment: u64,
+    ) -> Option<AllocationRange> {
+        if self
+            .can_reserve_uniform_data(byte_count, alignment)
+            .is_none()
+        {
+            return None;
+        }
 
         self.uniform_buffer_offset = self.uniform_buffer_offset.next_multiple_of(alignment);
 
-        let (buffer, offset) = (&self.uniform_buffer, &mut self.uniform_buffer_offset);
-        let res = *offset;
+        let res = self.uniform_buffer_offset;
+        self.uniform_buffer_offset += byte_count;
+        return Some(AllocationRange {
+            offset: res,
+            size: byte_count,
+        });
+    }
+    pub unsafe fn upload_uniform_data<T>(&mut self, offset: u64, data: &[T]) -> Result<()> {
+        debug_assert!(std::mem::size_of::<T>() != 0);
+
+        let buffer = &self.uniform_buffer;
 
         let size = (data.len() * std::mem::size_of::<T>()) as u64;
 
         // TODO: replace with error?
-        debug_assert!(*offset + size <= buffer.size);
+        debug_assert!(offset + size <= buffer.size);
 
         unsafe {
-            let dst = buffer.map_memory(*offset, size)? as *mut T;
+            let dst = buffer.map_memory(offset, size)? as *mut T;
             dst.copy_from_nonoverlapping(data.as_ptr(), data.len());
             buffer.unmap();
         }
-        *offset += size;
 
-        Ok(res)
+        Ok(())
     }
-    pub fn upload_storage_data<T>(&mut self, data: &[T], alignment: u64) -> Result<u64> {
-        debug_assert!(std::mem::size_of::<T>() != 0);
+    #[inline]
+    pub fn can_reserve_storage_data(
+        &self,
+        byte_count: u64,
+        alignment: u64,
+    ) -> Option<AllocationRange> {
+        let offset = self.storage_buffer_offset.next_multiple_of(alignment);
+        if offset + byte_count > self.storage_buffer.size {
+            return None;
+        }
+
+        Some(AllocationRange {
+            offset,
+            size: byte_count,
+        })
+    }
+    pub unsafe fn reserve_storage_data(
+        &mut self,
+        byte_count: u64,
+        alignment: u64,
+    ) -> Option<AllocationRange> {
+        if self
+            .can_reserve_storage_data(byte_count, alignment)
+            .is_none()
+        {
+            return None;
+        }
 
         self.storage_buffer_offset = self.storage_buffer_offset.next_multiple_of(alignment);
 
-        let (buffer, offset) = (&self.storage_buffer, &mut self.storage_buffer_offset);
-        let res = *offset;
+        let res = self.storage_buffer_offset;
+        self.storage_buffer_offset += byte_count;
+        return Some(AllocationRange {
+            offset: res,
+            size: byte_count,
+        });
+    }
+    pub unsafe fn upload_storage_data<T>(&mut self, offset: u64, data: &[T]) -> Result<()> {
+        debug_assert!(std::mem::size_of::<T>() != 0);
+
+        let buffer = &self.storage_buffer;
 
         let size = (data.len() * std::mem::size_of::<T>()) as u64;
 
         // TODO: replace with error?
-        debug_assert!(*offset + size <= buffer.size);
+        debug_assert!(offset + size <= buffer.size);
 
         unsafe {
-            let dst = buffer.map_memory(*offset, size)? as *mut T;
+            let dst = buffer.map_memory(offset, size)? as *mut T;
             dst.copy_from_nonoverlapping(data.as_ptr(), data.len());
             buffer.unmap();
         }
-        *offset += size;
 
-        Ok(res)
+        Ok(())
     }
-    pub fn upload_indirect_data<T>(&mut self, data: &[T], alignment: u64) -> Result<u64> {
+    pub unsafe fn upload_indirect_data<T>(&mut self, data: &[T], alignment: u64) -> Result<u64> {
         debug_assert!(std::mem::size_of::<T>() != 0);
 
         self.indirect_buffer_offset = self.indirect_buffer_offset.next_multiple_of(alignment);
@@ -130,15 +202,20 @@ impl FrameAllocator {
             dst.copy_from_nonoverlapping(data.as_ptr(), data.len());
             buffer.unmap();
         }
-        *offset += size;
+
+        self.indirect_buffer_offset += size;
 
         Ok(res)
     }
     #[inline]
-    pub fn reset(&mut self) {
+    pub fn reset_indirect(&mut self) {
+        self.indirect_buffer_offset = 0;
+    }
+    #[inline]
+    pub fn reset_all(&mut self) {
+        self.indirect_buffer_offset = 0;
         self.uniform_buffer_offset = 0;
         self.storage_buffer_offset = 0;
-        self.indirect_buffer_offset = 0;
     }
     #[inline]
     pub fn uniform_buffer_raw(&self) -> vk::Buffer {
@@ -197,7 +274,8 @@ impl FrameData {
         let allocator = FrameAllocator::new(
             device.clone(),
             camera_data_element_size * MAX_CAMERA_DATA_COUNT,
-            instance_data_element_size * MAX_INSTANCE_DATA_COUNT,
+            // TODO: calculate the capacity in a more intelligent way
+            (instance_data_element_size * MAX_INSTANCE_DATA_COUNT) + 20000,
             indirect_command_data_element_size * MAX_INDIRECT_COMMAND_DATA_COUNT,
         )?;
 
@@ -311,6 +389,82 @@ pub struct FrameContext {
 }
 
 impl FrameContext {
+    pub fn reserve_uniform_data(
+        &mut self,
+        byte_count: u64,
+        alignment: u64,
+    ) -> Option<AllocationRange> {
+        let mut last_range = None;
+
+        for allocator in self.frames.iter().map(|f| f.allocator()) {
+            let cur_range =
+                if let Some(range) = allocator.can_reserve_uniform_data(byte_count, alignment) {
+                    range
+                } else {
+                    return None;
+                };
+
+            if let Some(range) = last_range {
+                if range != cur_range {
+                    return None;
+                }
+            }
+            last_range = Some(cur_range);
+        }
+
+        let mut last_range = last_range.unwrap();
+
+        for allocator in self.frames.iter_mut().map(|f| f.allocator_mut()) {
+            let cur_range =
+                unsafe { allocator.reserve_uniform_data(byte_count, alignment) }.unwrap();
+
+            if cur_range != last_range {
+                return None;
+            }
+
+            last_range = cur_range;
+        }
+
+        return Some(last_range);
+    }
+    pub fn reserve_storage_data(
+        &mut self,
+        byte_count: u64,
+        alignment: u64,
+    ) -> Option<AllocationRange> {
+        let mut last_range = None;
+
+        for allocator in self.frames.iter().map(|f| f.allocator()) {
+            let cur_range =
+                if let Some(range) = allocator.can_reserve_storage_data(byte_count, alignment) {
+                    range
+                } else {
+                    return None;
+                };
+
+            if let Some(range) = last_range {
+                if range != cur_range {
+                    return None;
+                }
+            }
+            last_range = Some(cur_range);
+        }
+
+        let mut last_range = last_range.unwrap();
+
+        for allocator in self.frames.iter_mut().map(|f| f.allocator_mut()) {
+            let cur_range =
+                unsafe { allocator.reserve_storage_data(byte_count, alignment) }.unwrap();
+
+            if cur_range != last_range {
+                return None;
+            }
+
+            last_range = cur_range;
+        }
+
+        return Some(last_range);
+    }
     pub fn new(device: SharedDeviceRef, window: &winit::window::Window) -> Result<Self> {
         let swapchain = vulkan::Swapchain::new(device.clone(), window)
             .inspect_err(|e| tracing::error!("{e}"))?;
