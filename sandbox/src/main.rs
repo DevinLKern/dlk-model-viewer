@@ -10,7 +10,7 @@ use input_manager::{Input, InputEvent, InputManager};
 use obj_mtl::{Vertex, VertexNormal};
 use renderer::{
     AllocationRange, CameraUBO, GridRenderPass, InstanceData, MainRenderPass, MaterialBuilderData,
-    Renderer, Scene, SceneBuilder, ShaderVertVertex, TextureIndexValue,
+    PointLightsUBO, Renderer, Scene, SceneBuilder, ShaderVertVertex, TextureIndexValue,
 };
 use result::{Error, Result};
 use settings::{Command, Event, Settings};
@@ -57,8 +57,7 @@ struct Application {
     renderer: renderer::Renderer,
     camera_data_range: AllocationRange,
     instance_data_range: AllocationRange,
-    point_light_count_data_range: AllocationRange,
-    point_light_data_range: AllocationRange,
+    point_lights_ubo_data_range: AllocationRange,
     main_scene: Scene,
     main_pass: MainRenderPass,
     grid_pass: GridRenderPass,
@@ -460,8 +459,7 @@ impl Application {
             windows: HashMap::new(),
             camera_data_range: AllocationRange { offset: 0, size: 0 },
             instance_data_range: AllocationRange { offset: 0, size: 0 },
-            point_light_count_data_range: AllocationRange { offset: 0, size: 0 },
-            point_light_data_range: AllocationRange { offset: 0, size: 0 },
+            point_lights_ubo_data_range: AllocationRange { offset: 0, size: 0 },
             main_scene,
             main_pass,
             grid_pass,
@@ -655,8 +653,8 @@ impl Application {
         let context = {
             const CAMERA_SIZE: u64 = std::mem::size_of::<CameraUBO>() as u64;
             const INSTANCE_SIZE: u64 = std::mem::size_of::<InstanceData>() as u64;
-            const POINT_LIGHT_COUNT_SIZE: u64 =
-                std::mem::size_of::<renderer::PointLightCount>() as u64;
+            const POINT_LIGHTS_UBO_SIZE: u64 =
+                std::mem::size_of::<renderer::PointLightsUBO>() as u64;
             const POINT_LIGHT_SIZE: u64 = std::mem::size_of::<renderer::PointLightData>() as u64;
 
             let mut ctx = renderer::FrameContext::new(self.renderer.device.clone(), &window)?;
@@ -669,12 +667,9 @@ impl Application {
                     INSTANCE_SIZE,
                 )
                 .ok_or(renderer::Error::BufferCapacityExceeded)?;
-            self.point_light_count_data_range = ctx
-                .reserve_uniform_data(POINT_LIGHT_COUNT_SIZE, POINT_LIGHT_COUNT_SIZE)
-                .ok_or(renderer::Error::BufferCapacityExceeded)?;
-            self.point_light_data_range = ctx
+            self.point_lights_ubo_data_range = ctx
                 .reserve_storage_data(
-                    renderer::MAX_POINT_LIGHT_COUNT * POINT_LIGHT_SIZE,
+                    POINT_LIGHTS_UBO_SIZE + (renderer::MAX_POINT_LIGHT_COUNT * POINT_LIGHT_SIZE),
                     POINT_LIGHT_SIZE,
                 )
                 .ok_or(renderer::Error::BufferCapacityExceeded)?;
@@ -683,8 +678,7 @@ impl Application {
                 &mut ctx,
                 &self.camera_data_range,
                 &self.instance_data_range,
-                &self.point_light_count_data_range,
-                &self.point_light_data_range,
+                &self.point_lights_ubo_data_range,
             )?;
             self.grid_pass.update_context(&ctx, &self.camera_data_range);
 
@@ -739,8 +733,8 @@ impl Application {
                 let new_context = {
                     const CAMERA_SIZE: u64 = std::mem::size_of::<CameraUBO>() as u64;
                     const INSTANCE_SIZE: u64 = std::mem::size_of::<InstanceData>() as u64;
-                    const POINT_LIGHT_COUNT_SIZE: u64 =
-                        std::mem::size_of::<renderer::PointLightCount>() as u64;
+                    const POINT_LIGHTS_UBO_SIZE: u64 =
+                        std::mem::size_of::<renderer::PointLightsUBO>() as u64;
                     const POINT_LIGHT_SIZE: u64 =
                         std::mem::size_of::<renderer::PointLightData>() as u64;
 
@@ -755,12 +749,10 @@ impl Application {
                             INSTANCE_SIZE,
                         )
                         .ok_or(renderer::Error::BufferCapacityExceeded)?;
-                    self.point_light_count_data_range = ctx
-                        .reserve_uniform_data(POINT_LIGHT_COUNT_SIZE, POINT_LIGHT_COUNT_SIZE)
-                        .ok_or(renderer::Error::BufferCapacityExceeded)?;
-                    self.point_light_data_range = ctx
+                    self.point_lights_ubo_data_range = ctx
                         .reserve_storage_data(
-                            renderer::MAX_POINT_LIGHT_COUNT * POINT_LIGHT_SIZE,
+                            POINT_LIGHTS_UBO_SIZE
+                                + (renderer::MAX_POINT_LIGHT_COUNT * POINT_LIGHT_SIZE),
                             POINT_LIGHT_SIZE,
                         )
                         .ok_or(renderer::Error::BufferCapacityExceeded)?;
@@ -769,10 +761,10 @@ impl Application {
                         &mut ctx,
                         &self.camera_data_range,
                         &self.instance_data_range,
-                        &self.point_light_count_data_range,
-                        &self.point_light_data_range,
+                        &self.point_lights_ubo_data_range,
                     )?;
                     self.grid_pass.update_context(&ctx, &self.camera_data_range);
+
                     ctx
                 };
                 *context = new_context;
@@ -806,7 +798,10 @@ impl Application {
 
                 // PART 1 - MODEL
                 self.main_scene.reset();
-                context.get_current_frame_mut().allocator_mut().reset_indirect();
+                context
+                    .get_current_frame_mut()
+                    .allocator_mut()
+                    .reset_indirect();
 
                 context.begin_drawing()?;
 
@@ -892,23 +887,31 @@ impl Application {
                     let point_light_data = [renderer::PointLightData {
                         color: [1.0, 1.0, 1.0, 1.0],
                         position: camera.transform.position.as_arr(),
+                        _pad: 0,
                     }];
                     unsafe {
                         context
                             .get_current_frame_mut()
                             .allocator_mut()
                             .upload_storage_data(
-                                self.point_light_data_range.offset,
+                                self.point_lights_ubo_data_range.offset
+                                    + std::mem::size_of::<PointLightsUBO>() as u64,
                                 &point_light_data,
                             )
                     }?;
-                    let point_light_count_data = [renderer::PointLightCount { integer: point_light_data.len() as u32 }];
+                    let point_light_count_data = [renderer::PointLightsUBO {
+                        count: point_light_data.len() as u32,
+                        _pad0: 0,
+                        _pad1: 0,
+                        _pad2: 0,
+                        arr: (),
+                    }];
                     unsafe {
                         context
                             .get_current_frame_mut()
                             .allocator_mut()
-                            .upload_uniform_data(
-                                self.point_light_count_data_range.offset,
+                            .upload_storage_data(
+                                self.point_lights_ubo_data_range.offset,
                                 &point_light_count_data,
                             )
                     }?;

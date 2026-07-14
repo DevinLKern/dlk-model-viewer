@@ -24,16 +24,18 @@ layout(std430, set = 0, binding = 1) buffer InstanceBuffer {
     InstanceData arr [];
 } instances;
 
-layout(std140, set = 0, binding = 2) uniform PointLightCount {
-    uint integer;
-} point_light_count;
-
 struct PointLightData {
     // w is intensity / brightness
     vec4 color;
     vec3 position;
+    int _pad;
 };
-layout(std140, set = 0, binding = 3) buffer PointLightBuffer {
+layout(std430, set = 0, binding = 2) buffer PointLightsUBO {
+    uint count;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+    
     PointLightData arr [];
 } point_lights;
 
@@ -90,8 +92,8 @@ vec3 calc_point_light(PointLightData light, MaterialUBO mat, vec3 view_dir) {
     }
 
     float distance = length(v_pos - light.position);
-    diffuse *= 1.0 / distance;
-    specular *= 1.0 / distance;
+    diffuse *= 1.0 / distance * distance;
+    specular *= 1.0 / distance * distance;
 
     return (diffuse + specular) * light.color.a;
 }
@@ -103,7 +105,7 @@ void main() {
     if ((mat.flags & MATERIAL_FLAG_AMBIENT_TEXTURE_BIT) != 0) {
         ambient *= texture(global_textures[nonuniformEXT(mat.ambient_texture_index)], v_tex_coord).rgb;
     }
-    float ambient_strength = 0.1;
+    float ambient_strength = 0.01;
     ambient *= ambient_strength;
     
     vec3 world_light_dir = normalize(vec3(world_light.direction));
@@ -131,9 +133,9 @@ void main() {
         specular *= texture(global_textures[nonuniformEXT(mat.specular_texture_index)], v_tex_coord).rgb;
     }
 
-    vec3 res = diffuse + specular;
+    vec3 res = diffuse + specular + ambient;
         
-    for (int i = 0; i < point_light_count.integer; i++) {
+    for (int i = 0; i < point_lights.count; i++) {
         PointLightData light = point_lights.arr[i];
         res += calc_point_light(light, mat, view_dir);
     }

@@ -61,12 +61,6 @@ impl MainRenderPass {
                 },
                 DescriptorSetLayoutBindingInfo {
                     binding: 2,
-                    ty: vk::DescriptorType::UNIFORM_BUFFER,
-                    count: 1,
-                    stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                },
-                DescriptorSetLayoutBindingInfo {
-                    binding: 3,
                     ty: vk::DescriptorType::STORAGE_BUFFER,
                     count: 1,
                     stage_flags: vk::ShaderStageFlags::FRAGMENT,
@@ -299,8 +293,7 @@ impl MainRenderPass {
         ctx: &mut FrameContext,
         camera_data_range: &AllocationRange,
         instance_data_range: &AllocationRange,
-        point_light_count_data_range: &AllocationRange,
-        point_light_data_range: &AllocationRange,
+        point_lights_data_range: &AllocationRange,
     ) -> Result<()> {
         let camera_infos: Box<[vk::DescriptorBufferInfo]> = (0..MAX_FRAME_COUNT as usize)
             .map(|i| vk::DescriptorBufferInfo {
@@ -318,20 +311,11 @@ impl MainRenderPass {
             })
             .collect();
 
-        let point_light_count_infos: Box<[vk::DescriptorBufferInfo]> = (0..MAX_FRAME_COUNT
-            as usize)
-            .map(|i| vk::DescriptorBufferInfo {
-                buffer: ctx.frames()[i].allocator().uniform_buffer_raw(),
-                offset: point_light_count_data_range.offset,
-                range: point_light_count_data_range.size,
-            })
-            .collect();
-
         let point_light_infos: Box<[vk::DescriptorBufferInfo]> = (0..MAX_FRAME_COUNT as usize)
             .map(|i| vk::DescriptorBufferInfo {
                 buffer: ctx.frames()[i].allocator().storage_buffer_raw(),
-                offset: point_light_data_range.offset,
-                range: point_light_data_range.size,
+                offset: point_lights_data_range.offset,
+                range: point_lights_data_range.size,
             })
             .collect();
 
@@ -357,14 +341,6 @@ impl MainRenderPass {
                     vk::WriteDescriptorSet {
                         dst_set: self.per_frame_descriptor_sets[i],
                         dst_binding: 2,
-                        descriptor_count: 1,
-                        p_buffer_info: &point_light_count_infos[i],
-                        descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
-                        ..Default::default()
-                    },
-                    vk::WriteDescriptorSet {
-                        dst_set: self.per_frame_descriptor_sets[i],
-                        dst_binding: 3,
                         descriptor_count: 1,
                         p_buffer_info: &point_light_infos[i],
                         descriptor_type: vk::DescriptorType::STORAGE_BUFFER,

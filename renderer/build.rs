@@ -242,6 +242,8 @@ fn run_rustfmt_on(path: &Path) {
         // Optional but recommended for generated files:
         .arg("--emit")
         .arg("files")
+        .arg("--edition")
+        .arg("2024")
         .status()
         .expect("Failed to spawn rustfmt");
 
@@ -308,5 +310,5 @@ fn main() {
 
     let entry_point_names_path = out_dir.join("entry_points.rs");
     generate_entry_point_vars(&entry_point_names_path, &spv_modules).unwrap();
-    // run_rustfmt_on(&entry_point_names_path);
+    run_rustfmt_on(&entry_point_names_path);
 }
