@@ -437,10 +437,10 @@ impl Application {
             scene_builder.build(renderer.device.clone(), renderer.mesh_arenas_mut())?;
 
         let main_pass =
-            renderer::MainRenderPass::new(renderer.device.clone(), &main_scene, &mut renderer)?;
+            renderer::MainRenderPass::new(&main_scene, &mut renderer)?;
 
         let grid_pass =
-            renderer::GridRenderPass::new(renderer.device.clone(), &main_scene, &mut renderer)?;
+            renderer::GridRenderPass::new(&main_scene, &mut renderer)?;
 
         Ok(Self {
             last: std::time::Instant::now(),

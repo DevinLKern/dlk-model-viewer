@@ -1,4 +1,4 @@
-use crate::{GlobalLightUBO, GridData, MaterialUBO, Result, ShaderVertVertex};
+use crate::{GlobalLightUBO, GridData, ImageHandle, MaterialUBO, Result, ShaderVertVertex};
 
 use math::{Identity, Mat4, Zero};
 use vulkan::SharedDeviceRef;
@@ -40,7 +40,7 @@ pub struct SceneBuilder {
     pub(crate) vertices: Vec<ShaderVertVertex>,
     pub(crate) indices: Vec<u32>,
     // first_index, index_count
-    pub(crate) images: Vec<(vk::Sampler, vulkan::Image)>,
+    pub(crate) images: Vec<(vk::Sampler, ImageHandle)>,
     // base_color, diffuse_texture_index
     pub(crate) materials: Vec<MaterialBuilderData>,
     pub(crate) light_direction: math::Vec3<f32>,
@@ -92,7 +92,7 @@ impl SceneBuilder {
         return (before, after - before);
     }
     #[inline]
-    pub fn add_image(&mut self, sampler: vk::Sampler, image: vulkan::Image) -> usize {
+    pub fn add_image(&mut self, sampler: vk::Sampler, image: ImageHandle) -> usize {
         let res = self.images.len();
         self.images.push((sampler, image));
         return res;
@@ -285,7 +285,7 @@ impl SceneBuilder {
 
 pub struct Scene {
     pub(crate) mesh_arena_handle: MeshArenaHandle,
-    pub(crate) images: Vec<(vk::Sampler, vulkan::Image)>,
+    pub(crate) images: Vec<(vk::Sampler, ImageHandle)>,
     pub(crate) global_light_range: (u64, u64),
     pub(crate) grid_data_range: (u64, u64),
     pub(crate) uniform_buffer: vulkan::Buffer,

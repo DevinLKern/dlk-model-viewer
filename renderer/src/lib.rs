@@ -16,6 +16,7 @@ pub use result::Result;
 pub use scene::*;
 
 use ash::vk;
+use slotmap::SlotMap;
 use std::rc::Rc;
 use std::u64;
 use vulkan::SharedDeviceRef;
@@ -64,6 +65,7 @@ pub struct Renderer {
     descriptor_set_layouts: DescriptorSetLayoutResourceManager,
     pipeline_layouts: PipelineLayoutResourceManager,
     pipelines: PipelineResourceManager,
+    images: SlotMap<ImageHandle, vulkan::Image>,
     repeat_sampler: vk::Sampler,
     mesh_arenas: slotmap::DenseSlotMap<MeshArenaHandle, MeshArena>,
 }
@@ -124,6 +126,7 @@ impl Renderer {
             pipeline_layouts,
             pipelines,
             mesh_arenas: slotmap::DenseSlotMap::with_key(),
+            images: slotmap::SlotMap::with_key(),
             repeat_sampler,
         })
     }
@@ -316,7 +319,7 @@ impl Renderer {
     pub fn create_image(
         &mut self,
         image_data: image::DynamicImage,
-    ) -> result::Result<vulkan::Image> {
+    ) -> result::Result<ImageHandle> {
         use image::GenericImageView;
 
         let (width, height) = image_data.dimensions();
@@ -324,7 +327,7 @@ impl Renderer {
         let data = rgba.as_raw();
         let size = data.len() as u64;
 
-        let image = {
+        let mut image = {
             let image_create_info = vulkan::ImageCreateInfo {
                 memory_property_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
                 mip_levels: 1,
@@ -350,7 +353,7 @@ impl Renderer {
             transfer_buffer.unmap();
         }
 
-        let command_buffer = self.get_command_buffer()?;
+        let cmd = self.get_command_buffer()?;
 
         {
             let begin_info = vk::CommandBufferBeginInfo {
@@ -359,7 +362,7 @@ impl Renderer {
             };
             unsafe {
                 self.device
-                    .begin_command_buffer(command_buffer, &begin_info)
+                    .begin_command_buffer(cmd, &begin_info)
             }?;
         }
 
@@ -394,7 +397,7 @@ impl Renderer {
 
             unsafe {
                 self.device
-                    .cmd_pipeline_barrier2(command_buffer, &dependency_info)
+                    .cmd_pipeline_barrier2(cmd, &dependency_info)
             };
 
             let regions = [vk::BufferImageCopy2 {
@@ -427,7 +430,7 @@ impl Renderer {
 
             unsafe {
                 self.device
-                    .cmd_copy_buffer_to_image2(command_buffer, &copy_buffer_to_image_info)
+                    .cmd_copy_buffer_to_image2(cmd, &copy_buffer_to_image_info)
             };
 
             let barriers = [vk::ImageMemoryBarrier2 {
@@ -458,27 +461,43 @@ impl Renderer {
 
             unsafe {
                 self.device
-                    .cmd_pipeline_barrier2(command_buffer, &dependency_info)
+                    .cmd_pipeline_barrier2(cmd, &dependency_info)
             };
         }
 
         unsafe {
-            self.device.end_command_buffer(command_buffer)?;
+            self.device.end_command_buffer(cmd)?;
 
             let submit_info = [vk::SubmitInfo {
                 command_buffer_count: 1,
-                p_command_buffers: &command_buffer,
+                p_command_buffers: &cmd,
                 ..Default::default()
             }];
 
+            // TODO: replace device_wait_idle with fence
             self.device
                 .queue_submit(self.device.queue, &submit_info, vk::Fence::null())?;
             self.device.device_wait_idle()?;
             self.device
-                .free_command_buffers(self.command_pool, &[command_buffer]);
+                .free_command_buffers(self.command_pool, &[cmd]);
+            image.layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
         }
 
-        Ok(image)
+        Ok(self.images.insert(image))
+    }
+    #[inline]
+    fn get_image(&self, handle: ImageHandle) -> Option<&vulkan::Image> {
+        self.images.get(handle)
+    }
+    #[inline]
+    #[allow(unused)]
+    fn get_image_mut(&mut self, handle: ImageHandle) -> Option<&mut vulkan::Image> {
+        self.images.get_mut(handle)
+    }
+    #[inline]
+    #[allow(unused)]
+    fn destroy_image(&mut self, handle: ImageHandle) -> bool {
+        self.images.remove(handle).is_some()
     }
     pub fn create_mesh_arena(
         &mut self,

@@ -43,7 +43,9 @@ impl Drop for MainRenderPass {
 
 #[allow(dead_code)]
 impl MainRenderPass {
-    pub fn new(device: SharedDeviceRef, scene: &Scene, renderer: &mut Renderer) -> Result<Self> {
+    pub fn new(scene: &Scene, renderer: &mut Renderer) -> Result<Self> {
+        let device = renderer.device.clone();
+        
         let descriptor_set_layout_bindings: &[&[DescriptorSetLayoutBindingInfo]] = &[
             // SET 0 - per frame
             &[
@@ -226,10 +228,13 @@ impl MainRenderPass {
             let image_info: Box<[vk::DescriptorImageInfo]> = scene
                 .images
                 .iter()
-                .map(|(sampler, img)| vk::DescriptorImageInfo {
-                    sampler: *sampler,
-                    image_view: img.view,
-                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                .map(|(sampler, image)| {
+                    let img = renderer.get_image(*image).unwrap();
+                    vk::DescriptorImageInfo {
+                        sampler: *sampler,
+                        image_view: img.view,
+                        image_layout: img.layout,
+                    }
                 })
                 .collect();
 
@@ -469,7 +474,9 @@ impl Drop for GridRenderPass {
 
 #[allow(dead_code)]
 impl GridRenderPass {
-    pub fn new(device: SharedDeviceRef, scene: &Scene, renderer: &mut Renderer) -> Result<Self> {
+    pub fn new(scene: &Scene, renderer: &mut Renderer) -> Result<Self> {
+        let device = renderer.device.clone();
+        
         let descriptor_set_layout_bindings: &[&[DescriptorSetLayoutBindingInfo]] = &[
             // SET 0 - per frame
             &[DescriptorSetLayoutBindingInfo {

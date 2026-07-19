@@ -6,12 +6,15 @@ use ash::vk;
 
 pub struct Image {
     device: SharedDeviceRef,
-    pub handle: ash::vk::Image,
-    pub view: ash::vk::ImageView,
-    pub memory: ash::vk::DeviceMemory,
+    pub handle: vk::Image,
+    pub view: vk::ImageView,
+    pub memory: vk::DeviceMemory,
+    pub format: vk::Format,
     pub width: u32,
     pub height: u32,
     pub depth: u32,
+    pub layers: u32,
+    pub layout: vk::ImageLayout,
 }
 
 #[allow(dead_code)]
@@ -19,7 +22,7 @@ pub struct ImageCreateInfo {
     pub memory_property_flags: ash::vk::MemoryPropertyFlags,
     pub mip_levels: u32,
     pub image_type: ash::vk::ImageType,
-    pub format: ash::vk::Format,
+    pub format: vk::Format,
     pub width: u32,
     pub height: u32,
     pub depth: u32,
@@ -32,7 +35,6 @@ fn is_depth_format(format: ash::vk::Format) -> bool {
         format,
         ash::vk::Format::D16_UNORM
             | ash::vk::Format::X8_D24_UNORM_PACK32
-            | ash::vk::Format::S8_UINT
             | ash::vk::Format::D16_UNORM_S8_UINT
             | ash::vk::Format::D24_UNORM_S8_UINT
             | ash::vk::Format::D32_SFLOAT_S8_UINT
@@ -96,29 +98,29 @@ impl Image {
             };
 
             if format_properties.optimal_tiling_features.contains(features) {
-                ash::vk::ImageTiling::OPTIMAL
+                vk::ImageTiling::OPTIMAL
             } else if format_properties.linear_tiling_features.contains(features) {
-                ash::vk::ImageTiling::LINEAR
+                vk::ImageTiling::LINEAR
             } else {
                 return Err(Error::NotImplemented); // TODO: add error type?
             }
         };
 
-        let image_create_info = ash::vk::ImageCreateInfo {
+        let image_create_info = vk::ImageCreateInfo {
             image_type: create_info.image_type,
             format: create_info.format,
             mip_levels: create_info.mip_levels,
-            extent: ash::vk::Extent3D {
+            extent: vk::Extent3D {
                 width: create_info.width,
                 height: create_info.height,
                 depth: create_info.depth,
             },
             usage: create_info.usage,
             array_layers: create_info.array_layers,
-            samples: ash::vk::SampleCountFlags::TYPE_1,
+            samples: vk::SampleCountFlags::TYPE_1,
             tiling,
-            sharing_mode: ash::vk::SharingMode::EXCLUSIVE,
-            initial_layout: ash::vk::ImageLayout::UNDEFINED,
+            sharing_mode: vk::SharingMode::EXCLUSIVE,
+            initial_layout: vk::ImageLayout::UNDEFINED,
             ..Default::default()
         };
 
@@ -151,17 +153,17 @@ impl Image {
                 b: vk::ComponentSwizzle::IDENTITY,
                 a: vk::ComponentSwizzle::IDENTITY,
             },
-            subresource_range: ash::vk::ImageSubresourceRange {
+            subresource_range: vk::ImageSubresourceRange {
                 aspect_mask: {
-                    let mut mask = ash::vk::ImageAspectFlags::empty();
+                    let mut mask = vk::ImageAspectFlags::empty();
                     if is_depth_format(create_info.format) {
-                        mask |= ash::vk::ImageAspectFlags::DEPTH;
+                        mask |= vk::ImageAspectFlags::DEPTH;
                     }
                     if is_stencil_format(create_info.format) {
-                        mask |= ash::vk::ImageAspectFlags::STENCIL;
+                        mask |= vk::ImageAspectFlags::STENCIL;
                     }
-                    if mask == ash::vk::ImageAspectFlags::empty() {
-                        mask = ash::vk::ImageAspectFlags::COLOR;
+                    if mask == vk::ImageAspectFlags::empty() {
+                        mask = vk::ImageAspectFlags::COLOR;
                     }
                     mask
                 },
@@ -218,6 +220,9 @@ impl Image {
             width: create_info.width,
             height: create_info.height,
             depth: create_info.depth,
+            format: create_info.format,
+            layers: create_info.array_layers,
+            layout: vk::ImageLayout::UNDEFINED,
         })
     }
 }
