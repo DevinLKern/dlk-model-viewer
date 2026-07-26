@@ -1,7 +1,7 @@
 use ash::vk;
 use vulkan::device::SharedDeviceRef;
 
-use crate::{CameraUBO, InstanceData, Result};
+use crate::{CameraUBO, ImageHandle, InstanceData, Renderer, Result};
 
 pub const MAX_FRAME_COUNT: u64 = 3;
 pub const MAX_CAMERA_DATA_COUNT: u64 = 32;
@@ -381,8 +381,9 @@ impl Drop for FrameData {
 pub struct FrameContext {
     device: SharedDeviceRef,
     swapchain: vulkan::Swapchain,
-    depth_images: Box<[vulkan::Image]>,
     depth_format: vk::Format,
+    // (swapchain, depth)
+    images: Vec<(ImageHandle, ImageHandle)>,
     frames: [FrameData; MAX_FRAME_COUNT as usize],
     pub index: usize,
     image_index: usize,
@@ -465,37 +466,15 @@ impl FrameContext {
 
         return Some(last_range);
     }
-    pub fn new(device: SharedDeviceRef, window: &winit::window::Window) -> Result<Self> {
-        let swapchain = vulkan::Swapchain::new(device.clone(), window)
-            .inspect_err(|e| tracing::error!("{e}"))?;
-
-        let depth_stencil_format = device
-            .find_viable_depth_stencil_format()
-            .ok_or(vulkan::result::Error::CouldNotDetermineFormat)?;
-
-        let depth_images = {
-            let mut images = Vec::with_capacity(swapchain.get_image_count());
-
-            let depth_image_create_info = vulkan::image::ImageCreateInfo {
-                memory_property_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
-                mip_levels: 1,
-                image_type: vk::ImageType::TYPE_2D,
-                format: depth_stencil_format,
-                width: swapchain.get_extent().width,
-                height: swapchain.get_extent().height,
-                depth: 1,
-                usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
-                array_layers: 1,
-            };
-
-            for _ in 0..swapchain.get_image_count() {
-                let image = vulkan::image::Image::new(device.clone(), &depth_image_create_info)
-                    .inspect_err(|e| tracing::error!("{}", e))?;
-                images.push(image);
-            }
-
-            images.into_boxed_slice()
-        };
+    pub fn destroy_images(&mut self, renderer: &mut Renderer) {
+        while let Some((swapchain, depth)) = self.images.pop() {
+            renderer.destroy_image(swapchain);
+            renderer.destroy_image(depth);
+        }
+    }
+    // this is unsafe because the handles to images need to get released with renderer.destroy_image
+    pub unsafe fn new(renderer: &mut Renderer, window: &winit::window::Window) -> Result<Self> {
+        let device = renderer.device.clone();
 
         let mut frames = Vec::<FrameData>::with_capacity(MAX_FRAME_COUNT as usize);
         for _ in 0..MAX_FRAME_COUNT {
@@ -505,12 +484,63 @@ impl FrameContext {
         let frames: [FrameData; MAX_FRAME_COUNT as usize] =
             frames.try_into().expect("Incorrect number of frames");
 
+        let swapchain = vulkan::Swapchain::new(device.clone(), window)
+            .inspect_err(|e| tracing::error!("{e}"))?;
+
+        let mut swapchain_images = {
+            let raw_images = unsafe { swapchain.get_images() }?;
+            let mut images = Vec::with_capacity(raw_images.len());
+            for vk_img in raw_images {
+                let img = unsafe { renderer.create_swapchain_image(vk_img, &swapchain) }?;
+                images.push(img);
+            }
+            images
+        };
+
+        let depth_format = device.find_viable_depth_stencil_format().ok_or_else(|| {
+            while let Some(img) = swapchain_images.pop() {
+                renderer.destroy_image(img);
+            }
+            vulkan::result::Error::CouldNotDetermineFormat
+        })?;
+
+        let depth_images = {
+            let mut images = Vec::with_capacity(swapchain_images.len());
+
+            let depth_image_create_info = vulkan::image::ImageCreateInfo {
+                memory_property_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                mip_levels: 1,
+                image_type: vk::ImageType::TYPE_2D,
+                format: depth_format,
+                width: swapchain.extent().width,
+                height: swapchain.extent().height,
+                depth: 1,
+                usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+                array_layers: 1,
+            };
+
+            for _ in 0..swapchain_images.len() {
+                let img = renderer
+                    .create_image(&depth_image_create_info)
+                    .inspect_err(|_| {
+                        while let Some(img) = swapchain_images.pop() {
+                            renderer.destroy_image(img);
+                        }
+                    })?;
+                images.push(img);
+            }
+
+            images
+        };
+
+        let images = swapchain_images.into_iter().zip(depth_images.into_iter());
+
         Ok(Self {
             device,
             swapchain,
             frames,
-            depth_images,
-            depth_format: depth_stencil_format,
+            depth_format,
+            images: images.collect(),
             index: 0,
             image_index: 0,
         })
@@ -528,7 +558,7 @@ impl Drop for FrameContext {
 impl FrameContext {
     #[inline]
     pub fn get_color_format(&self) -> vk::Format {
-        self.swapchain.get_format()
+        self.swapchain.format()
     }
     #[inline]
     pub fn depth_format(&self) -> vk::Format {
@@ -545,11 +575,11 @@ impl FrameContext {
         &mut self.frames[self.index]
     }
     pub fn swapchain_extent(&self) -> vk::Extent2D {
-        *self.swapchain.get_extent()
+        *self.swapchain.extent()
     }
-    pub fn begin_drawing(&mut self) -> Result<()> {
+    pub fn begin_drawing(&mut self, renderer: &Renderer) -> Result<()> {
         // Acquire image
-        let (swapchain_image_index, swapchain_image_view) = {
+        let (swapchain_image_index, swapchain_image, depth_image) = {
             let frame = self.get_current_frame();
 
             unsafe {
@@ -561,12 +591,15 @@ impl FrameContext {
                 self.swapchain
                     .acquire_next_image(frame.image_acquired, vk::Fence::null())?
             };
+            let (swapchain_image, depth_image) = self.images[image_index as usize];
+            let (swapchain_image, depth_image) = (
+                renderer.get_image(swapchain_image).unwrap(),
+                renderer.get_image(depth_image).unwrap(),
+            );
 
             unsafe { self.device.reset_fences(&[frame.command_buffer_executed])? };
-            (
-                image_index as usize,
-                self.swapchain.get_image_view(image_index as usize).unwrap(),
-            )
+
+            (image_index as usize, swapchain_image, depth_image)
         };
 
         self.image_index = swapchain_image_index;
@@ -595,7 +628,7 @@ impl FrameContext {
                 dst_access_mask: vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
                 old_layout: vk::ImageLayout::UNDEFINED,
                 new_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                image: *self.swapchain.get_image(swapchain_image_index).unwrap(),
+                image: swapchain_image.handle,
                 subresource_range: vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
                     base_mip_level: 0,
@@ -612,7 +645,7 @@ impl FrameContext {
                 dst_access_mask: vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
                 old_layout: vk::ImageLayout::UNDEFINED,
                 new_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                image: self.depth_images[swapchain_image_index].handle,
+                image: depth_image.handle,
                 subresource_range: vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL,
                     base_mip_level: 0,
@@ -639,7 +672,7 @@ impl FrameContext {
         // begin dynamic rendering
         {
             let color_attachment_info = vk::RenderingAttachmentInfo {
-                image_view: *swapchain_image_view,
+                image_view: swapchain_image.view,
                 image_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                 load_op: vk::AttachmentLoadOp::CLEAR,
                 store_op: vk::AttachmentStoreOp::STORE,
@@ -651,7 +684,6 @@ impl FrameContext {
                 ..Default::default()
             };
 
-            let depth_image = self.depth_images.get(swapchain_image_index).unwrap();
             let depth_attachment_info = ash::vk::RenderingAttachmentInfo {
                 image_view: depth_image.view,
                 image_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
@@ -669,7 +701,7 @@ impl FrameContext {
             let rendering_info = ash::vk::RenderingInfo {
                 render_area: vk::Rect2D {
                     offset: vk::Offset2D { x: 0, y: 0 },
-                    extent: *self.swapchain.get_extent(),
+                    extent: *self.swapchain.extent(),
                 },
                 layer_count: 1,
                 view_mask: 0,
@@ -688,7 +720,7 @@ impl FrameContext {
 
         Ok(())
     }
-    pub fn end_draw(&mut self) -> Result<()> {
+    pub fn end_draw(&mut self, renderer: &Renderer) -> Result<()> {
         let frame = self.get_current_frame();
 
         // End rendering & end command buffer
@@ -698,6 +730,10 @@ impl FrameContext {
 
         // Barrier to transition for pres
         {
+            let swapchain_image = {
+                let (swapchain, _) = self.images[self.image_index];
+                renderer.get_image(swapchain).unwrap()
+            };
             let dependencies = [vk::ImageMemoryBarrier2 {
                 src_stage_mask: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
                 src_access_mask: vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
@@ -705,7 +741,7 @@ impl FrameContext {
                 dst_access_mask: vk::AccessFlags2::empty(),
                 old_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                 new_layout: vk::ImageLayout::PRESENT_SRC_KHR,
-                image: *self.swapchain.get_image(self.image_index).unwrap(),
+                image: swapchain_image.handle,
                 subresource_range: vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
                     base_mip_level: 0,
@@ -772,7 +808,7 @@ impl FrameContext {
         }
 
         self.index += 1;
-        let max_frames = match self.swapchain.get_present_mode() {
+        let max_frames = match self.swapchain.present_mode() {
             vk::PresentModeKHR::MAILBOX => 3,
             _ => 2,
         };

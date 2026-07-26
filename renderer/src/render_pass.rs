@@ -45,7 +45,7 @@ impl Drop for MainRenderPass {
 impl MainRenderPass {
     pub fn new(scene: &Scene, renderer: &mut Renderer) -> Result<Self> {
         let device = renderer.device.clone();
-        
+
         let descriptor_set_layout_bindings: &[&[DescriptorSetLayoutBindingInfo]] = &[
             // SET 0 - per frame
             &[
@@ -476,7 +476,7 @@ impl Drop for GridRenderPass {
 impl GridRenderPass {
     pub fn new(scene: &Scene, renderer: &mut Renderer) -> Result<Self> {
         let device = renderer.device.clone();
-        
+
         let descriptor_set_layout_bindings: &[&[DescriptorSetLayoutBindingInfo]] = &[
             // SET 0 - per frame
             &[DescriptorSetLayoutBindingInfo {

@@ -19,6 +19,7 @@ use ash::vk;
 use slotmap::SlotMap;
 use std::rc::Rc;
 use std::u64;
+use vulkan::ImageCreateInfo;
 use vulkan::SharedDeviceRef;
 
 unsafe extern "system" fn vulkan_debug_callback(
@@ -316,7 +317,34 @@ impl Renderer {
             Ok(uniform_bv.buffer.unmap())
         }
     }
+    #[inline]
+    pub(crate) unsafe fn create_swapchain_image(
+        &mut self,
+        image: vk::Image,
+        swapchain: &vulkan::Swapchain,
+    ) -> result::Result<ImageHandle> {
+        let image = unsafe {
+            vulkan::Image::new_swapchain_image(
+                self.device.clone(),
+                image,
+                swapchain.format(),
+                vk::ImageLayout::PRESENT_SRC_KHR,
+                swapchain.extent().width,
+                swapchain.extent().height,
+            )
+        }?;
+
+        Ok(self.images.insert(image))
+    }
+    #[inline]
     pub fn create_image(
+        &mut self,
+        image_create_info: &ImageCreateInfo,
+    ) -> result::Result<ImageHandle> {
+        let image = vulkan::Image::new(self.device.clone(), &image_create_info)?;
+        Ok(self.images.insert(image))
+    }
+    pub fn create_and_populate_image(
         &mut self,
         image_data: image::DynamicImage,
     ) -> result::Result<ImageHandle> {
@@ -360,10 +388,7 @@ impl Renderer {
                 flags: vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
                 ..Default::default()
             };
-            unsafe {
-                self.device
-                    .begin_command_buffer(cmd, &begin_info)
-            }?;
+            unsafe { self.device.begin_command_buffer(cmd, &begin_info) }?;
         }
 
         // transfer commands here
@@ -395,10 +420,7 @@ impl Renderer {
                 ..Default::default()
             };
 
-            unsafe {
-                self.device
-                    .cmd_pipeline_barrier2(cmd, &dependency_info)
-            };
+            unsafe { self.device.cmd_pipeline_barrier2(cmd, &dependency_info) };
 
             let regions = [vk::BufferImageCopy2 {
                 buffer_offset: 0,
@@ -459,10 +481,7 @@ impl Renderer {
                 ..Default::default()
             };
 
-            unsafe {
-                self.device
-                    .cmd_pipeline_barrier2(cmd, &dependency_info)
-            };
+            unsafe { self.device.cmd_pipeline_barrier2(cmd, &dependency_info) };
         }
 
         unsafe {
@@ -478,25 +497,24 @@ impl Renderer {
             self.device
                 .queue_submit(self.device.queue, &submit_info, vk::Fence::null())?;
             self.device.device_wait_idle()?;
-            self.device
-                .free_command_buffers(self.command_pool, &[cmd]);
+            self.device.free_command_buffers(self.command_pool, &[cmd]);
             image.layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
         }
 
         Ok(self.images.insert(image))
     }
     #[inline]
-    fn get_image(&self, handle: ImageHandle) -> Option<&vulkan::Image> {
+    pub fn get_image(&self, handle: ImageHandle) -> Option<&vulkan::Image> {
         self.images.get(handle)
     }
     #[inline]
     #[allow(unused)]
-    fn get_image_mut(&mut self, handle: ImageHandle) -> Option<&mut vulkan::Image> {
+    pub fn get_image_mut(&mut self, handle: ImageHandle) -> Option<&mut vulkan::Image> {
         self.images.get_mut(handle)
     }
     #[inline]
     #[allow(unused)]
-    fn destroy_image(&mut self, handle: ImageHandle) -> bool {
+    pub fn destroy_image(&mut self, handle: ImageHandle) -> bool {
         self.images.remove(handle).is_some()
     }
     pub fn create_mesh_arena(

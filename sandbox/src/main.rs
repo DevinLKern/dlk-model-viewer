@@ -148,7 +148,7 @@ impl Application {
         let default_texture_index = {
             let image =
                 image::load_from_memory_with_format(DEFAULT_IMAGE, image::ImageFormat::Png)?;
-            let image = renderer.create_image(image)?;
+            let image = renderer.create_and_populate_image(image)?;
             scene_builder.add_image(renderer.repeat_sampler(), image)
         };
 
@@ -192,7 +192,7 @@ impl Application {
                     };
 
                     let image = image::open(&path).inspect_err(|e| tracing::error!("{e}"))?;
-                    let image = renderer.create_image(image)?;
+                    let image = renderer.create_and_populate_image(image)?;
                     let image_index = scene_builder.add_image(renderer.repeat_sampler(), image);
 
                     texture_path_to_index.insert(texture.file_path.clone(), image_index);
@@ -436,11 +436,9 @@ impl Application {
         let main_scene =
             scene_builder.build(renderer.device.clone(), renderer.mesh_arenas_mut())?;
 
-        let main_pass =
-            renderer::MainRenderPass::new(&main_scene, &mut renderer)?;
+        let main_pass = renderer::MainRenderPass::new(&main_scene, &mut renderer)?;
 
-        let grid_pass =
-            renderer::GridRenderPass::new(&main_scene, &mut renderer)?;
+        let grid_pass = renderer::GridRenderPass::new(&main_scene, &mut renderer)?;
 
         Ok(Self {
             last: std::time::Instant::now(),
@@ -657,29 +655,42 @@ impl Application {
                 std::mem::size_of::<renderer::PointLightsUBO>() as u64;
             const POINT_LIGHT_SIZE: u64 = std::mem::size_of::<renderer::PointLightData>() as u64;
 
-            let mut ctx = renderer::FrameContext::new(self.renderer.device.clone(), &window)?;
+            let mut ctx = unsafe { renderer::FrameContext::new(&mut self.renderer, &window) }?;
             self.camera_data_range = ctx
                 .reserve_uniform_data(CAMERA_SIZE, CAMERA_SIZE)
-                .ok_or(renderer::Error::BufferCapacityExceeded)?;
+                .ok_or_else(|| {
+                    ctx.destroy_images(&mut self.renderer);
+                    renderer::Error::BufferCapacityExceeded
+                })?;
             self.instance_data_range = ctx
                 .reserve_storage_data(
                     renderer::MAX_INSTANCE_DATA_COUNT * INSTANCE_SIZE,
                     INSTANCE_SIZE,
                 )
-                .ok_or(renderer::Error::BufferCapacityExceeded)?;
+                .ok_or_else(|| {
+                    ctx.destroy_images(&mut self.renderer);
+                    renderer::Error::BufferCapacityExceeded
+                })?;
             self.point_lights_ubo_data_range = ctx
                 .reserve_storage_data(
                     POINT_LIGHTS_UBO_SIZE + (renderer::MAX_POINT_LIGHT_COUNT * POINT_LIGHT_SIZE),
                     POINT_LIGHT_SIZE,
                 )
-                .ok_or(renderer::Error::BufferCapacityExceeded)?;
+                .ok_or_else(|| {
+                    ctx.destroy_images(&mut self.renderer);
+                    renderer::Error::BufferCapacityExceeded
+                })?;
 
-            self.main_pass.update_context(
-                &mut ctx,
-                &self.camera_data_range,
-                &self.instance_data_range,
-                &self.point_lights_ubo_data_range,
-            )?;
+            self.main_pass
+                .update_context(
+                    &mut ctx,
+                    &self.camera_data_range,
+                    &self.instance_data_range,
+                    &self.point_lights_ubo_data_range,
+                )
+                .inspect_err(|_| {
+                    ctx.destroy_images(&mut self.renderer);
+                })?;
             self.grid_pass.update_context(&ctx, &self.camera_data_range);
 
             ctx
@@ -694,8 +705,8 @@ impl Application {
             self.orbit_camera.set_aspect_ratio(aspect_ratio);
         };
 
-        if let Some((_old_context, _)) = self.windows.insert(window_id, (context, window)) {
-            //
+        if let Some((mut old_context, _)) = self.windows.insert(window_id, (context, window)) {
+            old_context.destroy_images(&mut self.renderer);
         }
 
         Ok(())
@@ -739,34 +750,47 @@ impl Application {
                         std::mem::size_of::<renderer::PointLightData>() as u64;
 
                     let mut ctx =
-                        renderer::FrameContext::new(self.renderer.device.clone(), &window)?;
+                        unsafe { renderer::FrameContext::new(&mut self.renderer, &window) }?;
                     self.camera_data_range = ctx
                         .reserve_uniform_data(CAMERA_SIZE, CAMERA_SIZE)
-                        .ok_or(renderer::Error::BufferCapacityExceeded)?;
+                        .ok_or_else(|| {
+                            ctx.destroy_images(&mut self.renderer);
+                            renderer::Error::BufferCapacityExceeded
+                        })?;
                     self.instance_data_range = ctx
                         .reserve_storage_data(
                             renderer::MAX_INSTANCE_DATA_COUNT * INSTANCE_SIZE,
                             INSTANCE_SIZE,
                         )
-                        .ok_or(renderer::Error::BufferCapacityExceeded)?;
+                        .ok_or_else(|| {
+                            ctx.destroy_images(&mut self.renderer);
+                            renderer::Error::BufferCapacityExceeded
+                        })?;
                     self.point_lights_ubo_data_range = ctx
                         .reserve_storage_data(
                             POINT_LIGHTS_UBO_SIZE
                                 + (renderer::MAX_POINT_LIGHT_COUNT * POINT_LIGHT_SIZE),
                             POINT_LIGHT_SIZE,
                         )
-                        .ok_or(renderer::Error::BufferCapacityExceeded)?;
-
-                    self.main_pass.update_context(
-                        &mut ctx,
-                        &self.camera_data_range,
-                        &self.instance_data_range,
-                        &self.point_lights_ubo_data_range,
-                    )?;
+                        .ok_or_else(|| {
+                            ctx.destroy_images(&mut self.renderer);
+                            renderer::Error::BufferCapacityExceeded
+                        })?;
+                    self.main_pass
+                        .update_context(
+                            &mut ctx,
+                            &self.camera_data_range,
+                            &self.instance_data_range,
+                            &self.point_lights_ubo_data_range,
+                        )
+                        .inspect_err(|_| {
+                            ctx.destroy_images(&mut self.renderer);
+                        })?;
                     self.grid_pass.update_context(&ctx, &self.camera_data_range);
 
                     ctx
                 };
+                context.destroy_images(&mut self.renderer);
                 *context = new_context;
 
                 return Ok(false);
@@ -793,7 +817,6 @@ impl Application {
 
                 let swapchain_extent = context.swapchain_extent();
 
-                // context.get_current_frame_mut().allocator_mut().reset();
                 let cmd = context.get_current_frame().command_buffer();
 
                 // PART 1 - MODEL
@@ -803,7 +826,7 @@ impl Application {
                     .allocator_mut()
                     .reset_indirect();
 
-                context.begin_drawing()?;
+                context.begin_drawing(&self.renderer)?;
 
                 let mut indirect_command_data =
                     Vec::<vk::DrawIndexedIndirectCommand>::with_capacity(64);
@@ -995,7 +1018,7 @@ impl Application {
                     stride,
                 )?;
 
-                context.end_draw()?;
+                context.end_draw(&self.renderer)?;
 
                 window.request_redraw();
 

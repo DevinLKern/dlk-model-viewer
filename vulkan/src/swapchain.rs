@@ -8,8 +8,6 @@ pub struct Swapchain {
     swapchain: vk::SwapchainKHR,
     extent: vk::Extent2D,
     format: vk::Format,
-    images: Box<[vk::Image]>,
-    image_views: Box<[vk::ImageView]>,
     present_mode: vk::PresentModeKHR,
 }
 
@@ -79,79 +77,34 @@ impl Swapchain {
             unsafe { device.create_swapchain(&swapchain_create_info) }?
         };
 
-        let swapchain_images =
-            unsafe { device.get_swapchain_images(swapchain) }?.into_boxed_slice();
-
-        let mut views = Vec::with_capacity(swapchain_images.len());
-        for image in swapchain_images.iter() {
-            let image_view_create_info = ash::vk::ImageViewCreateInfo {
-                image: *image,
-                view_type: ash::vk::ImageViewType::TYPE_2D,
-                format: surface_format.format,
-                components: ash::vk::ComponentMapping {
-                    r: ash::vk::ComponentSwizzle::IDENTITY,
-                    g: ash::vk::ComponentSwizzle::IDENTITY,
-                    b: ash::vk::ComponentSwizzle::IDENTITY,
-                    a: ash::vk::ComponentSwizzle::IDENTITY,
-                },
-                subresource_range: ash::vk::ImageSubresourceRange {
-                    aspect_mask: ash::vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                },
-                ..Default::default()
-            };
-
-            let view = unsafe { device.create_image_view(&image_view_create_info) }?;
-            views.push(view);
-        }
-        let views = views.into_boxed_slice();
-
         Ok(Swapchain {
             device,
             surface,
             swapchain,
             format: surface_format.format,
             extent: image_extent,
-            images: swapchain_images,
-            image_views: views,
             present_mode,
         })
     }
 
     #[inline]
-    pub fn get_extent(&self) -> &vk::Extent2D {
+    pub fn extent(&self) -> &vk::Extent2D {
         &self.extent
     }
-
     #[inline]
-    pub fn get_image_count(&self) -> usize {
-        self.images.len()
-    }
-
-    #[inline]
-    pub fn get_image_view(&self, index: usize) -> Option<&vk::ImageView> {
-        self.image_views.get(index)
-    }
-
-    #[inline]
-    pub fn get_image(&self, index: usize) -> Option<&vk::Image> {
-        self.images.get(index)
-    }
-
-    #[inline]
-    pub fn get_surface(&self) -> vk::SurfaceKHR {
+    pub fn surface(&self) -> vk::SurfaceKHR {
         self.surface
     }
-
     #[inline]
-    pub fn get_format(&self) -> vk::Format {
+    pub fn format(&self) -> vk::Format {
         self.format
     }
-
-    pub fn get_present_mode(&self) -> vk::PresentModeKHR {
+    #[inline]
+    pub unsafe fn get_images(&self) -> Result<Vec<vk::Image>> {
+        let images = unsafe { self.device.get_swapchain_images(self.swapchain) }?;
+        Ok(images)
+    }
+    pub fn present_mode(&self) -> vk::PresentModeKHR {
         self.present_mode
     }
 
@@ -175,10 +128,6 @@ impl Swapchain {
 impl Drop for Swapchain {
     fn drop(&mut self) {
         unsafe {
-            for image_view in self.image_views.iter().rev() {
-                self.device.destroy_image_view(*image_view);
-            }
-
             self.device.destroy_swapchain(self.swapchain);
 
             self.device.destroy_surface(self.surface);

@@ -4,6 +4,11 @@ use crate::result::{Error, Result};
 
 use ash::vk;
 
+enum ImageOwnership {
+    Swapchain,
+    Renderer,
+}
+
 pub struct Image {
     device: SharedDeviceRef,
     pub handle: vk::Image,
@@ -15,6 +20,8 @@ pub struct Image {
     pub depth: u32,
     pub layers: u32,
     pub layout: vk::ImageLayout,
+
+    ownership: ImageOwnership,
 }
 
 #[allow(dead_code)]
@@ -52,6 +59,51 @@ fn is_stencil_format(format: ash::vk::Format) -> bool {
 
 #[allow(dead_code)]
 impl Image {
+    pub unsafe fn new_swapchain_image(
+        device: SharedDeviceRef,
+        image: vk::Image,
+        format: vk::Format,
+        layout: vk::ImageLayout,
+        width: u32,
+        height: u32,
+    ) -> Result<Self> {
+        let view = {
+            let image_view_create_info = vk::ImageViewCreateInfo {
+                image,
+                view_type: vk::ImageViewType::TYPE_2D,
+                format,
+                components: vk::ComponentMapping {
+                    r: vk::ComponentSwizzle::IDENTITY,
+                    g: vk::ComponentSwizzle::IDENTITY,
+                    b: vk::ComponentSwizzle::IDENTITY,
+                    a: vk::ComponentSwizzle::IDENTITY,
+                },
+                subresource_range: vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
+                ..Default::default()
+            };
+            unsafe { device.create_image_view(&image_view_create_info) }?
+        };
+
+        Ok(Image {
+            device,
+            handle: image,
+            view,
+            memory: vk::DeviceMemory::null(),
+            format,
+            width,
+            height,
+            depth: 1,
+            layers: 1,
+            layout,
+            ownership: ImageOwnership::Swapchain,
+        })
+    }
     pub fn new(device: SharedDeviceRef, create_info: &ImageCreateInfo) -> Result<Self> {
         let tiling = {
             let format_properties =
@@ -223,6 +275,7 @@ impl Image {
             format: create_info.format,
             layers: create_info.array_layers,
             layout: vk::ImageLayout::UNDEFINED,
+            ownership: ImageOwnership::Renderer,
         })
     }
 }
@@ -230,9 +283,11 @@ impl Image {
 impl Drop for Image {
     fn drop(&mut self) {
         unsafe {
-            self.device.free_memory(self.memory);
             self.device.destroy_image_view(self.view);
-            self.device.destroy_image(self.handle);
+            if let ImageOwnership::Renderer = self.ownership {
+                self.device.free_memory(self.memory);
+                self.device.destroy_image(self.handle);
+            }
         }
     }
 }

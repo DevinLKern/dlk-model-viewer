@@ -92,8 +92,8 @@ vec3 calc_point_light(PointLightData light, MaterialUBO mat, vec3 view_dir) {
     }
 
     float distance = length(v_pos - light.position);
-    diffuse *= 1.0 / distance * distance;
-    specular *= 1.0 / distance * distance;
+    diffuse /= distance * distance;
+    specular /= distance * distance;
 
     return (diffuse + specular) * light.color.a;
 }
