@@ -52,7 +52,6 @@ struct Application {
     fps_controller: FpsCameraController,
     orbit_camera: Camera,
     orbit_controller: OrbitCameraController,
-    arrow_camera: Camera,
     windows: HashMap<WindowId, (renderer::FrameContext, Window)>,
     renderer: renderer::Renderer,
     camera_data_range: AllocationRange,
@@ -359,7 +358,7 @@ impl Application {
 
         let (orbit_camera, orbit_controller) = {
             let mut controller = OrbitCameraController::new(model_transform.position);
-            let mut camera = Camera::orthographic(1.25, 1.25, 100.0);
+            let mut camera = Camera::orthographic(1.25, 1.25, 20.0);
 
             camera
                 .transform
@@ -453,7 +452,6 @@ impl Application {
             fps_controller,
             orbit_camera,
             orbit_controller,
-            arrow_camera: Camera::orthographic(1.5, 1.5, 10.0),
             windows: HashMap::new(),
             camera_data_range: AllocationRange { offset: 0, size: 0 },
             instance_data_range: AllocationRange { offset: 0, size: 0 },
@@ -601,19 +599,6 @@ impl Application {
                     CameraInUse::Orbit => self.orbit_controller.rotate(dx, dy),
                 }
             }
-        }
-
-        {
-            self.arrow_camera.transform.position = Vec3::ZERO;
-            let current_camera = match self.camera_in_use {
-                CameraInUse::Fps => &self.fps_camera,
-                CameraInUse::Orbit => &self.orbit_camera,
-            };
-            self.arrow_camera.transform.orientation =
-                current_camera.transform.orientation.inverse();
-            self.arrow_camera
-                .transform
-                .translate_local(Vec3::ZERO.sub(ENGINE_FORWARDS));
         }
 
         let now = std::time::Instant::now();
@@ -826,7 +811,8 @@ impl Application {
                     .allocator_mut()
                     .reset_indirect();
 
-                context.begin_drawing(&self.renderer)?;
+                let target = context.get_swapchain_render_target()?;
+                target.begin_rendering(&mut self.renderer, cmd)?;
 
                 let mut indirect_command_data =
                     Vec::<vk::DrawIndexedIndirectCommand>::with_capacity(64);
@@ -958,7 +944,7 @@ impl Application {
                         offset: vk::Offset2D { x: 0, y: 0 },
                         extent: swapchain_extent,
                     };
-                    let viewport = ash::vk::Viewport {
+                    let viewport = vk::Viewport {
                         x: 0.0,
                         y: 0.0,
                         width: scissor.extent.width as f32,
@@ -1018,7 +1004,8 @@ impl Application {
                     stride,
                 )?;
 
-                context.end_draw(&self.renderer)?;
+                target.end_rendering(&mut self.renderer, cmd)?;
+                context.submit()?;
 
                 window.request_redraw();
 

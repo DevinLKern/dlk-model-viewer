@@ -4,40 +4,40 @@ use crate::result::{Error, Result};
 
 use ash::vk;
 
-enum ImageOwnership {
+enum ImageStorage {
+    Owned(vk::DeviceMemory),
     Swapchain,
-    Renderer,
 }
 
 pub struct Image {
     device: SharedDeviceRef,
     pub handle: vk::Image,
     pub view: vk::ImageView,
-    pub memory: vk::DeviceMemory,
+    memory: ImageStorage,
     pub format: vk::Format,
     pub width: u32,
     pub height: u32,
     pub depth: u32,
-    pub layers: u32,
     pub layout: vk::ImageLayout,
-
-    ownership: ImageOwnership,
+    pub layer_count: u32,
+    pub mip_level_count: u32,
 }
 
 #[allow(dead_code)]
 pub struct ImageCreateInfo {
-    pub memory_property_flags: ash::vk::MemoryPropertyFlags,
-    pub mip_levels: u32,
-    pub image_type: ash::vk::ImageType,
+    pub memory_property_flags: vk::MemoryPropertyFlags,
+    pub image_type: vk::ImageType,
     pub format: vk::Format,
     pub width: u32,
     pub height: u32,
     pub depth: u32,
     pub usage: ash::vk::ImageUsageFlags,
-    pub array_layers: u32,
+    pub mip_level_count: u32,
+    pub layer_count: u32,
+    pub level_count: u32,
 }
 
-fn is_depth_format(format: ash::vk::Format) -> bool {
+pub fn is_depth_format(format: ash::vk::Format) -> bool {
     matches!(
         format,
         ash::vk::Format::D16_UNORM
@@ -47,7 +47,7 @@ fn is_depth_format(format: ash::vk::Format) -> bool {
             | ash::vk::Format::D32_SFLOAT_S8_UINT
     )
 }
-fn is_stencil_format(format: ash::vk::Format) -> bool {
+pub fn is_stencil_format(format: ash::vk::Format) -> bool {
     matches!(
         format,
         ash::vk::Format::S8_UINT
@@ -94,14 +94,14 @@ impl Image {
             device,
             handle: image,
             view,
-            memory: vk::DeviceMemory::null(),
+            memory: ImageStorage::Swapchain,
             format,
             width,
             height,
             depth: 1,
-            layers: 1,
+            layer_count: 1,
             layout,
-            ownership: ImageOwnership::Swapchain,
+            mip_level_count: 1,
         })
     }
     pub fn new(device: SharedDeviceRef, create_info: &ImageCreateInfo) -> Result<Self> {
@@ -161,14 +161,14 @@ impl Image {
         let image_create_info = vk::ImageCreateInfo {
             image_type: create_info.image_type,
             format: create_info.format,
-            mip_levels: create_info.mip_levels,
+            mip_levels: create_info.mip_level_count,
             extent: vk::Extent3D {
                 width: create_info.width,
                 height: create_info.height,
                 depth: create_info.depth,
             },
             usage: create_info.usage,
-            array_layers: create_info.array_layers,
+            array_layers: create_info.layer_count,
             samples: vk::SampleCountFlags::TYPE_1,
             tiling,
             sharing_mode: vk::SharingMode::EXCLUSIVE,
@@ -182,14 +182,14 @@ impl Image {
             image,
             view_type: match create_info.image_type {
                 vk::ImageType::TYPE_1D => {
-                    if create_info.array_layers > 1 {
+                    if create_info.layer_count > 1 {
                         vk::ImageViewType::TYPE_1D_ARRAY
                     } else {
                         vk::ImageViewType::TYPE_1D
                     }
                 }
                 vk::ImageType::TYPE_2D => {
-                    if create_info.array_layers > 1 {
+                    if create_info.layer_count > 1 {
                         vk::ImageViewType::TYPE_2D_ARRAY
                     } else {
                         vk::ImageViewType::TYPE_2D
@@ -220,9 +220,9 @@ impl Image {
                     mask
                 },
                 base_mip_level: 0,
-                level_count: create_info.mip_levels,
+                level_count: create_info.mip_level_count,
                 base_array_layer: 0,
-                layer_count: create_info.array_layers,
+                layer_count: create_info.layer_count,
             },
             ..Default::default()
         };
@@ -268,14 +268,14 @@ impl Image {
             device,
             handle: image,
             view: image_view,
-            memory,
+            memory: ImageStorage::Owned(memory),
             width: create_info.width,
             height: create_info.height,
             depth: create_info.depth,
             format: create_info.format,
-            layers: create_info.array_layers,
+            layer_count: create_info.layer_count,
             layout: vk::ImageLayout::UNDEFINED,
-            ownership: ImageOwnership::Renderer,
+            mip_level_count: create_info.mip_level_count,
         })
     }
 }
@@ -284,8 +284,8 @@ impl Drop for Image {
     fn drop(&mut self) {
         unsafe {
             self.device.destroy_image_view(self.view);
-            if let ImageOwnership::Renderer = self.ownership {
-                self.device.free_memory(self.memory);
+            if let ImageStorage::Owned(memory) = self.memory {
+                self.device.free_memory(memory);
                 self.device.destroy_image(self.handle);
             }
         }

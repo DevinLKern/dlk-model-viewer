@@ -395,7 +395,7 @@ impl MainRenderPass {
             (pipeline, layout)
         };
 
-        let current_frame_index = ctx.index;
+        let current_frame_index = ctx.frame_index;
         let frame = ctx.get_current_frame_mut();
 
         let cmd = frame.command_buffer();
@@ -697,7 +697,7 @@ impl GridRenderPass {
             (pipeline, layout)
         };
 
-        let current_frame_index = ctx.index;
+        let current_frame_index = ctx.frame_index;
         let frame = ctx.get_current_frame_mut();
         let cmd = frame.command_buffer();
 

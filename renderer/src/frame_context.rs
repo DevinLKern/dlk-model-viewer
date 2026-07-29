@@ -1,12 +1,215 @@
 use ash::vk;
 use vulkan::device::SharedDeviceRef;
 
-use crate::{CameraUBO, ImageHandle, InstanceData, Renderer, Result};
+use crate::{CameraUBO, Error, ImageHandle, InstanceData, Renderer, Result};
 
 pub const MAX_FRAME_COUNT: u64 = 3;
 pub const MAX_CAMERA_DATA_COUNT: u64 = 32;
 pub const MAX_INSTANCE_DATA_COUNT: u64 = 128;
 pub const MAX_INDIRECT_COMMAND_DATA_COUNT: u64 = MAX_INSTANCE_DATA_COUNT * 4;
+
+#[allow(dead_code)]
+pub struct Attachment {
+    pub img: ImageHandle,
+    pub load_op: vk::AttachmentLoadOp,
+    pub store_op: vk::AttachmentStoreOp,
+    pub clear_val: vk::ClearValue,
+    pub final_layout: vk::ImageLayout,
+}
+
+#[allow(dead_code)]
+pub struct RenderTarget {
+    pub(crate) color: Box<[Attachment]>,
+    pub(crate) depth: Option<Attachment>,
+    pub(crate) render_area: vk::Rect2D,
+    // pub(crate) stencil: Option<Attachment>,
+}
+
+impl RenderTarget {
+    pub fn begin_rendering(&self, renderer: &mut Renderer, cmd: vk::CommandBuffer) -> Result<()> {
+        let mut barriers = Vec::with_capacity(self.color.len() + 2);
+        let mut color_attachments = Vec::with_capacity(self.color.len());
+        let mut depth_attachment = vk::RenderingAttachmentInfo::default();
+        for attachment in self.color.iter() {
+            let img = renderer
+                .get_image_mut(attachment.img)
+                .ok_or(Error::ResourceMissing)?;
+
+            let new_layout = vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL;
+            if img.layout == new_layout {
+                continue;
+            }
+
+            barriers.push(vk::ImageMemoryBarrier2 {
+                // NOTE: TOP_OF_PIPE should not be hard coded.
+                // In the future, multiple passes will be used and TOP_OF_PIPE will not always be correct
+                src_stage_mask: vk::PipelineStageFlags2::TOP_OF_PIPE,
+                src_access_mask: vk::AccessFlags2::empty(),
+                dst_stage_mask: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                dst_access_mask: vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+                old_layout: img.layout,
+                new_layout,
+                image: img.handle,
+                subresource_range: vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: img.mip_level_count,
+                    base_array_layer: 0,
+                    layer_count: img.layer_count,
+                },
+                ..Default::default()
+            });
+            img.layout = new_layout;
+
+            color_attachments.push(vk::RenderingAttachmentInfo {
+                image_view: img.view,
+                image_layout: img.layout,
+                load_op: attachment.load_op,
+                store_op: attachment.store_op,
+                clear_value: attachment.clear_val,
+                ..Default::default()
+            });
+        }
+        if let Some(attachment) = &self.depth {
+            let img = renderer
+                .get_image_mut(attachment.img)
+                .ok_or(Error::ResourceMissing)?;
+            let new_layout = vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+            if img.layout != new_layout {
+                // NOTE: This renderer currently only uses combined depth stencil images.
+                barriers.push(vk::ImageMemoryBarrier2 {
+                    src_stage_mask: vk::PipelineStageFlags2::TOP_OF_PIPE,
+                    src_access_mask: vk::AccessFlags2::empty(),
+                    dst_stage_mask: vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS,
+                    dst_access_mask: vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                    old_layout: img.layout,
+                    new_layout,
+                    image: img.handle,
+                    subresource_range: vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL,
+                        base_mip_level: 0,
+                        level_count: img.mip_level_count,
+                        base_array_layer: 0,
+                        layer_count: img.layer_count,
+                    },
+                    ..Default::default()
+                });
+                img.layout = new_layout;
+            }
+
+            depth_attachment = vk::RenderingAttachmentInfo {
+                image_view: img.view,
+                image_layout: img.layout,
+                load_op: attachment.load_op,
+                store_op: attachment.store_op,
+                clear_value: attachment.clear_val,
+                ..Default::default()
+            };
+        }
+        let dependency_info = vk::DependencyInfo {
+            image_memory_barrier_count: barriers.len() as u32,
+            p_image_memory_barriers: barriers.as_ptr(),
+            ..Default::default()
+        };
+        unsafe { renderer.device.cmd_pipeline_barrier2(cmd, &dependency_info) };
+
+        // begin dynamic rendering
+        let rendering_info = ash::vk::RenderingInfo {
+            render_area: self.render_area,
+            layer_count: 1,
+            view_mask: 0,
+            color_attachment_count: color_attachments.len() as u32,
+            p_color_attachments: color_attachments.as_ptr(),
+            p_depth_attachment: if self.depth.is_some() {
+                &depth_attachment
+            } else {
+                std::ptr::null()
+            },
+            ..Default::default()
+        };
+
+        unsafe {
+            renderer.device.cmd_begin_rendering(cmd, &rendering_info);
+        };
+
+        Ok(())
+    }
+
+    pub fn end_rendering(&self, renderer: &mut Renderer, cmd: vk::CommandBuffer) -> Result<()> {
+        // end rendering
+        unsafe {
+            renderer.device.cmd_end_rendering(cmd);
+        }
+
+        let mut barriers = Vec::with_capacity(self.color.len() + 2);
+        for attachment in self.color.iter() {
+            let img = renderer
+                .get_image_mut(attachment.img)
+                .ok_or(Error::ResourceMissing)?;
+
+            if img.layout == attachment.final_layout {
+                continue;
+            }
+
+            barriers.push(vk::ImageMemoryBarrier2 {
+                src_stage_mask: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                src_access_mask: vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+                dst_stage_mask: vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+                dst_access_mask: vk::AccessFlags2::empty(),
+                old_layout: img.layout,
+                new_layout: attachment.final_layout,
+                image: img.handle,
+                subresource_range: vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: img.mip_level_count,
+                    base_array_layer: 0,
+                    layer_count: img.layer_count,
+                },
+                ..Default::default()
+            });
+            img.layout = attachment.final_layout;
+        }
+
+        if let Some(attachment) = &self.depth {
+            let img = renderer
+                .get_image_mut(attachment.img)
+                .ok_or(Error::ResourceMissing)?;
+            if img.layout != attachment.final_layout {
+                // NOTE: This renderer currently only uses combined depth stencil images.
+                barriers.push(vk::ImageMemoryBarrier2 {
+                    src_stage_mask: vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS,
+                    src_access_mask: vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                    dst_stage_mask: vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+                    dst_access_mask: vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ,
+                    old_layout: img.layout,
+                    new_layout: attachment.final_layout,
+                    image: img.handle,
+                    subresource_range: vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL,
+                        base_mip_level: 0,
+                        level_count: img.mip_level_count,
+                        base_array_layer: 0,
+                        layer_count: img.layer_count,
+                    },
+                    ..Default::default()
+                });
+                img.layout = attachment.final_layout;
+            }
+        }
+        // Barrier to transition for present
+        let dependency_info = vk::DependencyInfo {
+            image_memory_barrier_count: barriers.len() as u32,
+            p_image_memory_barriers: barriers.as_ptr(),
+            ..Default::default()
+        };
+
+        unsafe { renderer.device.cmd_pipeline_barrier2(cmd, &dependency_info) };
+
+        Ok(())
+    }
+}
 
 #[derive(PartialEq)]
 pub struct AllocationRange {
@@ -385,8 +588,8 @@ pub struct FrameContext {
     // (swapchain, depth)
     images: Vec<(ImageHandle, ImageHandle)>,
     frames: [FrameData; MAX_FRAME_COUNT as usize],
-    pub index: usize,
-    image_index: usize,
+    pub frame_index: usize,
+    swapchain_image_index: usize,
 }
 
 impl FrameContext {
@@ -509,14 +712,15 @@ impl FrameContext {
 
             let depth_image_create_info = vulkan::image::ImageCreateInfo {
                 memory_property_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
-                mip_levels: 1,
+                mip_level_count: 1,
                 image_type: vk::ImageType::TYPE_2D,
                 format: depth_format,
                 width: swapchain.extent().width,
                 height: swapchain.extent().height,
                 depth: 1,
                 usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
-                array_layers: 1,
+                layer_count: 1,
+                level_count: 1,
             };
 
             for _ in 0..swapchain_images.len() {
@@ -541,8 +745,8 @@ impl FrameContext {
             frames,
             depth_format,
             images: images.collect(),
-            index: 0,
-            image_index: 0,
+            frame_index: 0,
+            swapchain_image_index: 0,
         })
     }
 }
@@ -565,20 +769,19 @@ impl FrameContext {
         self.depth_format
     }
     pub fn get_current_frame(&self) -> &FrameData {
-        &self.frames[self.index]
+        &self.frames[self.frame_index]
     }
     #[inline]
     pub(crate) fn frames(&self) -> &[FrameData] {
         &self.frames
     }
     pub fn get_current_frame_mut(&mut self) -> &mut FrameData {
-        &mut self.frames[self.index]
+        &mut self.frames[self.frame_index]
     }
     pub fn swapchain_extent(&self) -> vk::Extent2D {
         *self.swapchain.extent()
     }
-    pub fn begin_drawing(&mut self, renderer: &Renderer) -> Result<()> {
-        // Acquire image
+    pub fn get_swapchain_render_target(&mut self) -> Result<RenderTarget> {
         let (swapchain_image_index, swapchain_image, depth_image) = {
             let frame = self.get_current_frame();
 
@@ -592,17 +795,13 @@ impl FrameContext {
                     .acquire_next_image(frame.image_acquired, vk::Fence::null())?
             };
             let (swapchain_image, depth_image) = self.images[image_index as usize];
-            let (swapchain_image, depth_image) = (
-                renderer.get_image(swapchain_image).unwrap(),
-                renderer.get_image(depth_image).unwrap(),
-            );
 
             unsafe { self.device.reset_fences(&[frame.command_buffer_executed])? };
 
             (image_index as usize, swapchain_image, depth_image)
         };
 
-        self.image_index = swapchain_image_index;
+        self.swapchain_image_index = swapchain_image_index;
 
         // Begin command buffer
         let begin_info = vk::CommandBufferBeginInfo {
@@ -612,6 +811,7 @@ impl FrameContext {
 
         unsafe {
             let frame = self.get_current_frame();
+
             // Reset the command buffer (requires pool/reset capability)
             self.device
                 .reset_command_buffer(frame.command_buffer, vk::CommandBufferResetFlags::empty())?;
@@ -620,153 +820,39 @@ impl FrameContext {
                 .begin_command_buffer(frame.command_buffer, &begin_info)?;
         }
 
-        {
-            let color_barrier = ash::vk::ImageMemoryBarrier2 {
-                src_stage_mask: vk::PipelineStageFlags2::TOP_OF_PIPE,
-                src_access_mask: vk::AccessFlags2::empty(),
-                dst_stage_mask: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
-                dst_access_mask: vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
-                old_layout: vk::ImageLayout::UNDEFINED,
-                new_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                image: swapchain_image.handle,
-                subresource_range: vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                },
-                ..Default::default()
-            };
-            let depth_barrier = vk::ImageMemoryBarrier2 {
-                src_stage_mask: vk::PipelineStageFlags2::TOP_OF_PIPE,
-                src_access_mask: vk::AccessFlags2::empty(),
-                dst_stage_mask: vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS,
-                dst_access_mask: vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
-                old_layout: vk::ImageLayout::UNDEFINED,
-                new_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                image: depth_image.handle,
-                subresource_range: vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                },
-                ..Default::default()
-            };
-
-            let dependencies = [color_barrier, depth_barrier];
-            let dependency_info = vk::DependencyInfo {
-                image_memory_barrier_count: dependencies.len() as u32,
-                p_image_memory_barriers: dependencies.as_ptr(),
-                ..Default::default()
-            };
-            unsafe {
-                let frame = self.get_current_frame();
-                self.device
-                    .cmd_pipeline_barrier2(frame.command_buffer, &dependency_info)
-            };
-        }
-
-        // begin dynamic rendering
-        {
-            let color_attachment_info = vk::RenderingAttachmentInfo {
-                image_view: swapchain_image.view,
-                image_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+        Ok(RenderTarget {
+            color: Box::new([Attachment {
+                img: swapchain_image,
                 load_op: vk::AttachmentLoadOp::CLEAR,
                 store_op: vk::AttachmentStoreOp::STORE,
-                clear_value: vk::ClearValue {
-                    color: vk::ClearColorValue {
-                        float32: [0.0, 0.0, 0.0, 0.0],
-                    },
+                final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
+                clear_val: vk::ClearValue {
+                    color: vk::ClearColorValue { float32: [0.0; 4] },
                 },
-                ..Default::default()
-            };
-
-            let depth_attachment_info = ash::vk::RenderingAttachmentInfo {
-                image_view: depth_image.view,
-                image_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            }]),
+            depth: Some(Attachment {
+                img: depth_image,
                 load_op: vk::AttachmentLoadOp::CLEAR,
                 store_op: vk::AttachmentStoreOp::STORE,
-                clear_value: vk::ClearValue {
+                final_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                clear_val: vk::ClearValue {
                     depth_stencil: vk::ClearDepthStencilValue {
                         depth: 1.0,
                         stencil: 0,
                     },
                 },
-                ..Default::default()
-            };
-
-            let rendering_info = ash::vk::RenderingInfo {
-                render_area: vk::Rect2D {
-                    offset: vk::Offset2D { x: 0, y: 0 },
-                    extent: *self.swapchain.extent(),
-                },
-                layer_count: 1,
-                view_mask: 0,
-                color_attachment_count: 1,
-                p_color_attachments: &color_attachment_info,
-                p_depth_attachment: &depth_attachment_info,
-                ..Default::default()
-            };
-
-            unsafe {
-                let frame = self.get_current_frame();
-                self.device
-                    .cmd_begin_rendering(frame.command_buffer, &rendering_info);
-            };
-        }
-
-        Ok(())
+            }),
+            render_area: vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent: *self.swapchain.extent(),
+            },
+        })
     }
-    pub fn end_draw(&mut self, renderer: &Renderer) -> Result<()> {
+    pub fn submit(&mut self) -> Result<()> {
         let frame = self.get_current_frame();
 
-        // End rendering & end command buffer
         unsafe {
-            self.device.cmd_end_rendering(frame.command_buffer);
-        }
-
-        // Barrier to transition for pres
-        {
-            let swapchain_image = {
-                let (swapchain, _) = self.images[self.image_index];
-                renderer.get_image(swapchain).unwrap()
-            };
-            let dependencies = [vk::ImageMemoryBarrier2 {
-                src_stage_mask: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
-                src_access_mask: vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
-                dst_stage_mask: vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
-                dst_access_mask: vk::AccessFlags2::empty(),
-                old_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                new_layout: vk::ImageLayout::PRESENT_SRC_KHR,
-                image: swapchain_image.handle,
-                subresource_range: vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                },
-                ..Default::default()
-            }];
-            let dependency_info = vk::DependencyInfo {
-                image_memory_barrier_count: dependencies.len() as u32,
-                p_image_memory_barriers: dependencies.as_ptr(),
-                ..Default::default()
-            };
-
-            unsafe {
-                self.device
-                    .cmd_pipeline_barrier2(frame.command_buffer(), &dependency_info)
-            };
-        }
-
-        unsafe {
-            self.device
-                .end_command_buffer(self.get_current_frame().command_buffer)
-                .inspect_err(|e| tracing::error!("{}", e))?;
+            self.device.end_command_buffer(frame.command_buffer)?;
         }
 
         // Submit
@@ -801,18 +887,18 @@ impl FrameContext {
                 p_wait_semaphores: present_wait_semaphores.as_ptr(),
                 swapchain_count: 1,
                 p_swapchains: unsafe { self.swapchain.get_swapchain_ptr() },
-                p_image_indices: &(self.image_index as u32),
+                p_image_indices: &(self.swapchain_image_index as u32),
                 ..Default::default()
             };
             unsafe { self.device.queue_present(&present_info)? };
         }
 
-        self.index += 1;
+        self.frame_index += 1;
         let max_frames = match self.swapchain.present_mode() {
             vk::PresentModeKHR::MAILBOX => 3,
             _ => 2,
         };
-        self.index %= max_frames;
+        self.frame_index %= max_frames;
 
         Ok(())
     }

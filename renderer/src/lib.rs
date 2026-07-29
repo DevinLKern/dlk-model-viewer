@@ -328,7 +328,7 @@ impl Renderer {
                 self.device.clone(),
                 image,
                 swapchain.format(),
-                vk::ImageLayout::PRESENT_SRC_KHR,
+                vk::ImageLayout::UNDEFINED,
                 swapchain.extent().width,
                 swapchain.extent().height,
             )
@@ -358,14 +358,15 @@ impl Renderer {
         let mut image = {
             let image_create_info = vulkan::ImageCreateInfo {
                 memory_property_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
-                mip_levels: 1,
+                mip_level_count: 1,
                 image_type: vk::ImageType::TYPE_2D,
                 format: vk::Format::R8G8B8A8_SRGB,
                 width,
                 height,
                 depth: 1,
                 usage: vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
-                array_layers: 1,
+                layer_count: 1,
+                level_count: 1,
             };
 
             vulkan::Image::new(self.device.clone(), &image_create_info)?
