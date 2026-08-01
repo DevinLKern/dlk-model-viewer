@@ -11,6 +11,9 @@ resolver = "3"
 [profile.release]
 codegen-units = 1
 lto = "fat"
+# debug = true
+# strip = false
+debug = false
 strip = true
 opt-level = 3
 # panic = "abort"

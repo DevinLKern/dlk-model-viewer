@@ -1,38 +1,43 @@
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
+use std::collections::{HashSet, VecDeque};
+use std::path::Path;
+use std::sync::Arc;
 
-#[derive(Copy, Clone)]
+use crate::ObjTokenizer;
+
+pub type Float = f32;
+pub type Index = u32;
+
+#[derive(Copy, Clone, Debug)]
 pub struct Vertex {
-    pub x: f64,
-    pub y: f64,
-    pub z: f64,
-    pub w: f64,
+    pub x: Float,
+    pub y: Float,
+    pub z: Float,
+    pub w: Float,
 }
 
-#[derive(Default, Copy, Clone)]
+#[derive(Default, Copy, Clone, Debug)]
 pub struct VertexTexture {
-    pub u: f64,
-    pub v: f64,
-    pub w: Option<f64>,
+    pub u: Float,
+    pub v: Float,
+    pub w: Option<Float>,
 }
 
-#[derive(Copy, Clone, Default)]
+#[derive(Copy, Clone, Default, Debug)]
 pub struct VertexNormal {
-    pub x: f64,
-    pub y: f64,
-    pub z: f64,
+    pub x: Float,
+    pub y: Float,
+    pub z: Float,
 }
 
-#[derive(Eq, PartialEq, Hash, Copy, Clone)]
+#[derive(Eq, PartialEq, Hash, Copy, Clone, Default, Debug)]
 pub struct VtnIndex {
-    pub v: usize,
-    pub vt: Option<usize>,
-    pub vn: Option<usize>,
+    pub v: Index,
+    pub vt: Option<Index>,
+    pub vn: Option<Index>,
 }
 
 impl VtnIndex {
-    fn adjustst_index(count: usize, index: Option<i64>) -> Option<usize> {
+    fn adjustst_index(count: usize, index: Option<i64>) -> Option<Index> {
         let i = index?;
 
         if i == 0 {
@@ -41,7 +46,7 @@ impl VtnIndex {
 
         let i = if i < 0 { count as i64 + i } else { i - 1 };
 
-        Some(i as usize)
+        Some(i as Index)
     }
     pub fn from_raw_index(
         v_count: usize,
@@ -73,15 +78,18 @@ pub enum Primitive {
 
 #[allow(unused)]
 pub struct Shape {
-    pub name: Option<Box<str>>,
-    pub materials: Box<[Box<str>]>,
+    pub name: Option<Arc<str>>,
     // (index_of_material_name, shading_group, primitive)
-    primitives: Box<[(Option<usize>, u32, Primitive)]>,
+    primitives: Box<[Primitive]>,
+    // (material_name, first_primitive_index, primitive_count)
+    pub material_ranges: Box<[(Arc<str>, usize, usize)]>,
+    // (shading_group, first_primitive_index, primitive_count)
+    shading_group_ranges: Box<[(u32, usize, usize)]>,
 }
 
 impl Shape {
-    pub fn get_primitives(&self) -> impl Iterator<Item = &Primitive> {
-        self.primitives.iter().map(|(_, _, p)| p)
+    pub fn primitives(&self) -> impl Iterator<Item = &Primitive> {
+        self.primitives.iter()
     }
 }
 
@@ -90,173 +98,310 @@ pub struct ObjScene {
     pub vs: Box<[Vertex]>,
     pub vts: Box<[VertexTexture]>,
     pub vns: Box<[VertexNormal]>,
-    material_files: Box<[PathBuf]>,
+    material_file_names: HashSet<Arc<str>>,
+    material_names: HashSet<Arc<str>>,
     shapes: Box<[Shape]>,
 }
 
-fn flush_shape(
-    shapes: &mut Vec<Shape>,
-    cur_shape_name: &mut Option<Box<str>>,
-    cur_shape_materials: &mut Vec<Box<str>>,
-    cur_shape_primitives: &mut Vec<(Option<usize>, u32, Primitive)>,
-) {
-    let has_nothing = cur_shape_name.is_none()
-        && cur_shape_materials.is_empty()
-        && cur_shape_primitives.is_empty();
-    if has_nothing {
-        cur_shape_name.take();
-        cur_shape_materials.clear();
-        cur_shape_primitives.clear();
-        return;
-    }
+pub struct ShapeIterator {
+    tokenizer: ObjTokenizer,
 
-    shapes.push(Shape {
-        name: cur_shape_name.take(),
-        materials: cur_shape_materials.drain(..).collect(),
-        primitives: cur_shape_primitives.drain(..).collect(),
-    });
+    pub material_file_names: HashSet<Arc<str>>,
+    pub material_names: HashSet<Arc<str>>,
+    vs: Vec<Vertex>,
+    vts: Vec<VertexTexture>,
+    vns: Vec<VertexNormal>,
+
+    shapes: VecDeque<Shape>,
+
+    cur_shape_name: Option<Arc<str>>,
+    cur_shape_primitives: Vec<Primitive>,
+    cur_material_ranges: Vec<(Arc<str>, usize, usize)>,
+    cur_shading_group_ranges: Vec<(u32, usize, usize)>,
+}
+
+impl ShapeIterator {
+    pub fn new(path: &Path) -> crate::Result<Self> {
+        let tokenizer = ObjTokenizer::from_path(path)?;
+
+        const INITIAL_CAPACITY: usize = 256;
+
+        Ok(Self {
+            tokenizer,
+
+            material_file_names: HashSet::new(),
+            material_names: HashSet::new(),
+
+            vs: Vec::with_capacity(INITIAL_CAPACITY),
+            vts: Vec::with_capacity(INITIAL_CAPACITY),
+            vns: Vec::with_capacity(INITIAL_CAPACITY),
+
+            shapes: VecDeque::new(),
+
+            cur_shape_name: None,
+            cur_material_ranges: Vec::new(),
+            cur_shading_group_ranges: Vec::new(),
+            cur_shape_primitives: Vec::with_capacity(INITIAL_CAPACITY),
+        })
+    }
+    fn flush(&mut self) -> Option<Shape> {
+        let has_nothing = self.cur_shape_name.is_none() && self.cur_shape_primitives.is_empty();
+        if has_nothing {
+            self.cur_shape_name.take();
+            self.cur_shape_primitives.clear();
+            return None;
+        }
+
+        if let Some((_, first_index, element_count)) = self.cur_material_ranges.last_mut() {
+            *element_count = self.cur_shape_primitives.len() - *first_index;
+        }
+        if self
+            .cur_material_ranges
+            .last()
+            .map(|(_, _, c)| *c == 0)
+            .unwrap_or(false)
+        {
+            self.cur_material_ranges.pop();
+        }
+
+        if let Some((_, first_index, element_count)) = self.cur_shading_group_ranges.last_mut() {
+            *element_count = self.cur_shape_primitives.len() - *first_index;
+        }
+        if self
+            .cur_shading_group_ranges
+            .last()
+            .map(|(_, _, c)| *c == 0)
+            .unwrap_or(false)
+        {
+            self.cur_shading_group_ranges.pop();
+        }
+
+        Some(Shape {
+            name: self.cur_shape_name.take(),
+            primitives: self.cur_shape_primitives.drain(..).collect(),
+            material_ranges: self.cur_material_ranges.drain(..).collect(),
+            shading_group_ranges: self.cur_shading_group_ranges.drain(..).collect(),
+        })
+    }
+    /// Returns None on EOF
+    fn process_next_token(&mut self) -> Option<crate::Result<()>> {
+        use crate::obj_tokenizer::ObjToken;
+
+        let token = match self.tokenizer.next_token() {
+            Some(t) => t,
+            None => {
+                if let Some(shape) = self.flush() {
+                    if !shape.primitives.is_empty() {
+                        self.shapes.push_back(shape);
+                    }
+                }
+                return None;
+            }
+        };
+
+        let token = match token {
+            Ok(t) => t,
+            Err(e) => return Some(Err(e)),
+        };
+
+        match token {
+            ObjToken::MtlFile(file_name) => {
+                self.material_file_names.insert(file_name.into());
+            }
+            ObjToken::UseMaterial(material_name) => {
+                let material_name: Arc<str> = material_name.clone().into();
+                let material_name = if let Some(s) = self.material_names.get(&material_name) {
+                    s.clone()
+                } else {
+                    self.material_names.insert(material_name.clone());
+                    material_name
+                };
+
+                if let Some((_, first_index, element_count)) = self.cur_material_ranges.last_mut() {
+                    *element_count = self.cur_shape_primitives.len() - *first_index;
+                }
+
+                let last_is_different = self
+                    .cur_material_ranges
+                    .last()
+                    .map(|(name, ..)| name != &material_name)
+                    .unwrap_or(true);
+                if last_is_different {
+                    self.cur_material_ranges.push((
+                        material_name,
+                        self.cur_shape_primitives.len(),
+                        0,
+                    ));
+                }
+            }
+            ObjToken::Shading(shading_group) => {
+                if let Some((_, first_index, element_count)) =
+                    self.cur_shading_group_ranges.last_mut()
+                {
+                    *element_count = self.cur_shape_primitives.len() - *first_index;
+                }
+
+                let last_is_different = self
+                    .cur_shading_group_ranges
+                    .last()
+                    .map(|(group, ..)| group != &shading_group)
+                    .unwrap_or(true);
+                if last_is_different {
+                    self.cur_shading_group_ranges.push((
+                        shading_group,
+                        self.cur_shape_primitives.len(),
+                        0,
+                    ));
+                }
+            }
+            ObjToken::Face(face_vertices) => {
+                let primitive = match face_vertices.as_ref() {
+                    &[v0] => Primitive::Point(VtnIndex::from_raw_index(
+                        self.vs.len(),
+                        self.vts.len(),
+                        self.vns.len(),
+                        v0,
+                    )),
+                    &[v0, v1, v2] => Primitive::Triangle {
+                        v0: VtnIndex::from_raw_index(
+                            self.vs.len(),
+                            self.vts.len(),
+                            self.vns.len(),
+                            v0,
+                        ),
+                        v1: VtnIndex::from_raw_index(
+                            self.vs.len(),
+                            self.vts.len(),
+                            self.vns.len(),
+                            v1,
+                        ),
+                        v2: VtnIndex::from_raw_index(
+                            self.vs.len(),
+                            self.vts.len(),
+                            self.vns.len(),
+                            v2,
+                        ),
+                    },
+                    vertices => Primitive::Polygon(
+                        vertices
+                            .into_iter()
+                            .map(|v| {
+                                VtnIndex::from_raw_index(
+                                    self.vs.len(),
+                                    self.vts.len(),
+                                    self.vns.len(),
+                                    *v,
+                                )
+                            })
+                            .collect(),
+                    ),
+                };
+
+                self.cur_shape_primitives.push(primitive);
+            }
+            ObjToken::Line(line_vertices) => {
+                let primitive = Primitive::Line(
+                    line_vertices
+                        .iter()
+                        .map(|v| {
+                            VtnIndex::from_raw_index(
+                                self.vs.len(),
+                                self.vts.len(),
+                                self.vns.len(),
+                                *v,
+                            )
+                        })
+                        .collect(),
+                );
+                self.cur_shape_primitives.push(primitive);
+            }
+            ObjToken::Object(object_name) => {
+                let shape = self.flush();
+                self.cur_shape_name = Some(object_name.into());
+                if let Some(s) = shape {
+                    self.shapes.push_back(s);
+                }
+            }
+            ObjToken::Group(group_name) => {
+                let shape = self.flush();
+                self.cur_shape_name = Some(group_name.into());
+                if let Some(s) = shape {
+                    self.shapes.push_back(s);
+                }
+            }
+            ObjToken::V { x, y, z, w } => {
+                self.vs.push(Vertex {
+                    x,
+                    y,
+                    z,
+                    w: w.unwrap_or(1.0),
+                });
+            }
+            ObjToken::Vt { u, v, w } => {
+                self.vts.push(VertexTexture { u, v, w });
+            }
+            ObjToken::Vn { x, y, z } => {
+                self.vns.push(VertexNormal { x, y, z });
+            }
+            _ => {}
+        }
+
+        Some(Ok(()))
+    }
+    pub fn get_vertex(&mut self, index: Index) -> Option<&Vertex> {
+        while self.vs.len() <= index as usize {
+            if let Err(_) = self.process_next_token()? {
+                return None;
+            }
+        }
+        self.vs.get(index as usize)
+    }
+    pub fn get_vertex_normal(&mut self, index: Index) -> Option<&VertexNormal> {
+        while self.vns.len() <= index as usize {
+            if let Err(_) = self.process_next_token()? {
+                return None;
+            }
+        }
+        self.vns.get(index as usize)
+    }
+    pub fn get_vertex_texture(&mut self, index: Index) -> Option<&VertexTexture> {
+        while self.vts.len() <= index as usize {
+            if let Err(_) = self.process_next_token()? {
+                return None;
+            }
+        }
+        self.vts.get(index as usize)
+    }
+    pub fn next_shape(&mut self) -> Option<Shape> {
+        while let None = self.shapes.front() {
+            match self.process_next_token() {
+                Some(Ok(())) => {}
+                Some(Err(_)) => return None,
+                None => break,
+            }
+        }
+        self.shapes.pop_front()
+    }
 }
 
 impl ObjScene {
     pub fn from_file(path: &Path) -> crate::Result<ObjScene> {
-        let mut shapes = Vec::<Shape>::new();
-        let mut material_names = Vec::<Box<str>>::new();
-        let mut material_indexes = HashMap::<Box<str>, usize>::new();
-        let mut material_files = Vec::<PathBuf>::new();
-        let mut vs = Vec::<Vertex>::with_capacity(64);
-        let mut vts = Vec::<VertexTexture>::with_capacity(64);
-        let mut vns = Vec::<VertexNormal>::with_capacity(64);
-
-        let mut tokenizer = crate::ObjTokenizer::from_path(path)?;
-
-        let mut cur_material_index: Option<usize> = None;
-        let mut cur_shading_group: u32 = 0;
-        let mut cur_shape_name: Option<Box<str>> = None;
-        let mut cur_shape_materials = Vec::<Box<str>>::new();
-        // (material_index, shading_group, primitive)
-        let mut cur_shape_primitives = Vec::<(Option<usize>, u32, Primitive)>::new();
-
-        while let Some(token) = tokenizer.next_token() {
-            use crate::ObjToken::*;
-
-            match token? {
-                MtlFile(file_path_as_str) => {
-                    // Unwrap is ok because error is of type Infallible
-                    let normalized = file_path_as_str.replace('\\', "/");
-                    let file_path = PathBuf::from_str(&normalized).unwrap();
-                    material_files.push(file_path);
-                }
-                UseMaterial(material_name) => {
-                    // only push if the material name is not in material_names
-                    let index = material_indexes
-                        .entry(material_name.clone())
-                        .or_insert_with(|| {
-                            let i = material_names.len();
-                            material_names.push(material_name.clone());
-                            i
-                        });
-
-                    cur_shape_materials.push(material_name);
-                    cur_material_index = Some(*index);
-                }
-                Shading(s) => {
-                    cur_shading_group = s;
-                }
-                Object(object_name) => {
-                    flush_shape(
-                        &mut shapes,
-                        &mut cur_shape_name,
-                        &mut cur_shape_materials,
-                        &mut cur_shape_primitives,
-                    );
-                    cur_shape_name = Some(object_name);
-                }
-                Group(group_name) => {
-                    flush_shape(
-                        &mut shapes,
-                        &mut cur_shape_name,
-                        &mut cur_shape_materials,
-                        &mut cur_shape_primitives,
-                    );
-                    cur_shape_name = Some(group_name);
-                }
-                V { x, y, z, w } => {
-                    vs.push(Vertex {
-                        x,
-                        y,
-                        z,
-                        w: w.unwrap_or(1.0),
-                    });
-                }
-                Vt { u, v, w } => {
-                    // not sure about the unwrap_or_default part
-                    vts.push(VertexTexture { u, v, w });
-                }
-                Vn { x, y, z } => {
-                    vns.push(VertexNormal { x, y, z });
-                }
-                Face(indices) => {
-                    let primitive = match indices.as_ref() {
-                        &[v0] => Primitive::Point(VtnIndex::from_raw_index(
-                            vs.len(),
-                            vts.len(),
-                            vns.len(),
-                            v0,
-                        )),
-                        &[v0, v1, v2] => Primitive::Triangle {
-                            v0: VtnIndex::from_raw_index(vs.len(), vts.len(), vns.len(), v0),
-                            v1: VtnIndex::from_raw_index(vs.len(), vts.len(), vns.len(), v1),
-                            v2: VtnIndex::from_raw_index(vs.len(), vts.len(), vns.len(), v2),
-                        },
-                        vertices => Primitive::Polygon(
-                            vertices
-                                .into_iter()
-                                .map(|v| {
-                                    VtnIndex::from_raw_index(vs.len(), vts.len(), vns.len(), *v)
-                                })
-                                .collect(),
-                        ),
-                    };
-
-                    cur_shape_primitives.push((
-                        cur_material_index.clone(),
-                        cur_shading_group,
-                        primitive,
-                    ));
-                }
-                Line(vertices) => {
-                    let primitive = Primitive::Line(
-                        vertices
-                            .iter()
-                            .map(|v| VtnIndex::from_raw_index(vs.len(), vts.len(), vns.len(), *v))
-                            .collect(),
-                    );
-                    cur_shape_primitives.push((
-                        cur_material_index.clone(),
-                        cur_shading_group,
-                        primitive,
-                    ));
-                }
-                _ => {}
-            }
+        let mut shape_iterator = ShapeIterator::new(path)?;
+        let mut shapes = Vec::<Shape>::with_capacity(8);
+        while let Some(shape) = shape_iterator.next_shape() {
+            shapes.push(shape);
         }
 
-        flush_shape(
-            &mut shapes,
-            &mut cur_shape_name,
-            &mut cur_shape_materials,
-            &mut cur_shape_primitives,
-        );
-
         Ok(ObjScene {
-            vs: vs.into_boxed_slice(),
-            vts: vts.into_boxed_slice(),
-            vns: vns.into_boxed_slice(),
-            material_files: material_files.into_boxed_slice(),
+            vs: shape_iterator.vs.into_boxed_slice(),
+            vts: shape_iterator.vts.into_boxed_slice(),
+            vns: shape_iterator.vns.into_boxed_slice(),
+            material_file_names: shape_iterator.material_file_names.clone(),
+            material_names: shape_iterator.material_names,
             shapes: shapes.into_boxed_slice(),
         })
     }
-    pub fn get_shapes(&self) -> impl Iterator<Item = &Shape> {
+    pub fn shapes(&self) -> impl Iterator<Item = &Shape> {
         self.shapes.iter()
     }
 }

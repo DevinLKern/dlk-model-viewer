@@ -22,6 +22,7 @@ use std::str::FromStr;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use winit::{
@@ -31,7 +32,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
-use math::{Identity, Mat4, Quat, Vec3, Vec4, Zero};
+use math::{Identity, Mat3, Mat4, Quat, Vec3, Vec4, Zero};
 
 #[derive(Debug, Copy, Clone)]
 enum CameraInUse {
@@ -107,9 +108,9 @@ impl Application {
         let v2 = Vec3::new(v2.x as f32, v2.y as f32, v2.z as f32);
         let n = v1.sub(v0).cross(v2.sub(v0)).normalized();
         VertexNormal {
-            x: n.x() as f64,
-            y: n.y() as f64,
-            z: n.z() as f64,
+            x: n.x() as obj_mtl::Float,
+            y: n.y() as obj_mtl::Float,
+            z: n.z() as obj_mtl::Float,
         }
     }
     fn new(
@@ -121,7 +122,7 @@ impl Application {
     ) -> Result<Self> {
         // load materials
         let file_path = model_path.with_extension("mtl");
-        let obj_scene = obj_mtl::ObjScene::from_file(model_path)?;
+        let mut obj_scene = obj_mtl::ShapeIterator::new(model_path)?;
 
         let mtl_materials = match obj_mtl::load_materials(&file_path) {
             Ok(materials) => materials,
@@ -141,8 +142,8 @@ impl Application {
         scene_builder.set_ambient_light_intensity(0.1);
 
         // main - add materials and textures
-        let mut texture_path_to_index = HashMap::<Box<str>, usize>::new();
-        let mut material_name_to_index = HashMap::<Box<str>, usize>::new();
+        let mut texture_path_to_index = HashMap::<Arc<str>, usize>::new();
+        let mut material_name_to_index = HashMap::<Arc<str>, usize>::new();
 
         let default_texture_index = {
             let image =
@@ -168,7 +169,8 @@ impl Application {
         });
 
         for material in mtl_materials.iter() {
-            if let Some(_material_index) = material_name_to_index.get(&material.name) {
+            let name: Arc<str> = material.name.clone().into();
+            if let Some(_material_index) = material_name_to_index.get(&name) {
                 continue;
             }
 
@@ -177,7 +179,7 @@ impl Application {
                 fallback_value: T,
                 renderer: &mut Renderer,
                 scene_builder: &mut SceneBuilder,
-                texture_path_to_index: &mut HashMap<Box<str>, usize>,
+                texture_path_to_index: &mut HashMap<Arc<str>, usize>,
                 model_path: &Path,
             ) -> Result<TextureIndexValue<T>> {
                 let value = tv.value.unwrap_or(fallback_value);
@@ -194,7 +196,7 @@ impl Application {
                     let image = renderer.create_and_populate_image(image)?;
                     let image_index = scene_builder.add_image(renderer.repeat_sampler(), image);
 
-                    texture_path_to_index.insert(texture.file_path.clone(), image_index);
+                    texture_path_to_index.insert(texture.file_path.clone().into(), image_index);
 
                     Some(image_index)
                 } else {
@@ -234,7 +236,7 @@ impl Application {
                 specular,
                 shininess: material.shininess.value.unwrap_or(0.0),
             });
-            material_name_to_index.insert(material.name.clone(), material_index);
+            material_name_to_index.insert(material.name.clone().into(), material_index);
         }
 
         // main - add model vertices
@@ -244,8 +246,8 @@ impl Application {
         let mut model_max = Vec3::scalar(f32::MIN);
         // Vec<(index_count, first_index, material_info)>
         let mut model_shape_info = Vec::<(usize, usize, usize)>::new();
-        for shape in obj_scene.get_shapes() {
-            let triangles = shape.get_primitives().flat_map(|p| match p {
+        while let Some(shape) = obj_scene.next_shape() {
+            let triangles = shape.primitives().flat_map(|p| match p {
                 obj_mtl::Primitive::Triangle { v0, v1, v2 } => vec![(*v0, *v1, *v2)].into_iter(),
                 obj_mtl::Primitive::Polygon(indices) => (2..indices.len())
                     .map(move |i| (indices[0], indices[i - 1], indices[i]))
@@ -254,37 +256,39 @@ impl Application {
                 _ => Vec::new().into_iter(),
             });
 
-            let vertices = triangles
-                .flat_map(|(v0, v1, v2)| {
-                    let dn = if settings.derive_normals {
-                        Self::calc_derived_normal(
-                            &obj_scene.vs[v0.v],
-                            &obj_scene.vs[v1.v],
-                            &obj_scene.vs[v2.v],
-                        )
-                    } else {
-                        VertexNormal {
-                            x: 0.0,
-                            y: 0.0,
-                            z: 0.0,
-                        }
-                    };
-                    [(v0, dn), (v1, dn), (v2, dn)].into_iter()
-                })
-                .filter_map(|(v, dn)| {
+            let first_index = scene_builder.indices_mut().len();
+
+            for (v0, v1, v2) in triangles {
+                let mut derived_normal = VertexNormal {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                };
+                let indices = [v0, v1, v2].map(|v| {
                     let idx = vertex_map.len() + shape_vertex_offset;
 
                     match vertex_map.entry(v) {
-                        std::collections::hash_map::Entry::Occupied(_) => None,
+                        std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
                         std::collections::hash_map::Entry::Vacant(entry) => {
-                            let position = obj_scene.vs[v.v];
+                            let position = obj_scene.get_vertex(v.v).copied().unwrap();
 
                             let tex_coord =
-                                v.vt.and_then(|idx| obj_scene.vts.get(idx))
+                                v.vt.and_then(|idx| obj_scene.get_vertex_texture(idx))
                                     .copied()
                                     .unwrap_or_default();
 
-                            let normal = v.vn.and_then(|idx| obj_scene.vns.get(idx)).unwrap_or(&dn);
+                            let normal =
+                                v.vn.and_then(|idx| obj_scene.get_vertex_normal(idx).copied())
+                                    .unwrap_or_else(|| {
+                                        if settings.derive_normals {
+                                            derived_normal = Self::calc_derived_normal(
+                                                &obj_scene.get_vertex(v0.v).copied().unwrap(),
+                                                &obj_scene.get_vertex(v1.v).copied().unwrap(),
+                                                &obj_scene.get_vertex(v2.v).copied().unwrap(),
+                                            )
+                                        }
+                                        derived_normal
+                                    });
 
                             let position =
                                 Vec3::new(position.x as f32, position.y as f32, position.z as f32);
@@ -292,42 +296,30 @@ impl Application {
                             model_max = model_max.max(position);
                             model_min = model_min.min(position);
 
-                            entry.insert(idx);
-
-                            Some(ShaderVertVertex {
+                            scene_builder.vertices_mut().push(ShaderVertVertex {
                                 position: position.into_arr(),
                                 tex_coord: [tex_coord.u as f32, 1.0 - tex_coord.v as f32],
                                 normal: [normal.x as f32, normal.y as f32, normal.z as f32],
-                            })
+                            });
+
+                            *entry.insert(idx)
                         }
                     }
                 });
 
-            let (_first_vertex, _vertex_count) = scene_builder.add_vertices(vertices);
+                let _ = scene_builder.add_indices(indices.into_iter().map(|i| i as u32));
+            }
 
-            let triangles = shape.get_primitives().flat_map(|p| match p {
-                obj_mtl::Primitive::Triangle { v0, v1, v2 } => vec![(*v0, *v1, *v2)].into_iter(),
-                obj_mtl::Primitive::Polygon(indices) => (2..indices.len())
-                    .map(move |i| (indices[0], indices[i - 1], indices[i]))
-                    .collect::<Vec<_>>()
-                    .into_iter(),
-                _ => Vec::new().into_iter(),
-            });
+            let index_count = scene_builder.indices_mut().len() - first_index;
 
-            let indices = triangles
-                .flat_map(|(v0, v1, v2)| [v0, v1, v2].into_iter())
-                .map(|v| *vertex_map.get(&v).unwrap() as u32);
-
-            let (first_index, index_count) = scene_builder.add_indices(indices);
-
-            if shape.materials.len() > 1 {
+            if shape.material_ranges.len() > 1 {
                 println!("Warning: Multiple materials per shape not supported.");
             }
 
             let material_index = shape
-                .materials
+                .material_ranges
                 .get(0)
-                .and_then(|mtl_name| material_name_to_index.get(mtl_name))
+                .and_then(|(name, _idx, _count)| material_name_to_index.get(name))
                 .unwrap_or(&default_material_index);
 
             model_shape_info.push((first_index, index_count, *material_index));
@@ -848,7 +840,7 @@ impl Application {
                         .as_mat3()
                         .transposed()
                         .inverse()
-                        .unwrap()
+                        .unwrap_or(Mat3::IDENTITY)
                         .into_mat4(1.0);
 
                     indirect_command_data.push(vk::DrawIndexedIndirectCommand {

@@ -1,4 +1,4 @@
-use crate::{Error, Result};
+use crate::{Error, Float, Result};
 
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -21,27 +21,27 @@ pub(crate) enum ObjToken {
     Object(Box<str>),
     Group(Box<str>),
     V {
-        x: f64,
-        y: f64,
-        z: f64,
-        w: Option<f64>,
+        x: Float,
+        y: Float,
+        z: Float,
+        w: Option<Float>,
     },
     Vt {
-        u: f64,
-        v: f64,
-        w: Option<f64>,
+        u: Float,
+        v: Float,
+        w: Option<Float>,
     },
     Vn {
-        x: f64,
-        y: f64,
-        z: f64,
+        x: Float,
+        y: Float,
+        z: Float,
     },
     Face(Box<[VtnIndexRaw]>),
     Line(Box<[VtnIndexRaw]>),
     Vp {
-        u: f64,
-        v: Option<f64>,
-        w: Option<f64>,
+        u: Float,
+        v: Option<Float>,
+        w: Option<Float>,
     },
     Curve {
         //
@@ -72,9 +72,9 @@ impl ObjTokenizer {
     }
     pub(crate) fn from_path(path: &Path) -> Result<Self> {
         let file = std::fs::File::open(path)?;
-
         Ok(Self::from_file(file))
     }
+    /// Returns None on the EOF
     pub(crate) fn next_token(&mut self) -> Option<Result<ObjToken>> {
         self.line.clear();
 
@@ -104,10 +104,10 @@ impl ObjTokenizer {
             "v" => {
                 let mut rest = rest.split_whitespace();
 
-                let x = rest.next().map(|s| s.parse::<f64>());
-                let y = rest.next().map(|s| s.parse::<f64>());
-                let z = rest.next().map(|s| s.parse::<f64>());
-                let w = rest.next().map(|s| s.parse::<f64>());
+                let x = rest.next().map(|s| s.parse::<Float>());
+                let y = rest.next().map(|s| s.parse::<Float>());
+                let z = rest.next().map(|s| s.parse::<Float>());
+                let w = rest.next().map(|s| s.parse::<Float>());
 
                 let (x, y, z, w) = match (x, y, z, w) {
                     (Some(Ok(x)), Some(Ok(y)), Some(Ok(z)), Some(Ok(w))) => (x, y, z, Some(w)),
@@ -120,9 +120,9 @@ impl ObjTokenizer {
             "vn" => {
                 let mut rest = rest.split_whitespace();
 
-                let x = rest.next().map(|s| s.parse::<f64>());
-                let y = rest.next().map(|s| s.parse::<f64>());
-                let z = rest.next().map(|s| s.parse::<f64>());
+                let x = rest.next().map(|s| s.parse::<Float>());
+                let y = rest.next().map(|s| s.parse::<Float>());
+                let z = rest.next().map(|s| s.parse::<Float>());
 
                 let (x, y, z) = match (x, y, z) {
                     (Some(Ok(x)), Some(Ok(y)), Some(Ok(z))) => (x, y, z),
@@ -134,9 +134,9 @@ impl ObjTokenizer {
             "vt" => {
                 let mut rest = rest.split_whitespace();
 
-                let u = rest.next().map(|s| s.parse::<f64>());
-                let v = rest.next().map(|s| s.parse::<f64>());
-                let w = rest.next().map(|s| s.parse::<f64>());
+                let u = rest.next().map(|s| s.parse::<Float>());
+                let v = rest.next().map(|s| s.parse::<Float>());
+                let w = rest.next().map(|s| s.parse::<Float>());
 
                 let (u, v, w) = match (u, v, w) {
                     (Some(Ok(u)), Some(Ok(v)), Some(Ok(w))) => (u, v, Some(w)),
@@ -239,9 +239,9 @@ impl ObjTokenizer {
             "vp" => {
                 let mut rest = rest.split_whitespace();
 
-                let u = rest.next().map(|s| s.parse::<f64>());
-                let v = rest.next().map(|s| s.parse::<f64>());
-                let w = rest.next().map(|s| s.parse::<f64>());
+                let u = rest.next().map(|s| s.parse::<Float>());
+                let v = rest.next().map(|s| s.parse::<Float>());
+                let w = rest.next().map(|s| s.parse::<Float>());
 
                 let (u, v, w) = match (u, v, w) {
                     (Some(Ok(u)), Some(Ok(v)), Some(Ok(w))) => (u, Some(v), Some(w)),

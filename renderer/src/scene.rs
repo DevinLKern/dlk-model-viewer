@@ -75,6 +75,10 @@ impl SceneBuilder {
         self.ambient_light_intensity = ambient;
     }
     #[inline]
+    pub fn vertices_mut(&mut self) -> &mut Vec<ShaderVertVertex> {
+        &mut self.vertices
+    }
+    #[inline]
     pub fn add_vertices(
         &mut self,
         verts: impl Iterator<Item = ShaderVertVertex>,
@@ -83,6 +87,10 @@ impl SceneBuilder {
         self.vertices.extend(verts);
         let after = self.vertices.len();
         return (before, after - before);
+    }
+    #[inline]
+    pub fn indices_mut(&mut self) -> &mut Vec<u32> {
+        &mut self.indices
     }
     #[inline]
     pub fn add_indices(&mut self, indices: impl Iterator<Item = u32>) -> (usize, usize) {
@@ -277,8 +285,6 @@ impl SceneBuilder {
             uniform_buffer,
             storage_buffer,
             submeshes: Vec::new(),
-            // instances: Vec::new(),
-            // draws: Vec::new(),
         })
     }
 }
@@ -292,10 +298,6 @@ pub struct Scene {
     pub(crate) storage_buffer: vulkan::Buffer,
     // (first_index, index_count)
     pub submeshes: Vec<(usize, usize)>,
-    // (model_transform, material_index)
-    // pub(crate) instances: Vec<(math::Mat4<f32>, usize)>,
-    // (instance_index, submesh_index)
-    // pub(crate) draws: Vec<(usize, usize)>,
 }
 
 impl Scene {
