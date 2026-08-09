@@ -1,6 +1,6 @@
 use crate::{GlobalLightUBO, GridData, ImageHandle, MaterialUBO, Result, ShaderVertVertex};
 
-use math::{Identity, Mat4, Zero};
+use math::{Identity, Mat4, Vec3, Zero};
 use vulkan::SharedDeviceRef;
 
 use ash::vk;
@@ -285,6 +285,7 @@ impl SceneBuilder {
             uniform_buffer,
             storage_buffer,
             submeshes: Vec::new(),
+            light_dir: self.light_direction,
         })
     }
 }
@@ -298,6 +299,7 @@ pub struct Scene {
     pub(crate) storage_buffer: vulkan::Buffer,
     // (first_index, index_count)
     pub submeshes: Vec<(usize, usize)>,
+    light_dir: Vec3<f32>,
 }
 
 impl Scene {
@@ -310,5 +312,9 @@ impl Scene {
     #[inline]
     pub fn reset(&mut self) {
         self.submeshes.clear();
+    }
+    #[inline]
+    pub fn light_dir(&self) -> Vec3<f32> {
+        self.light_dir
     }
 }

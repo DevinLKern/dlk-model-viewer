@@ -19,9 +19,9 @@ pub struct Attachment {
 
 #[allow(dead_code)]
 pub struct RenderTarget {
-    pub(crate) color: Box<[Attachment]>,
-    pub(crate) depth: Option<Attachment>,
-    pub(crate) render_area: vk::Rect2D,
+    pub color: Box<[Attachment]>,
+    pub depth: Option<Attachment>,
+    pub render_area: vk::Rect2D,
     // pub(crate) stencil: Option<Attachment>,
 }
 
@@ -77,6 +77,16 @@ impl RenderTarget {
             let new_layout = vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
             if img.layout != new_layout {
+                let aspect_mask = if matches!(
+                    img.format,
+                    ash::vk::Format::D32_SFLOAT_S8_UINT
+                        | ash::vk::Format::D24_UNORM_S8_UINT
+                        | ash::vk::Format::D16_UNORM_S8_UINT
+                ) {
+                    vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+                } else {
+                    vk::ImageAspectFlags::DEPTH
+                };
                 // NOTE: This renderer currently only uses combined depth stencil images.
                 barriers.push(vk::ImageMemoryBarrier2 {
                     src_stage_mask: vk::PipelineStageFlags2::TOP_OF_PIPE,
@@ -87,7 +97,7 @@ impl RenderTarget {
                     new_layout,
                     image: img.handle,
                     subresource_range: vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL,
+                        aspect_mask,
                         base_mip_level: 0,
                         level_count: img.mip_level_count,
                         base_array_layer: 0,
@@ -176,18 +186,28 @@ impl RenderTarget {
             let img = renderer
                 .get_image_mut(attachment.img)
                 .ok_or(Error::ResourceMissing)?;
+            let aspect_mask = if matches!(
+                img.format,
+                ash::vk::Format::D32_SFLOAT_S8_UINT
+                    | ash::vk::Format::D24_UNORM_S8_UINT
+                    | ash::vk::Format::D16_UNORM_S8_UINT
+            ) {
+                vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+            } else {
+                vk::ImageAspectFlags::DEPTH
+            };
             if img.layout != attachment.final_layout {
                 // NOTE: This renderer currently only uses combined depth stencil images.
                 barriers.push(vk::ImageMemoryBarrier2 {
                     src_stage_mask: vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS,
                     src_access_mask: vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
-                    dst_stage_mask: vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+                    dst_stage_mask: vk::PipelineStageFlags2::ALL_GRAPHICS,
                     dst_access_mask: vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ,
                     old_layout: img.layout,
                     new_layout: attachment.final_layout,
                     image: img.handle,
                     subresource_range: vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL,
+                        aspect_mask,
                         base_mip_level: 0,
                         level_count: img.mip_level_count,
                         base_array_layer: 0,
@@ -198,7 +218,7 @@ impl RenderTarget {
                 img.layout = attachment.final_layout;
             }
         }
-        // Barrier to transition for present
+
         let dependency_info = vk::DependencyInfo {
             image_memory_barrier_count: barriers.len() as u32,
             p_image_memory_barriers: barriers.as_ptr(),
@@ -446,6 +466,7 @@ pub struct FrameData {
     command_pool: vk::CommandPool,
     command_buffer: vk::CommandBuffer,
     allocator: FrameAllocator,
+    images: Vec<ImageHandle>,
 }
 
 impl std::fmt::Debug for FrameData {
@@ -553,6 +574,7 @@ impl FrameData {
             command_pool,
             command_buffer,
             allocator,
+            images: Vec::new(),
         })
     }
     #[inline]
@@ -566,6 +588,17 @@ impl FrameData {
     #[inline]
     pub fn command_buffer(&self) -> vk::CommandBuffer {
         self.command_buffer
+    }
+    #[inline]
+    pub fn reset(&mut self, renderer: &mut Renderer) {
+        self.allocator.reset_all();
+        while let Some(handle) = self.images.pop() {
+            renderer.destroy_image(handle);
+        }
+    }
+    #[inline]
+    pub fn get_image(&self, index: usize) -> Option<ImageHandle> {
+        self.images.get(index).copied()
     }
 }
 
@@ -669,7 +702,54 @@ impl FrameContext {
 
         return Some(last_range);
     }
+    pub fn create_image(
+        &mut self,
+        image_create_info: &vulkan::ImageCreateInfo,
+        renderer: &mut Renderer,
+    ) -> Result<usize> {
+        let mut index = None;
+        let mut cleanup = 0;
+        let mut error = None;
+        for (i, frame) in self.frames.iter_mut().enumerate() {
+            let cur_idx = frame.images.len();
+            if let Some(idx) = index {
+                if idx != cur_idx {
+                    cleanup = i;
+                    break;
+                }
+            }
+            let imgage_handle = match renderer.create_image(image_create_info) {
+                Ok(img) => img,
+                Err(e) => {
+                    error = Some(e);
+                    cleanup = i;
+                    break;
+                }
+            };
+            frame.images.push(imgage_handle);
+            index = Some(cur_idx);
+        }
+
+        for i in 0..cleanup {
+            if let Some(image_handle) = self.frames[i].images.pop() {
+                renderer.destroy_image(image_handle);
+            }
+        }
+
+        if cleanup != 0 && error.is_none() {
+            panic!("This should never happen");
+        } else if let Some(e) = error {
+            return Err(e);
+        }
+
+        Ok(index.unwrap())
+    }
     pub fn destroy_images(&mut self, renderer: &mut Renderer) {
+        for frame in self.frames.iter_mut() {
+            while let Some(image_handle) = frame.images.pop() {
+                renderer.destroy_image(image_handle);
+            }
+        }
         while let Some((swapchain, depth)) = self.images.pop() {
             renderer.destroy_image(swapchain);
             renderer.destroy_image(depth);

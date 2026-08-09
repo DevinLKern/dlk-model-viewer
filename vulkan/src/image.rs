@@ -31,7 +31,7 @@ pub struct ImageCreateInfo {
     pub width: u32,
     pub height: u32,
     pub depth: u32,
-    pub usage: ash::vk::ImageUsageFlags,
+    pub usage: vk::ImageUsageFlags,
     pub mip_level_count: u32,
     pub layer_count: u32,
     pub level_count: u32,
@@ -40,20 +40,21 @@ pub struct ImageCreateInfo {
 pub fn is_depth_format(format: ash::vk::Format) -> bool {
     matches!(
         format,
-        ash::vk::Format::D16_UNORM
-            | ash::vk::Format::X8_D24_UNORM_PACK32
-            | ash::vk::Format::D16_UNORM_S8_UINT
-            | ash::vk::Format::D24_UNORM_S8_UINT
-            | ash::vk::Format::D32_SFLOAT_S8_UINT
+        vk::Format::D16_UNORM
+            | vk::Format::D32_SFLOAT
+            | vk::Format::X8_D24_UNORM_PACK32
+            | vk::Format::D16_UNORM_S8_UINT
+            | vk::Format::D24_UNORM_S8_UINT
+            | vk::Format::D32_SFLOAT_S8_UINT
     )
 }
 pub fn is_stencil_format(format: ash::vk::Format) -> bool {
     matches!(
         format,
-        ash::vk::Format::S8_UINT
-            | ash::vk::Format::D16_UNORM_S8_UINT
-            | ash::vk::Format::D24_UNORM_S8_UINT
-            | ash::vk::Format::D32_SFLOAT_S8_UINT
+        vk::Format::S8_UINT
+            | vk::Format::D16_UNORM_S8_UINT
+            | vk::Format::D24_UNORM_S8_UINT
+            | vk::Format::D32_SFLOAT_S8_UINT
     )
 }
 

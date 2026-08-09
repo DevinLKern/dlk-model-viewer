@@ -331,8 +331,9 @@ pub(crate) enum PipelineDescription {
         vert_shader: ShaderModuleResourceHandle,
         frag_shader: ShaderModuleResourceHandle,
         topology: vk::PrimitiveTopology,
-        color_format: vk::Format,
-        depth_format: vk::Format,
+        color_formats: Box<[vk::Format]>,
+        depth_format: Option<vk::Format>,
+        stencil_format: Option<vk::Format>,
         samples: vk::SampleCountFlags,
     },
     ComputeInternal {
@@ -380,8 +381,9 @@ impl PipelineResourceManager {
                 vert_shader,
                 frag_shader,
                 topology,
-                color_format,
+                color_formats,
                 depth_format,
+                stencil_format,
                 samples,
             } => {
                 let (vert_stage, vert_input_attributes, vert_input_bindings) = {
@@ -500,12 +502,11 @@ impl PipelineResourceManager {
                     p_dynamic_states: dynamic_states.as_ptr(),
                     ..Default::default()
                 };
-                let color_formats = [*color_format];
                 let pipeline_rendering_info = vk::PipelineRenderingCreateInfo {
                     color_attachment_count: color_formats.len() as u32,
                     p_color_attachment_formats: color_formats.as_ptr(),
-                    depth_attachment_format: *depth_format,
-                    stencil_attachment_format: *depth_format,
+                    depth_attachment_format: depth_format.unwrap_or(vk::Format::UNDEFINED),
+                    stencil_attachment_format: stencil_format.unwrap_or(vk::Format::UNDEFINED),
                     ..Default::default()
                 };
                 let pipeline_create_infos = [vk::GraphicsPipelineCreateInfo {

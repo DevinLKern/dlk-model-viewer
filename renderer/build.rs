@@ -281,6 +281,12 @@ fn main() {
         PathBuf::from("shaders")
             .join("grid")
             .with_added_extension("vert"),
+        PathBuf::from("shaders")
+            .join("depth")
+            .with_added_extension("frag"),
+        PathBuf::from("shaders")
+            .join("depth")
+            .with_added_extension("vert"),
     ];
 
     for path in &shader_paths {

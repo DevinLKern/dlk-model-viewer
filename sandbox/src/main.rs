@@ -9,8 +9,9 @@ use constants::*;
 use input_manager::{Input, InputEvent, InputManager};
 use obj_mtl::{Vertex, VertexNormal};
 use renderer::{
-    AllocationRange, CameraUBO, GridRenderPass, InstanceData, MainRenderPass, MaterialBuilderData,
-    PointLightsUBO, Renderer, Scene, SceneBuilder, ShaderVertVertex, TextureIndexValue,
+    AllocationRange, CameraUBO, DepthRenderPass, GridRenderPass, InstanceData, MainRenderPass,
+    MaterialBuilderData, PointLightsUBO, Renderer, Scene, SceneBuilder, ShaderVertVertex,
+    TextureIndexValue,
 };
 use result::{Error, Result};
 use settings::{Command, Event, Settings};
@@ -58,9 +59,12 @@ struct Application {
     camera_data_range: AllocationRange,
     instance_data_range: AllocationRange,
     point_lights_ubo_data_range: AllocationRange,
+    light_data_range: AllocationRange,
     main_scene: Scene,
     main_pass: MainRenderPass,
     grid_pass: GridRenderPass,
+    depth_pass: DepthRenderPass,
+    depth_image_index: usize,
     default_texture_index: usize,
     grid_first_vertex: usize,
     grid_index_count: usize,
@@ -138,7 +142,13 @@ impl Application {
         let mut scene_builder = SceneBuilder::new();
 
         scene_builder.set_light_color(Vec4::new(1.0, 1.0, 1.0, 1.0));
-        scene_builder.set_light_direction(ENGINE_RIGHT.sub(ENGINE_UP));
+        scene_builder.set_light_direction(
+            ENGINE_RIGHT
+                .scaled(0.5)
+                .add(ENGINE_FORWARDS.scaled(0.3))
+                .sub(ENGINE_UP)
+                .normalized(),
+        );
         scene_builder.set_ambient_light_intensity(0.1);
 
         // main - add materials and textures
@@ -350,7 +360,7 @@ impl Application {
 
         let (orbit_camera, orbit_controller) = {
             let mut controller = OrbitCameraController::new(model_transform.position);
-            let mut camera = Camera::orthographic(1.25, 1.25, 20.0);
+            let mut camera = Camera::orthographic(1.25, 1.25, 10.0);
 
             camera
                 .transform
@@ -431,6 +441,8 @@ impl Application {
 
         let grid_pass = renderer::GridRenderPass::new(&main_scene, &mut renderer)?;
 
+        let depth_pass = renderer::DepthRenderPass::new(&mut renderer)?;
+
         Ok(Self {
             last: std::time::Instant::now(),
             window_name,
@@ -448,9 +460,12 @@ impl Application {
             camera_data_range: AllocationRange { offset: 0, size: 0 },
             instance_data_range: AllocationRange { offset: 0, size: 0 },
             point_lights_ubo_data_range: AllocationRange { offset: 0, size: 0 },
+            light_data_range: AllocationRange { offset: 0, size: 0 },
             main_scene,
             main_pass,
             grid_pass,
+            depth_pass,
+            depth_image_index: 0,
             grid_first_vertex,
             grid_index_count,
             grid_first_index,
@@ -611,6 +626,76 @@ impl Application {
 
         Ok(())
     }
+    fn update_context(&mut self, ctx: &mut renderer::FrameContext) -> Result<()> {
+        const CAMERA_SIZE: u64 = std::mem::size_of::<CameraUBO>() as u64;
+        const INSTANCE_SIZE: u64 = std::mem::size_of::<InstanceData>() as u64;
+        const POINT_LIGHTS_UBO_SIZE: u64 = std::mem::size_of::<renderer::PointLightsUBO>() as u64;
+        const POINT_LIGHT_SIZE: u64 = std::mem::size_of::<renderer::PointLightData>() as u64;
+        const LIGHT_SIZE: u64 = std::mem::size_of::<renderer::DirectionalLightUBO>() as u64;
+
+        self.camera_data_range = ctx
+            .reserve_uniform_data(CAMERA_SIZE, CAMERA_SIZE)
+            .ok_or_else(|| {
+                ctx.destroy_images(&mut self.renderer);
+                renderer::Error::BufferCapacityExceeded
+            })?;
+        self.instance_data_range = ctx
+            .reserve_storage_data(
+                renderer::MAX_INSTANCE_DATA_COUNT * INSTANCE_SIZE,
+                INSTANCE_SIZE,
+            )
+            .ok_or_else(|| {
+                ctx.destroy_images(&mut self.renderer);
+                renderer::Error::BufferCapacityExceeded
+            })?;
+        self.point_lights_ubo_data_range = ctx
+            .reserve_storage_data(
+                POINT_LIGHTS_UBO_SIZE + (renderer::MAX_POINT_LIGHT_COUNT * POINT_LIGHT_SIZE),
+                POINT_LIGHT_SIZE,
+            )
+            .ok_or_else(|| {
+                ctx.destroy_images(&mut self.renderer);
+                renderer::Error::BufferCapacityExceeded
+            })?;
+
+        self.light_data_range = ctx
+            .reserve_uniform_data(LIGHT_SIZE, LIGHT_SIZE)
+            .ok_or_else(|| {
+                ctx.destroy_images(&mut self.renderer);
+                renderer::Error::BufferCapacityExceeded
+            })?;
+
+        self.depth_image_index = {
+            let image_create_info = vulkan::ImageCreateInfo {
+                memory_property_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                image_type: vk::ImageType::TYPE_2D,
+                format: vk::Format::D32_SFLOAT,
+                width: 1024 * 4,
+                height: 1024 * 4,
+                depth: 1,
+                usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+                mip_level_count: 1,
+                layer_count: 1,
+                level_count: 1,
+            };
+            ctx.create_image(&image_create_info, &mut self.renderer)
+        }?;
+
+        self.main_pass.update_context(
+            ctx,
+            &self.camera_data_range,
+            &self.instance_data_range,
+            &self.point_lights_ubo_data_range,
+            &self.light_data_range,
+            self.depth_image_index,
+            &self.renderer,
+        )?;
+        self.grid_pass.update_context(&ctx, &self.camera_data_range);
+        self.depth_pass
+            .update_context(&ctx, &self.light_data_range, &self.instance_data_range);
+
+        Ok(())
+    }
     fn resumed_inner(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
         if !self.windows.is_empty() {
             return Ok(());
@@ -626,49 +711,9 @@ impl Application {
 
         let window_id = window.id();
         let context = {
-            const CAMERA_SIZE: u64 = std::mem::size_of::<CameraUBO>() as u64;
-            const INSTANCE_SIZE: u64 = std::mem::size_of::<InstanceData>() as u64;
-            const POINT_LIGHTS_UBO_SIZE: u64 =
-                std::mem::size_of::<renderer::PointLightsUBO>() as u64;
-            const POINT_LIGHT_SIZE: u64 = std::mem::size_of::<renderer::PointLightData>() as u64;
-
             let mut ctx = unsafe { renderer::FrameContext::new(&mut self.renderer, &window) }?;
-            self.camera_data_range = ctx
-                .reserve_uniform_data(CAMERA_SIZE, CAMERA_SIZE)
-                .ok_or_else(|| {
-                    ctx.destroy_images(&mut self.renderer);
-                    renderer::Error::BufferCapacityExceeded
-                })?;
-            self.instance_data_range = ctx
-                .reserve_storage_data(
-                    renderer::MAX_INSTANCE_DATA_COUNT * INSTANCE_SIZE,
-                    INSTANCE_SIZE,
-                )
-                .ok_or_else(|| {
-                    ctx.destroy_images(&mut self.renderer);
-                    renderer::Error::BufferCapacityExceeded
-                })?;
-            self.point_lights_ubo_data_range = ctx
-                .reserve_storage_data(
-                    POINT_LIGHTS_UBO_SIZE + (renderer::MAX_POINT_LIGHT_COUNT * POINT_LIGHT_SIZE),
-                    POINT_LIGHT_SIZE,
-                )
-                .ok_or_else(|| {
-                    ctx.destroy_images(&mut self.renderer);
-                    renderer::Error::BufferCapacityExceeded
-                })?;
 
-            self.main_pass
-                .update_context(
-                    &mut ctx,
-                    &self.camera_data_range,
-                    &self.instance_data_range,
-                    &self.point_lights_ubo_data_range,
-                )
-                .inspect_err(|_| {
-                    ctx.destroy_images(&mut self.renderer);
-                })?;
-            self.grid_pass.update_context(&ctx, &self.camera_data_range);
+            self.update_context(&mut ctx)?;
 
             ctx
         };
@@ -680,7 +725,7 @@ impl Application {
 
             self.fps_camera.set_aspect_ratio(aspect_ratio);
             self.orbit_camera.set_aspect_ratio(aspect_ratio);
-        };
+        }
 
         if let Some((mut old_context, _)) = self.windows.insert(window_id, (context, window)) {
             old_context.destroy_images(&mut self.renderer);
@@ -688,7 +733,7 @@ impl Application {
 
         Ok(())
     }
-    fn handle_window_event(
+    fn window_event_inner(
         &mut self,
         event: winit::event::WindowEvent,
         window_id: &winit::window::WindowId,
@@ -701,11 +746,6 @@ impl Application {
                 return Ok(true);
             }
             WindowEvent::Resized(s) => {
-                let (context, window) = self
-                    .windows
-                    .get_mut(window_id)
-                    .ok_or(Error::WindowIdInvalid)?;
-
                 unsafe { self.renderer.device.device_wait_idle() }
                     .inspect_err(|e| tracing::error!("{e}"))
                     .unwrap();
@@ -719,54 +759,20 @@ impl Application {
                 }
 
                 let new_context = {
-                    const CAMERA_SIZE: u64 = std::mem::size_of::<CameraUBO>() as u64;
-                    const INSTANCE_SIZE: u64 = std::mem::size_of::<InstanceData>() as u64;
-                    const POINT_LIGHTS_UBO_SIZE: u64 =
-                        std::mem::size_of::<renderer::PointLightsUBO>() as u64;
-                    const POINT_LIGHT_SIZE: u64 =
-                        std::mem::size_of::<renderer::PointLightData>() as u64;
-
+                    let (_, window) = self
+                        .windows
+                        .get_mut(window_id)
+                        .ok_or(Error::WindowIdInvalid)?;
                     let mut ctx =
                         unsafe { renderer::FrameContext::new(&mut self.renderer, &window) }?;
-                    self.camera_data_range = ctx
-                        .reserve_uniform_data(CAMERA_SIZE, CAMERA_SIZE)
-                        .ok_or_else(|| {
-                            ctx.destroy_images(&mut self.renderer);
-                            renderer::Error::BufferCapacityExceeded
-                        })?;
-                    self.instance_data_range = ctx
-                        .reserve_storage_data(
-                            renderer::MAX_INSTANCE_DATA_COUNT * INSTANCE_SIZE,
-                            INSTANCE_SIZE,
-                        )
-                        .ok_or_else(|| {
-                            ctx.destroy_images(&mut self.renderer);
-                            renderer::Error::BufferCapacityExceeded
-                        })?;
-                    self.point_lights_ubo_data_range = ctx
-                        .reserve_storage_data(
-                            POINT_LIGHTS_UBO_SIZE
-                                + (renderer::MAX_POINT_LIGHT_COUNT * POINT_LIGHT_SIZE),
-                            POINT_LIGHT_SIZE,
-                        )
-                        .ok_or_else(|| {
-                            ctx.destroy_images(&mut self.renderer);
-                            renderer::Error::BufferCapacityExceeded
-                        })?;
-                    self.main_pass
-                        .update_context(
-                            &mut ctx,
-                            &self.camera_data_range,
-                            &self.instance_data_range,
-                            &self.point_lights_ubo_data_range,
-                        )
-                        .inspect_err(|_| {
-                            ctx.destroy_images(&mut self.renderer);
-                        })?;
-                    self.grid_pass.update_context(&ctx, &self.camera_data_range);
+
+                    self.update_context(&mut ctx)?;
 
                     ctx
                 };
+                // fighting the borrow checker
+                let (context, _) = self.windows.get_mut(window_id).unwrap();
+
                 context.destroy_images(&mut self.renderer);
                 *context = new_context;
 
@@ -796,7 +802,6 @@ impl Application {
 
                 let cmd = context.get_current_frame().command_buffer();
 
-                // PART 1 - MODEL
                 self.main_scene.reset();
                 context
                     .get_current_frame_mut()
@@ -804,28 +809,42 @@ impl Application {
                     .reset_indirect();
 
                 let target = context.get_swapchain_render_target()?;
-                target.begin_rendering(&mut self.renderer, cmd)?;
+
+                let depth_target = {
+                    let depth_image = context
+                        .get_current_frame()
+                        .get_image(self.depth_image_index)
+                        .unwrap();
+                    let (width, height) = {
+                        let img = self.renderer.get_image(depth_image).unwrap();
+                        (img.width, img.height)
+                    };
+                    renderer::RenderTarget {
+                        color: Box::new([]),
+                        depth: Some(renderer::Attachment {
+                            img: depth_image,
+                            load_op: vk::AttachmentLoadOp::CLEAR,
+                            store_op: vk::AttachmentStoreOp::STORE,
+                            clear_val: vk::ClearValue {
+                                depth_stencil: vk::ClearDepthStencilValue {
+                                    depth: 1.0,
+                                    stencil: 0,
+                                },
+                            },
+                            final_layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                        }),
+                        render_area: vk::Rect2D {
+                            offset: vk::Offset2D { x: 0, y: 0 },
+                            extent: vk::Extent2D { width, height },
+                        },
+                    }
+                };
+
+                depth_target.begin_rendering(&mut self.renderer, cmd)?;
 
                 let mut indirect_command_data =
                     Vec::<vk::DrawIndexedIndirectCommand>::with_capacity(64);
                 let mut instance_data = Vec::<InstanceData>::with_capacity(64);
-
-                unsafe {
-                    let scissor = vk::Rect2D {
-                        offset: vk::Offset2D { x: 0, y: 0 },
-                        extent: swapchain_extent,
-                    };
-                    let viewport = ash::vk::Viewport {
-                        x: 0.0,
-                        y: 0.0,
-                        width: scissor.extent.width as f32,
-                        height: scissor.extent.height as f32,
-                        min_depth: 0.0,
-                        max_depth: 1.0,
-                    };
-                    self.renderer.device.cmd_set_viewport(cmd, 0, &[viewport]);
-                    self.renderer.device.cmd_set_scissor(cmd, 0, &[scissor]);
-                }
 
                 let stride = std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u64;
                 for (first_index, index_count, material_index) in self.model_shape_info.iter() {
@@ -880,13 +899,91 @@ impl Application {
                         .upload_uniform_data(self.camera_data_range.offset, &[camera_data])
                 }?;
 
+                // PART 0 - MESH
+
                 {
+                    unsafe {
+                        let scissor = vk::Rect2D {
+                            offset: vk::Offset2D { x: 0, y: 0 },
+                            extent: depth_target.render_area.extent,
+                        };
+                        let viewport = ash::vk::Viewport {
+                            x: 0.0,
+                            y: 0.0,
+                            width: scissor.extent.width as f32,
+                            height: scissor.extent.height as f32,
+                            min_depth: 0.0,
+                            max_depth: 1.0,
+                        };
+                        self.renderer.device.cmd_set_viewport(cmd, 0, &[viewport]);
+                        self.renderer.device.cmd_set_scissor(cmd, 0, &[scissor]);
+                    }
+                    let light_data = {
+                        let camera = match self.camera_in_use {
+                            CameraInUse::Fps => &self.fps_camera,
+                            CameraInUse::Orbit => &self.orbit_camera,
+                        };
+
+                        let mut light = camera::Camera::orthographic(4.0, 4.0, 8.0);
+                        let mut controller = camera::controllers::FpsCameraController::new();
+                        controller.r#move(
+                            camera
+                                .transform
+                                .position
+                                .sub(self.main_scene.light_dir().scaled(4.0)),
+                        );
+                        controller.update(&mut light, 1.0, 1.0);
+                        light.look_at(camera.transform.position, ENGINE_UP);
+
+                        [renderer::DirectionalLightUBO {
+                            view_matrix: light.view_matrix().into_2d_arr(),
+                            proj_matrix: light.projection_matrix().into_2d_arr(),
+                        }]
+                    };
+
+                    unsafe {
+                        context
+                            .get_current_frame_mut()
+                            .allocator_mut()
+                            .upload_uniform_data(self.light_data_range.offset, &light_data)?;
+                    }
+                }
+
+                self.renderer.render_depth_scene(
+                    context,
+                    &self.main_scene,
+                    &self.depth_pass,
+                    indirect_offset,
+                    indirect_command_data.len() as u32,
+                    stride as u32,
+                )?;
+
+                // PART 1 - MODEL
+                depth_target.end_rendering(&mut self.renderer, cmd)?;
+                target.begin_rendering(&mut self.renderer, cmd)?;
+                {
+                    unsafe {
+                        let scissor = vk::Rect2D {
+                            offset: vk::Offset2D { x: 0, y: 0 },
+                            extent: swapchain_extent,
+                        };
+                        let viewport = ash::vk::Viewport {
+                            x: 0.0,
+                            y: 0.0,
+                            width: scissor.extent.width as f32,
+                            height: scissor.extent.height as f32,
+                            min_depth: 0.0,
+                            max_depth: 1.0,
+                        };
+                        self.renderer.device.cmd_set_viewport(cmd, 0, &[viewport]);
+                        self.renderer.device.cmd_set_scissor(cmd, 0, &[scissor]);
+                    }
                     let camera = match self.camera_in_use {
                         CameraInUse::Fps => &self.fps_camera,
                         CameraInUse::Orbit => &self.orbit_camera,
                     };
                     let point_light_data = [renderer::PointLightData {
-                        color: [1.0, 1.0, 1.0, 1.0],
+                        color: [1.0, 1.0, 1.0, 0.1],
                         position: camera.transform.position.as_arr(),
                         _pad: 0,
                     }];
@@ -1032,11 +1129,10 @@ impl ApplicationHandler for Application {
             event_loop.exit();
         }
     }
-    #[allow(unused_variables)]
     fn device_event(
         &mut self,
-        event_loop: &ActiveEventLoop,
-        device_id: winit::event::DeviceId,
+        _event_loop: &ActiveEventLoop,
+        _device_id: winit::event::DeviceId,
         event: winit::event::DeviceEvent,
     ) {
         self.input_manager.update(InputEvent::Device(event));
@@ -1052,7 +1148,7 @@ impl ApplicationHandler for Application {
             return;
         }
 
-        match self.handle_window_event(event, &window_id) {
+        match self.window_event_inner(event, &window_id) {
             Ok(b) => {
                 if b {
                     self.exiting(event_loop);

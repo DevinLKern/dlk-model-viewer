@@ -6,11 +6,6 @@ const uint MATERIAL_FLAG_DIFFUSE_TEXTURE_BIT = (1 << 0);
 const uint MATERIAL_FLAG_AMBIENT_TEXTURE_BIT = (1 << 1);
 const uint MATERIAL_FLAG_SPECULAR_TEXTURE_BIT = (1 << 2);
 
-layout(std140, set = 0, binding = 0) uniform CameraUBO {
-    mat4 view_matrix;
-    mat4 proj_matrix;
-} camera;
-
 struct InstanceData {
     mat4 model_matrix;
     mat4 normal_matrix;
@@ -20,9 +15,14 @@ struct InstanceData {
     uint _pad2;
 };
 
-layout(std430, set = 0, binding = 1) buffer InstanceBuffer {
+layout(std430, set = 0, binding = 0) buffer InstanceBuffer {
     InstanceData arr [];
 } instances;
+
+layout(std140, set = 0, binding = 1) uniform CameraUBO {
+    mat4 view_matrix;
+    mat4 proj_matrix;
+} camera;
 
 struct PointLightData {
     // w is intensity / brightness
@@ -38,6 +38,14 @@ layout(std430, set = 0, binding = 2) buffer PointLightsUBO {
     
     PointLightData arr [];
 } point_lights;
+
+// layout(std140, set = 0, binding = 3) uniform DirectionalLightUBO {
+//     mat4 view_matrix;
+//     mat4 proj_matrix;
+// } light;
+
+// added to main shader
+layout(set = 0, binding = 4) uniform sampler2D shadow_map;
 
 // irregular
 layout(std140, set = 1, binding = 0) uniform GlobalLightUBO {
@@ -70,9 +78,65 @@ layout (location = 0) in vec3 v_pos;
 layout (location = 1) in vec2 v_tex_coord;
 layout (location = 2) in vec3 v_normal_world_space;
 layout (location = 3) flat in uint v_material_index;
+layout (location = 4) in vec4 v_pos_light_space;
 
 layout (location = 0) out vec4 f_color;
 
+float shadow_calculation(vec4 frag_pos_light_space, vec3 light_dir, vec3 normal) {
+    // perform perspective divide
+    vec3 proj_coords = frag_pos_light_space.xyz / frag_pos_light_space.w;
+    // transform to [0,1] range
+    proj_coords.xy = proj_coords.xy * 0.5 + 0.5;
+
+    if (proj_coords.z < 0.0 || proj_coords.z > 1.0) {
+        return 0.0;
+    }
+
+    // get closest depth value from light's perspective (using [0,1] range fragPosLight as coords)
+    float closest_depth = texture(shadow_map, proj_coords.xy).r; 
+    // get depth of current fragment from light's perspective
+    float current_depth = proj_coords.z;
+
+    float factor = dot(normalize(normal), -normalize(light_dir));
+
+    if (factor <= 0.0) {
+        return 0.0;
+    }
+
+    float bias = 0.001 * factor;
+    float shadow = current_depth - bias > closest_depth ? 1.0 : 0.0;
+    return shadow;
+}
+// float shadow_calculation(vec4 frag_pos_light_space, vec3 light_dir, vec3 normal) {
+//     // perform perspective divide
+//     vec3 proj_coords = frag_pos_light_space.xyz / frag_pos_light_space.w;
+//     // transform to [0,1] range
+//     proj_coords.xy = proj_coords.xy * 0.5 + 0.5;
+// 
+//     if (proj_coords.z < 0.0 || proj_coords.z > 1.0) {
+//         return 0.0;
+//     }
+// 
+//     // get depth of current fragment from light's perspective
+//     float current_depth = proj_coords.z;
+// 
+//     float factor = dot(normalize(normal), -normalize(light_dir));
+//     float bias = max(0.01 * (1.0 - factor), 0.001);
+// 
+//     float shadow = 0.0;
+//     vec2 texel_size = 1.0 / textureSize(shadow_map, 0);
+//     for (int x = -1; x <= 1; ++x) {
+//         for (int y = -1; y <= 1; ++y) {
+//             // raw depth, no hardware compare
+//             float closest_depth =
+//                 texture(shadow_map, proj_coords.xy + vec2(x, y) * texel_size).r;
+//             shadow += current_depth - bias > closest_depth ? 1.0 : 0.0;
+//         }
+//     }
+//     shadow /= 9.0;
+// 
+//     return shadow;
+// }
 
 vec3 calc_point_light(PointLightData light, MaterialUBO mat, vec3 view_dir) {
     vec3 light_dir = normalize(light.position - v_pos);
@@ -132,8 +196,10 @@ void main() {
     if ((mat.flags & MATERIAL_FLAG_SPECULAR_TEXTURE_BIT) != 0) {
         specular *= texture(global_textures[nonuniformEXT(mat.specular_texture_index)], v_tex_coord).rgb;
     }
+    
+    float shadow = shadow_calculation(v_pos_light_space, v_normal_world_space, world_light_dir);
 
-    vec3 res = diffuse + specular + ambient;
+    vec3 res = (diffuse + specular) * (1.0 - shadow) + ambient;
         
     for (int i = 0; i < point_lights.count; i++) {
         PointLightData light = point_lights.arr[i];

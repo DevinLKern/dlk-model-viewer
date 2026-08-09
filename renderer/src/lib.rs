@@ -68,6 +68,7 @@ pub struct Renderer {
     pipelines: PipelineResourceManager,
     images: SlotMap<ImageHandle, vulkan::Image>,
     repeat_sampler: vk::Sampler,
+    shadowmap_sampler: vk::Sampler,
     mesh_arenas: slotmap::DenseSlotMap<MeshArenaHandle, MeshArena>,
 }
 
@@ -119,6 +120,32 @@ impl Renderer {
             })?
         };
 
+        let shadowmap_sampler = {
+            let properties = unsafe { device.get_physical_device_properties() };
+
+            let sampler_create_info = vk::SamplerCreateInfo {
+                mag_filter: vk::Filter::LINEAR,
+                min_filter: vk::Filter::LINEAR,
+                mipmap_mode: vk::SamplerMipmapMode::LINEAR,
+                address_mode_u: vk::SamplerAddressMode::CLAMP_TO_EDGE,
+                address_mode_v: vk::SamplerAddressMode::CLAMP_TO_EDGE,
+                address_mode_w: vk::SamplerAddressMode::REPEAT,
+                anisotropy_enable: vk::TRUE,
+                compare_enable: vk::FALSE,
+                max_anisotropy: properties.limits.max_sampler_anisotropy,
+                compare_op: vk::CompareOp::ALWAYS,
+                ..Default::default()
+            };
+
+            unsafe { device.create_sampler(&sampler_create_info) }.inspect_err(|e| {
+                tracing::error!("{e}");
+                unsafe {
+                    device.destroy_sampler(repeat_sampler);
+                    device.destroy_command_pool(command_pool);
+                }
+            })?
+        };
+
         Ok(Self {
             device,
             command_pool,
@@ -129,6 +156,7 @@ impl Renderer {
             mesh_arenas: slotmap::DenseSlotMap::with_key(),
             images: slotmap::SlotMap::with_key(),
             repeat_sampler,
+            shadowmap_sampler,
         })
     }
     // TODO: Add RenderPass trait
@@ -160,6 +188,28 @@ impl Renderer {
         ctx: &mut FrameContext,
         scene: &Scene,
         pass: &GridRenderPass,
+        indirect_offset: u64,
+        draw_count: u32,
+        stride: u32,
+    ) -> Result<()> {
+        pass.render(
+            ctx,
+            &mut self.pipelines,
+            &mut self.pipeline_layouts,
+            &mut self.shader_modules,
+            &self.mesh_arenas,
+            scene,
+            indirect_offset,
+            draw_count,
+            stride,
+        )
+    }
+    #[inline]
+    pub fn render_depth_scene(
+        &mut self,
+        ctx: &mut FrameContext,
+        scene: &Scene,
+        pass: &DepthRenderPass,
         indirect_offset: u64,
         draw_count: u32,
         stride: u32,
@@ -608,6 +658,10 @@ impl Renderer {
     pub fn repeat_sampler(&self) -> vk::Sampler {
         self.repeat_sampler
     }
+    #[inline]
+    pub fn shadowmap_sampler(&self) -> vk::Sampler {
+        self.shadowmap_sampler
+    }
 }
 
 impl Drop for Renderer {
@@ -616,6 +670,7 @@ impl Drop for Renderer {
             let _ = self.device.device_wait_idle();
 
             self.device.destroy_sampler(self.repeat_sampler);
+            self.device.destroy_sampler(self.shadowmap_sampler);
             self.device.destroy_command_pool(self.command_pool);
         }
     }
