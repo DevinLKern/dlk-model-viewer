@@ -70,12 +70,14 @@ pub struct Renderer {
     repeat_sampler: vk::Sampler,
     shadowmap_sampler: vk::Sampler,
     mesh_arenas: slotmap::DenseSlotMap<MeshArenaHandle, MeshArena>,
+    samples: vk::SampleCountFlags,
 }
 
 impl Renderer {
     pub fn new(
         debug_enabled: bool,
         display_handle: &winit::raw_window_handle::DisplayHandle,
+        target_samples: vk::SampleCountFlags,
     ) -> result::Result<Renderer> {
         let instance = vulkan::Instance::new(debug_enabled, display_handle)?;
         let device = vulkan::Device::new(instance, Some(vulkan_debug_callback))?;
@@ -146,6 +148,36 @@ impl Renderer {
             })?
         };
 
+        let samples = || -> vk::SampleCountFlags {
+            let properties = unsafe { device.get_physical_device_properties() };
+            let available_samples = properties.limits.framebuffer_depth_sample_counts;
+            if available_samples.contains(target_samples) {
+                return target_samples;
+            }
+
+            const SELECTABLE_SAMPLES: &[vk::SampleCountFlags] = &[
+                vk::SampleCountFlags::TYPE_64,
+                vk::SampleCountFlags::TYPE_32,
+                vk::SampleCountFlags::TYPE_16,
+                vk::SampleCountFlags::TYPE_8,
+                vk::SampleCountFlags::TYPE_4,
+                vk::SampleCountFlags::TYPE_2,
+                vk::SampleCountFlags::TYPE_1,
+            ];
+            let mut max_samples = vk::SampleCountFlags::empty();
+            for selectable in SELECTABLE_SAMPLES
+                .iter()
+                .skip_while(|samples| **samples >= target_samples)
+            {
+                if available_samples.contains(*selectable) {
+                    max_samples = *selectable;
+                    break;
+                }
+            }
+
+            max_samples
+        }();
+
         Ok(Self {
             device,
             command_pool,
@@ -157,6 +189,7 @@ impl Renderer {
             images: slotmap::SlotMap::with_key(),
             repeat_sampler,
             shadowmap_sampler,
+            samples,
         })
     }
     // TODO: Add RenderPass trait
@@ -170,17 +203,7 @@ impl Renderer {
         draw_count: u32,
         stride: u32,
     ) -> Result<()> {
-        pass.render(
-            ctx,
-            &mut self.pipelines,
-            &mut self.pipeline_layouts,
-            &mut self.shader_modules,
-            &self.mesh_arenas,
-            scene,
-            indirect_offset,
-            draw_count,
-            stride,
-        )
+        pass.render(ctx, self, scene, indirect_offset, draw_count, stride)
     }
     #[inline]
     pub fn render_grid_scene(
@@ -192,17 +215,7 @@ impl Renderer {
         draw_count: u32,
         stride: u32,
     ) -> Result<()> {
-        pass.render(
-            ctx,
-            &mut self.pipelines,
-            &mut self.pipeline_layouts,
-            &mut self.shader_modules,
-            &self.mesh_arenas,
-            scene,
-            indirect_offset,
-            draw_count,
-            stride,
-        )
+        pass.render(ctx, self, scene, indirect_offset, draw_count, stride)
     }
     #[inline]
     pub fn render_depth_scene(
@@ -397,6 +410,7 @@ impl Renderer {
     pub fn create_and_populate_image(
         &mut self,
         image_data: image::DynamicImage,
+        samples: vk::SampleCountFlags,
     ) -> result::Result<ImageHandle> {
         use image::GenericImageView;
 
@@ -417,6 +431,7 @@ impl Renderer {
                 usage: vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
                 layer_count: 1,
                 level_count: 1,
+                samples,
             };
 
             vulkan::Image::new(self.device.clone(), &image_create_info)?
@@ -661,6 +676,10 @@ impl Renderer {
     #[inline]
     pub fn shadowmap_sampler(&self) -> vk::Sampler {
         self.shadowmap_sampler
+    }
+    #[inline]
+    pub fn samples(&self) -> vk::SampleCountFlags {
+        self.samples
     }
 }
 

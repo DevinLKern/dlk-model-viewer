@@ -330,7 +330,7 @@ impl Device {
         }
     }
     #[inline]
-    pub(crate) unsafe fn get_physical_device_memory_properties(
+    pub unsafe fn get_physical_device_memory_properties(
         &self,
     ) -> vk::PhysicalDeviceMemoryProperties {
         unsafe {
@@ -556,6 +556,7 @@ impl Device {
     vk_delegate_forward!(cmd_draw_indexed, (cmd: CommandBuffer, index_count: u32, instance_count: u32, first_index: u32, vertex_offset: i32, first_instance: u32), ());
     vk_delegate_forward!(cmd_draw, (cmd: vk::CommandBuffer, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32), ());
     vk_delegate_forward!(cmd_clear_attachments, (cmd: CommandBuffer, attachments: &[ClearAttachment], rects: &[ClearRect]), ());
+    vk_delegate_forward!(cmd_resolve_image, (cmd: CommandBuffer, src_image: Image, src_image_layout: ImageLayout, dst_image: Image, dst_image_layout: ImageLayout, regions: &[vk::ImageResolve]), ());
 }
 
 impl Drop for Device {

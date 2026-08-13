@@ -56,3 +56,4 @@ options:
   model_up: "+z"
   model_right: "+x"
   model_forward: "-y"
+  anti_aliasing: "4xMSAA"

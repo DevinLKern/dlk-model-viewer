@@ -8,6 +8,17 @@ use std::{
     io::{BufReader, Read},
 };
 
+#[derive(Debug, Ord, Eq, PartialEq, PartialOrd)]
+pub enum AntiAliasing {
+    MSAA64x = 6,
+    MSAA32x = 5,
+    MSAA16x = 4,
+    MSAA8x = 3,
+    MSAA4x = 2,
+    MSAA2x = 1,
+    None = 0,
+}
+
 #[allow(unused)]
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub enum Command {
@@ -92,6 +103,7 @@ pub struct Settings {
     pub from_model: math::Mat3<f32>,
     pub bindings: Box<[Binding]>,
     pub default_camera: CameraInUse,
+    pub anti_aliasing: AntiAliasing,
 }
 
 impl Settings {
@@ -322,6 +334,30 @@ impl Settings {
 
         //     INTO_WORLD.mul(&from_model)
         // };
+        //
+        let anti_aliasing = options
+            .get(&Yaml::String(String::from("anti_aliasing")))
+            .unwrap_or(&Yaml::String(String::from("4xMSAA")))
+            .as_str()
+            .ok_or(Error::ConfigFileInvalid(
+                "expected anti aliasing to be a string",
+            ))?
+            .to_string()
+            .trim()
+            .to_uppercase();
+
+        let anti_aliasing = match anti_aliasing.as_str() {
+            "64XMSAA" => AntiAliasing::MSAA64x,
+            "32XMSAA" => AntiAliasing::MSAA32x,
+            "16XMSAA" => AntiAliasing::MSAA16x,
+            "8XMSAA" => AntiAliasing::MSAA8x,
+            "4XMSAA" => AntiAliasing::MSAA4x,
+            "2XMSAA" => AntiAliasing::MSAA2x,
+            "1XMSAA" | "NONE" => AntiAliasing::None,
+            _ => {
+                return Err(Error::ConfigFileInvalid("Invalid anti-aliasing setting"));
+            }
+        };
 
         Ok(Settings {
             default_camera: default_camera,
@@ -330,6 +366,7 @@ impl Settings {
             derive_normals,
             from_model,
             bindings: bindings.into_boxed_slice(),
+            anti_aliasing,
         })
     }
 }

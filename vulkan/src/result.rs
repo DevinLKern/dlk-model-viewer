@@ -15,6 +15,8 @@ pub enum Error {
     CouldNotFindMemoryTypeIndex(ash::vk::MemoryPropertyFlags),
     InvalidBufferType,
     WinitHandleError(winit::raw_window_handle::HandleError),
+    ImageFeaturesNotSupported,
+    CouldNotFindViableMemoryIndex,
     NotImplemented,
 }
 
@@ -40,6 +42,8 @@ impl std::fmt::Display for Error {
                 write!(f, "Could not find memory type index with flags {:?}", flags)
             }
             Self::InvalidBufferType => write!(f, "Invalid buffer type"),
+            Self::ImageFeaturesNotSupported => write!(f, "ImageFeaturesNotSupported"),
+            Self::CouldNotFindViableMemoryIndex => write!(f, "CouldNotFindViableMemoryIndex"),
             _ => write!(f, "Not implemented"),
         }
     }

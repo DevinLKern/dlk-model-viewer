@@ -100,6 +100,7 @@ The `options` section contains global settings for the viewer.
 | `fov_y` | float | Vertical field of view in degrees |
 | `mouse_sensitivity` | float | Mouse sensitivity multiplier |
 | `derive_normals` | boolean | Whether to derive normals if not present in model |
+| `anti_aliasing` | string | AA to be used. Can be set to 1x, 2x, 4x, 8x, 16x, 32x, or 64x MSAA |
 
 ### default_camera
 

@@ -349,9 +349,12 @@ impl MainRenderPass {
             })
             .collect();
 
-        let mut depth_image_infos = Vec::<vk::DescriptorImageInfo>::with_capacity(MAX_FRAME_COUNT as usize);
+        let mut depth_image_infos =
+            Vec::<vk::DescriptorImageInfo>::with_capacity(MAX_FRAME_COUNT as usize);
         for i in 0..MAX_FRAME_COUNT as usize {
-            let handle = ctx.frames()[i].get_image(depth_image_index).ok_or(Error::ResourceMissing)?;
+            let handle = ctx.frames()[i]
+                .get_image(depth_image_index)
+                .ok_or(Error::ResourceMissing)?;
             let image = renderer.get_image(handle).ok_or(Error::ResourceMissing)?;
             depth_image_infos.push(vk::DescriptorImageInfo {
                 image_view: image.view,
@@ -415,17 +418,15 @@ impl MainRenderPass {
     pub fn render(
         &self,
         ctx: &mut FrameContext,
-        pipelines: &mut PipelineResourceManager,
-        pipeline_layouts: &mut PipelineLayoutResourceManager,
-        shader_modules: &mut ShaderModuleResourceManager,
-        mesh_arenas: &slotmap::DenseSlotMap<MeshArenaHandle, MeshArena>,
+        renderer: &mut Renderer,
         scene: &Scene,
         indirect_offset: u64,
         draw_count: u32,
         stride: u32,
     ) -> Result<()> {
         let (pipeline, layout) = {
-            let layout = pipeline_layouts
+            let layout = renderer
+                .pipeline_layouts
                 .get(self.pipeline_layout)
                 .ok_or(Error::ResourceMissing)?
                 .raw;
@@ -437,15 +438,19 @@ impl MainRenderPass {
                 color_formats: Box::new([ctx.get_color_format()]),
                 depth_format: Some(ctx.depth_format()),
                 stencil_format: None,
-                samples: vk::SampleCountFlags::TYPE_1,
+                samples: renderer.samples(),
             };
-            let pipeline_handle =
-                pipelines.access_or_create(pipeline_desc, pipeline_layouts, shader_modules)?;
-            let pipeline = *pipelines
+            let pipeline_handle = renderer.pipelines.access_or_create(
+                pipeline_desc,
+                &mut renderer.pipeline_layouts,
+                &mut renderer.shader_modules,
+            )?;
+            let pipeline = renderer
+                .pipelines
                 .get(pipeline_handle)
                 .ok_or(Error::ResourceMissing)?;
 
-            (pipeline, layout)
+            (*pipeline, layout)
         };
 
         let current_frame_index = ctx.frame_index;
@@ -481,7 +486,7 @@ impl MainRenderPass {
                 dynamic_offsets,
             );
 
-            let mesh_arena = mesh_arenas.get(scene.mesh_arena_handle).unwrap();
+            let mesh_arena = renderer.mesh_arenas.get(scene.mesh_arena_handle).unwrap();
 
             let (vb, ib) = (
                 mesh_arena.vertex_buffer.handle,
@@ -718,17 +723,15 @@ impl GridRenderPass {
     pub fn render(
         &self,
         ctx: &mut FrameContext,
-        pipelines: &mut PipelineResourceManager,
-        pipeline_layouts: &mut PipelineLayoutResourceManager,
-        shader_modules: &mut ShaderModuleResourceManager,
-        mesh_arenas: &slotmap::DenseSlotMap<MeshArenaHandle, MeshArena>,
+        renderer: &mut Renderer,
         scene: &Scene,
         indirect_offset: u64,
         draw_count: u32,
         stride: u32,
     ) -> Result<()> {
         let (pipeline, layout) = {
-            let layout = pipeline_layouts
+            let layout = renderer
+                .pipeline_layouts
                 .get(self.pipeline_layout)
                 .ok_or(Error::ResourceMissing)?
                 .raw;
@@ -740,11 +743,15 @@ impl GridRenderPass {
                 color_formats: Box::new([ctx.get_color_format()]),
                 depth_format: Some(ctx.depth_format()),
                 stencil_format: None,
-                samples: vk::SampleCountFlags::TYPE_1,
+                samples: renderer.samples(),
             };
-            let pipeline_handle =
-                pipelines.access_or_create(pipeline_desc, pipeline_layouts, shader_modules)?;
-            let pipeline = *pipelines
+            let pipeline_handle = renderer.pipelines.access_or_create(
+                pipeline_desc,
+                &mut renderer.pipeline_layouts,
+                &mut renderer.shader_modules,
+            )?;
+            let pipeline = *renderer
+                .pipelines
                 .get(pipeline_handle)
                 .ok_or(Error::ResourceMissing)?;
 
@@ -781,7 +788,7 @@ impl GridRenderPass {
                 &[],
             );
 
-            let mesh_arena = mesh_arenas.get(scene.mesh_arena_handle).unwrap();
+            let mesh_arena = renderer.mesh_arenas.get(scene.mesh_arena_handle).unwrap();
 
             let (vb, ib) = (
                 mesh_arena.vertex_buffer.handle,

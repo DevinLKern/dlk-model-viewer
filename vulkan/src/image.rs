@@ -4,6 +4,21 @@ use crate::result::{Error, Result};
 
 use ash::vk;
 
+#[allow(dead_code)]
+pub struct ImageCreateInfo {
+    pub memory_property_flags: vk::MemoryPropertyFlags,
+    pub image_type: vk::ImageType,
+    pub format: vk::Format,
+    pub width: u32,
+    pub height: u32,
+    pub depth: u32,
+    pub usage: vk::ImageUsageFlags,
+    pub mip_level_count: u32,
+    pub layer_count: u32,
+    pub level_count: u32,
+    pub samples: vk::SampleCountFlags,
+}
+
 enum ImageStorage {
     Owned(vk::DeviceMemory),
     Swapchain,
@@ -21,20 +36,6 @@ pub struct Image {
     pub layout: vk::ImageLayout,
     pub layer_count: u32,
     pub mip_level_count: u32,
-}
-
-#[allow(dead_code)]
-pub struct ImageCreateInfo {
-    pub memory_property_flags: vk::MemoryPropertyFlags,
-    pub image_type: vk::ImageType,
-    pub format: vk::Format,
-    pub width: u32,
-    pub height: u32,
-    pub depth: u32,
-    pub usage: vk::ImageUsageFlags,
-    pub mip_level_count: u32,
-    pub layer_count: u32,
-    pub level_count: u32,
 }
 
 pub fn is_depth_format(format: ash::vk::Format) -> bool {
@@ -155,7 +156,7 @@ impl Image {
             } else if format_properties.linear_tiling_features.contains(features) {
                 vk::ImageTiling::LINEAR
             } else {
-                return Err(Error::NotImplemented); // TODO: add error type?
+                return Err(Error::ImageFeaturesNotSupported);
             }
         };
 
@@ -170,7 +171,7 @@ impl Image {
             },
             usage: create_info.usage,
             array_layers: create_info.layer_count,
-            samples: vk::SampleCountFlags::TYPE_1,
+            samples: create_info.samples,
             tiling,
             sharing_mode: vk::SharingMode::EXCLUSIVE,
             initial_layout: vk::ImageLayout::UNDEFINED,
@@ -241,7 +242,7 @@ impl Image {
                 unsafe {
                     device.destroy_image(image);
                 }
-                Error::NotImplemented
+                Error::CouldNotFindViableMemoryIndex
             })?;
             ash::vk::MemoryAllocateInfo {
                 allocation_size: memory_requirements.size,

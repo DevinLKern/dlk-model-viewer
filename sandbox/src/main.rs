@@ -137,7 +137,22 @@ impl Application {
             Err(e) => return Err(e.into()),
         };
 
-        let mut renderer = renderer::Renderer::new(debug_enabled, display_handle)?;
+        let mut renderer = {
+            let target_samples = match settings.anti_aliasing {
+                settings::AntiAliasing::MSAA64x => vk::SampleCountFlags::TYPE_64,
+                settings::AntiAliasing::MSAA32x => vk::SampleCountFlags::TYPE_32,
+                settings::AntiAliasing::MSAA16x => vk::SampleCountFlags::TYPE_16,
+                settings::AntiAliasing::MSAA8x => vk::SampleCountFlags::TYPE_8,
+                settings::AntiAliasing::MSAA4x => vk::SampleCountFlags::TYPE_4,
+                settings::AntiAliasing::MSAA2x => vk::SampleCountFlags::TYPE_2,
+                _ => vk::SampleCountFlags::TYPE_1,
+            };
+            let renderer = renderer::Renderer::new(debug_enabled, display_handle, target_samples)?;
+            if renderer.samples() != target_samples {
+                println!("INFO: Selected antialiasing setting not supported.");
+            }
+            renderer
+        };
 
         let mut scene_builder = SceneBuilder::new();
 
@@ -158,7 +173,7 @@ impl Application {
         let default_texture_index = {
             let image =
                 image::load_from_memory_with_format(DEFAULT_IMAGE, image::ImageFormat::Png)?;
-            let image = renderer.create_and_populate_image(image)?;
+            let image = renderer.create_and_populate_image(image, vk::SampleCountFlags::TYPE_1)?;
             scene_builder.add_image(renderer.repeat_sampler(), image)
         };
 
@@ -203,7 +218,8 @@ impl Application {
                     };
 
                     let image = image::open(&path).inspect_err(|e| tracing::error!("{e}"))?;
-                    let image = renderer.create_and_populate_image(image)?;
+                    let image =
+                        renderer.create_and_populate_image(image, vk::SampleCountFlags::TYPE_1)?;
                     let image_index = scene_builder.add_image(renderer.repeat_sampler(), image);
 
                     texture_path_to_index.insert(texture.file_path.clone().into(), image_index);
@@ -479,6 +495,7 @@ impl Application {
             exiting: false,
         })
     }
+    #[allow(unused)]
     fn meets_requirements(&self, binding_index: usize) -> Option<bool> {
         let binding = self.settings.bindings.get(binding_index)?;
         let b = match binding.event {
@@ -497,6 +514,7 @@ impl Application {
 
         Some(b && requirements_met)
     }
+    #[allow(unused)]
     fn execute_commands(&mut self, window_id: &winit::window::WindowId) -> Result<()> {
         let (_, window) = self.windows.get(window_id).ok_or(Error::WindowIdInvalid)?;
 
@@ -626,6 +644,7 @@ impl Application {
 
         Ok(())
     }
+    #[allow(unused)]
     fn update_context(&mut self, ctx: &mut renderer::FrameContext) -> Result<()> {
         const CAMERA_SIZE: u64 = std::mem::size_of::<CameraUBO>() as u64;
         const INSTANCE_SIZE: u64 = std::mem::size_of::<InstanceData>() as u64;
@@ -677,6 +696,7 @@ impl Application {
                 mip_level_count: 1,
                 layer_count: 1,
                 level_count: 1,
+                samples: vk::SampleCountFlags::TYPE_1,
             };
             ctx.create_image(&image_create_info, &mut self.renderer)
         }?;
@@ -696,6 +716,7 @@ impl Application {
 
         Ok(())
     }
+    #[allow(unused)]
     fn resumed_inner(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
         if !self.windows.is_empty() {
             return Ok(());
@@ -733,6 +754,7 @@ impl Application {
 
         Ok(())
     }
+    #[allow(unused)]
     fn window_event_inner(
         &mut self,
         event: winit::event::WindowEvent,
@@ -832,6 +854,7 @@ impl Application {
                                 },
                             },
                             final_layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                            resolve_img: None,
                         }),
                         render_area: vk::Rect2D {
                             offset: vk::Offset2D { x: 0, y: 0 },
@@ -903,10 +926,7 @@ impl Application {
 
                 {
                     unsafe {
-                        let scissor = vk::Rect2D {
-                            offset: vk::Offset2D { x: 0, y: 0 },
-                            extent: depth_target.render_area.extent,
-                        };
+                        let scissor = depth_target.render_area;
                         let viewport = ash::vk::Viewport {
                             x: 0.0,
                             y: 0.0,
@@ -924,14 +944,10 @@ impl Application {
                             CameraInUse::Orbit => &self.orbit_camera,
                         };
 
-                        let mut light = camera::Camera::orthographic(4.0, 4.0, 8.0);
+                        let mut light = camera::Camera::orthographic(3.0, 3.0, 4.0);
                         let mut controller = camera::controllers::FpsCameraController::new();
-                        controller.r#move(
-                            camera
-                                .transform
-                                .position
-                                .sub(self.main_scene.light_dir().scaled(4.0)),
-                        );
+                        controller
+                            .r#move(camera.transform.position.sub(self.main_scene.light_dir()));
                         controller.update(&mut light, 1.0, 1.0);
                         light.look_at(camera.transform.position, ENGINE_UP);
 
@@ -963,10 +979,7 @@ impl Application {
                 target.begin_rendering(&mut self.renderer, cmd)?;
                 {
                     unsafe {
-                        let scissor = vk::Rect2D {
-                            offset: vk::Offset2D { x: 0, y: 0 },
-                            extent: swapchain_extent,
-                        };
+                        let scissor = target.render_area;
                         let viewport = ash::vk::Viewport {
                             x: 0.0,
                             y: 0.0,
