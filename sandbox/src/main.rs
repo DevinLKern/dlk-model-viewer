@@ -9,7 +9,7 @@ use constants::*;
 use input_manager::{Input, InputEvent, InputManager};
 use obj_mtl::{Vertex, VertexNormal};
 use renderer::{
-    AllocationRange, CameraUBO, DepthRenderPass, GridRenderPass, InstanceData, MainRenderPass,
+    AllocationRange, CameraUBO, DepthTechnique, GridTechnique, InstanceData, MainTechnique,
     MaterialBuilderData, PointLightsUBO, Renderer, Scene, SceneBuilder, ShaderVertVertex,
     TextureIndexValue,
 };
@@ -61,9 +61,9 @@ struct Application {
     point_lights_ubo_data_range: AllocationRange,
     light_data_range: AllocationRange,
     main_scene: Scene,
-    main_pass: MainRenderPass,
-    grid_pass: GridRenderPass,
-    depth_pass: DepthRenderPass,
+    main_technique: MainTechnique,
+    grid_technique: GridTechnique,
+    depth_technique: DepthTechnique,
     depth_image_index: usize,
     default_texture_index: usize,
     grid_first_vertex: usize,
@@ -453,11 +453,11 @@ impl Application {
         let main_scene =
             scene_builder.build(renderer.device.clone(), renderer.mesh_arenas_mut())?;
 
-        let main_pass = renderer::MainRenderPass::new(&main_scene, &mut renderer)?;
+        let main_technique = renderer::MainTechnique::new(&main_scene, &mut renderer)?;
 
-        let grid_pass = renderer::GridRenderPass::new(&main_scene, &mut renderer)?;
+        let grid_technique = renderer::GridTechnique::new(&main_scene, &mut renderer)?;
 
-        let depth_pass = renderer::DepthRenderPass::new(&mut renderer)?;
+        let depth_technique = renderer::DepthTechnique::new(&mut renderer)?;
 
         Ok(Self {
             last: std::time::Instant::now(),
@@ -477,11 +477,11 @@ impl Application {
             instance_data_range: AllocationRange { offset: 0, size: 0 },
             point_lights_ubo_data_range: AllocationRange { offset: 0, size: 0 },
             light_data_range: AllocationRange { offset: 0, size: 0 },
-            main_scene,
-            main_pass,
-            grid_pass,
-            depth_pass,
             depth_image_index: 0,
+            main_scene,
+            main_technique,
+            grid_technique,
+            depth_technique,
             grid_first_vertex,
             grid_index_count,
             grid_first_index,
@@ -701,7 +701,7 @@ impl Application {
             ctx.create_image(&image_create_info, &mut self.renderer)
         }?;
 
-        self.main_pass.update_context(
+        self.main_technique.update_context(
             ctx,
             &self.camera_data_range,
             &self.instance_data_range,
@@ -710,9 +710,13 @@ impl Application {
             self.depth_image_index,
             &self.renderer,
         )?;
-        self.grid_pass.update_context(&ctx, &self.camera_data_range);
-        self.depth_pass
-            .update_context(&ctx, &self.light_data_range, &self.instance_data_range);
+        self.grid_technique
+            .update_context(&ctx, &self.camera_data_range);
+        self.depth_technique.update_context(
+            &ctx,
+            &self.light_data_range,
+            &self.instance_data_range,
+        );
 
         Ok(())
     }
@@ -830,9 +834,9 @@ impl Application {
                     .allocator_mut()
                     .reset_indirect();
 
-                let target = context.get_swapchain_render_target()?;
+                let swapchain_target = context.get_swapchain_render_target()?;
 
-                let depth_target = {
+                let (depth_pass, depth_target) = {
                     let depth_image = context
                         .get_current_frame()
                         .get_image(self.depth_image_index)
@@ -841,10 +845,9 @@ impl Application {
                         let img = self.renderer.get_image(depth_image).unwrap();
                         (img.width, img.height)
                     };
-                    renderer::RenderTarget {
+                    let pass = renderer::RenderPass {
                         color: Box::new([]),
                         depth: Some(renderer::Attachment {
-                            img: depth_image,
                             load_op: vk::AttachmentLoadOp::CLEAR,
                             store_op: vk::AttachmentStoreOp::STORE,
                             clear_val: vk::ClearValue {
@@ -854,16 +857,22 @@ impl Application {
                                 },
                             },
                             final_layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-                            resolve_img: None,
                         }),
+                    };
+
+                    let target = renderer::RenderTarget {
+                        color_images: Box::new([]),
+                        depth_image: Some(depth_image),
                         render_area: vk::Rect2D {
                             offset: vk::Offset2D { x: 0, y: 0 },
                             extent: vk::Extent2D { width, height },
                         },
-                    }
+                    };
+
+                    (pass, target)
                 };
 
-                depth_target.begin_rendering(&mut self.renderer, cmd)?;
+                depth_pass.begin_rendering(&depth_target, &mut self.renderer, cmd)?;
 
                 let mut indirect_command_data =
                     Vec::<vk::DrawIndexedIndirectCommand>::with_capacity(64);
@@ -926,15 +935,7 @@ impl Application {
 
                 {
                     unsafe {
-                        let scissor = depth_target.render_area;
-                        let viewport = ash::vk::Viewport {
-                            x: 0.0,
-                            y: 0.0,
-                            width: scissor.extent.width as f32,
-                            height: scissor.extent.height as f32,
-                            min_depth: 0.0,
-                            max_depth: 1.0,
-                        };
+                        let (scissor, viewport) = depth_target.get_default_scissor_and_viewport();
                         self.renderer.device.cmd_set_viewport(cmd, 0, &[viewport]);
                         self.renderer.device.cmd_set_scissor(cmd, 0, &[scissor]);
                     }
@@ -968,26 +969,42 @@ impl Application {
                 self.renderer.render_depth_scene(
                     context,
                     &self.main_scene,
-                    &self.depth_pass,
+                    &self.depth_technique,
                     indirect_offset,
                     indirect_command_data.len() as u32,
                     stride as u32,
                 )?;
 
                 // PART 1 - MODEL
-                depth_target.end_rendering(&mut self.renderer, cmd)?;
-                target.begin_rendering(&mut self.renderer, cmd)?;
+                depth_pass.end_rendering(&depth_target, &mut self.renderer, cmd)?;
+
+                let main_pass = renderer::RenderPass {
+                    color: Box::new([renderer::Attachment {
+                        load_op: vk::AttachmentLoadOp::CLEAR,
+                        store_op: vk::AttachmentStoreOp::STORE,
+                        clear_val: vk::ClearValue {
+                            color: vk::ClearColorValue { float32: [0.0; 4] },
+                        },
+                        final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
+                    }]),
+                    depth: Some(renderer::Attachment {
+                        load_op: vk::AttachmentLoadOp::CLEAR,
+                        store_op: vk::AttachmentStoreOp::STORE,
+                        clear_val: vk::ClearValue {
+                            depth_stencil: vk::ClearDepthStencilValue {
+                                depth: 1.0,
+                                stencil: 0,
+                            },
+                        },
+                        final_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                    }),
+                };
+                main_pass.begin_rendering(&swapchain_target, &mut self.renderer, cmd)?;
+
                 {
                     unsafe {
-                        let scissor = target.render_area;
-                        let viewport = ash::vk::Viewport {
-                            x: 0.0,
-                            y: 0.0,
-                            width: scissor.extent.width as f32,
-                            height: scissor.extent.height as f32,
-                            min_depth: 0.0,
-                            max_depth: 1.0,
-                        };
+                        let (scissor, viewport) =
+                            swapchain_target.get_default_scissor_and_viewport();
                         self.renderer.device.cmd_set_viewport(cmd, 0, &[viewport]);
                         self.renderer.device.cmd_set_scissor(cmd, 0, &[scissor]);
                     }
@@ -1031,7 +1048,7 @@ impl Application {
                 self.renderer.render_main_scene(
                     context,
                     &self.main_scene,
-                    &self.main_pass,
+                    &self.main_technique,
                     indirect_offset,
                     indirect_command_data.len() as u32,
                     stride as u32,
@@ -1042,18 +1059,7 @@ impl Application {
                 instance_data.clear();
                 indirect_command_data.clear();
                 unsafe {
-                    let scissor = vk::Rect2D {
-                        offset: vk::Offset2D { x: 0, y: 0 },
-                        extent: swapchain_extent,
-                    };
-                    let viewport = vk::Viewport {
-                        x: 0.0,
-                        y: 0.0,
-                        width: scissor.extent.width as f32,
-                        height: scissor.extent.height as f32,
-                        min_depth: 0.0,
-                        max_depth: 1.0,
-                    };
+                    let (scissor, viewport) = swapchain_target.get_default_scissor_and_viewport();
                     self.renderer.device.cmd_set_viewport(cmd, 0, &[viewport]);
                     self.renderer.device.cmd_set_scissor(cmd, 0, &[scissor]);
                 }
@@ -1100,13 +1106,13 @@ impl Application {
                 self.renderer.render_grid_scene(
                     context,
                     &self.main_scene,
-                    &self.grid_pass,
+                    &self.grid_technique,
                     indirect_offset,
                     draw_count,
                     stride,
                 )?;
 
-                target.end_rendering(&mut self.renderer, cmd)?;
+                main_pass.end_rendering(&swapchain_target, &mut self.renderer, cmd)?;
                 context.submit()?;
 
                 window.request_redraw();

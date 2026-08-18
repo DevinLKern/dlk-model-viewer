@@ -1,1116 +1,306 @@
+use crate::{Error, ImageHandle, Renderer, Result};
+
 use ash::vk;
-use vulkan::SharedDeviceRef;
 
-use crate::{
-    AllocationRange, CameraUBO, DescriptorSetLayoutBindingInfo, DescriptorSetLayoutDescription,
-    DescriptorSetLayoutResourceHandle, ENTRY_POINT_NAME_GRID_FRAG, ENTRY_POINT_NAME_GRID_VERT,
-    ENTRY_POINT_NAME_SHADER_FRAG, ENTRY_POINT_NAME_SHADER_VERT, Error, FrameContext, InstanceData,
-    MAX_FRAME_COUNT, MAX_SCENE_IMAGE_COUNT, MeshArena, MeshArenaHandle, PipelineDescription,
-    PipelineLayoutDescription, PipelineLayoutResourceHandle, PipelineLayoutResourceManager,
-    PipelineResourceManager, Renderer, Result, Scene, ShaderModuleDescription,
-    ShaderModuleResourceHandle, ShaderModuleResourceManager, ShaderVertVertex,
-};
-
-slotmap::new_key_type! { pub struct InstanceDataHandle; }
-
-// TODO: convert crate::VERT_SHADER_PATH and crate::FRAG_SHADER_PATH into macros?
-const COMPILED_MAIN_VERT_SHADER: &[u8] = include_bytes!("../shaders/shader.vert.spv");
-const COMPILED_MAIN_FRAG_SHADER: &[u8] = include_bytes!("../shaders/shader.frag.spv");
-
-const COMPILED_GRID_VERT_SHADER: &[u8] = include_bytes!("../shaders/grid.vert.spv");
-const COMPILED_GRID_FRAG_SHADER: &[u8] = include_bytes!("../shaders/grid.frag.spv");
-
-const COMPILED_DEPTH_VERT_SHADER: &[u8] = include_bytes!("../shaders/depth.vert.spv");
-const COMPILED_DEPTH_FRAG_SHADER: &[u8] = include_bytes!("../shaders/depth.frag.spv");
-
-#[allow(dead_code)]
-pub struct MainRenderPass {
-    device: SharedDeviceRef,
-    per_frame_descriptor_set_layout: DescriptorSetLayoutResourceHandle,
-    other_descriptor_set_layout: DescriptorSetLayoutResourceHandle,
-    descriptor_pool: vk::DescriptorPool,
-    per_frame_descriptor_sets: [vk::DescriptorSet; MAX_FRAME_COUNT as usize],
-    other_descriptor_set: vk::DescriptorSet,
-    pipeline_layout: PipelineLayoutResourceHandle,
-    vert_module: ShaderModuleResourceHandle,
-    frag_module: ShaderModuleResourceHandle,
+pub struct TargetImage {
+    pub handle: ImageHandle,
+    pub resolve_hanlde: Option<ImageHandle>,
 }
 
-impl Drop for MainRenderPass {
-    fn drop(&mut self) {
-        unsafe {
-            self.device.destroy_descriptor_pool(self.descriptor_pool);
-        }
+pub struct RenderTarget {
+    pub color_images: Box<[TargetImage]>,
+    pub depth_image: Option<ImageHandle>,
+    pub render_area: vk::Rect2D,
+}
+
+impl RenderTarget {
+    #[inline]
+    pub fn get_default_scissor_and_viewport(&self) -> (vk::Rect2D, vk::Viewport) {
+        let scissor = self.render_area;
+        let viewport = vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: scissor.extent.width as f32,
+            height: scissor.extent.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+
+        return (scissor, viewport);
     }
 }
 
-impl MainRenderPass {
-    pub fn new(scene: &Scene, renderer: &mut Renderer) -> Result<Self> {
-        let device = renderer.device.clone();
+#[allow(dead_code)]
+pub struct Attachment {
+    pub load_op: vk::AttachmentLoadOp,
+    pub store_op: vk::AttachmentStoreOp,
+    pub clear_val: vk::ClearValue,
+    pub final_layout: vk::ImageLayout,
+}
 
-        let descriptor_set_layout_bindings: &[&[DescriptorSetLayoutBindingInfo]] = &[
-            // SET 0 - per frame
-            &[
-                DescriptorSetLayoutBindingInfo {
-                    binding: 0,
-                    ty: vk::DescriptorType::STORAGE_BUFFER,
-                    count: 1,
-                    stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                },
-                DescriptorSetLayoutBindingInfo {
-                    binding: 1,
-                    ty: vk::DescriptorType::UNIFORM_BUFFER,
-                    count: 1,
-                    stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                },
-                DescriptorSetLayoutBindingInfo {
-                    binding: 2,
-                    ty: vk::DescriptorType::STORAGE_BUFFER,
-                    count: 1,
-                    stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                },
-                DescriptorSetLayoutBindingInfo {
-                    binding: 3,
-                    ty: vk::DescriptorType::UNIFORM_BUFFER,
-                    count: 1,
-                    stage_flags: vk::ShaderStageFlags::VERTEX,
-                },
-                DescriptorSetLayoutBindingInfo {
-                    binding: 4,
-                    ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                    count: 1,
-                    stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                },
-            ],
-            // SET 1 - other
-            &[
-                // global light
-                DescriptorSetLayoutBindingInfo {
-                    binding: 0,
-                    ty: vk::DescriptorType::UNIFORM_BUFFER,
-                    count: 1,
-                    stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                },
-                // global_textures
-                DescriptorSetLayoutBindingInfo {
-                    binding: 1,
-                    ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                    count: scene.images.len() as u32,
-                    stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                },
-                // materials
-                DescriptorSetLayoutBindingInfo {
-                    binding: 2,
-                    ty: vk::DescriptorType::STORAGE_BUFFER,
-                    count: 1,
-                    stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                },
-            ],
-        ];
+#[allow(dead_code)]
+pub struct RenderPass {
+    pub color: Box<[Attachment]>,
+    pub depth: Option<Attachment>,
+    // pub stencil: Option<Attachment>,
+}
 
-        let per_frame_descriptor_set_layout_desc = DescriptorSetLayoutDescription {
-            bindings: descriptor_set_layout_bindings[0].into(),
-        };
-        let per_frame_descriptor_set_layout = renderer
-            .descriptor_set_layouts_mut()
-            .access_or_create(per_frame_descriptor_set_layout_desc)?;
-        let other_descriptor_set_layout_desc = DescriptorSetLayoutDescription {
-            bindings: descriptor_set_layout_bindings[1].into(),
-        };
-        let other_descriptor_set_layout = renderer
-            .descriptor_set_layouts_mut()
-            .access_or_create(other_descriptor_set_layout_desc)?;
+impl RenderPass {
+    pub fn begin_rendering(
+        &self,
+        target: &RenderTarget,
+        renderer: &mut Renderer,
+        cmd: vk::CommandBuffer,
+    ) -> Result<()> {
+        debug_assert!(target.color_images.len() == self.color.len());
+        debug_assert!(target.depth_image.is_some() && self.depth.is_some());
 
-        let pipeline_layout_desc = PipelineLayoutDescription {
-            descriptor_set_layouts: Box::new([
-                per_frame_descriptor_set_layout,
-                other_descriptor_set_layout,
-            ]),
-            bind_point: vk::PipelineBindPoint::GRAPHICS,
-        };
+        let mut barriers = Vec::with_capacity(self.color.len() + 2);
+        let mut color_attachments = Vec::with_capacity(self.color.len());
+        let mut depth_attachment = vk::RenderingAttachmentInfo::default();
 
-        let pipeline_layout = renderer.access_or_create_pipeline_layout(pipeline_layout_desc)?;
-
-        // TODO: it seems like this could be generated by build.rs or a macro?
-        const VERTEX_ATTRIBUTE_DESCRIPTIONS: &[vk::VertexInputAttributeDescription] = &[
-            vk::VertexInputAttributeDescription {
-                location: 0,
-                binding: 0,
-                format: vk::Format::R32G32B32_SFLOAT,
-                offset: std::mem::offset_of!(crate::ShaderVertVertex, position) as u32,
-            },
-            vk::VertexInputAttributeDescription {
-                location: 1,
-                binding: 0,
-                format: vk::Format::R32G32_SFLOAT,
-                offset: std::mem::offset_of!(crate::ShaderVertVertex, tex_coord) as u32,
-            },
-            vk::VertexInputAttributeDescription {
-                location: 2,
-                binding: 0,
-                format: vk::Format::R32G32B32_SFLOAT,
-                offset: std::mem::offset_of!(crate::ShaderVertVertex, normal) as u32,
-            },
-        ];
-        let vertex_input_bindings = &[vk::VertexInputBindingDescription {
-            binding: 0,
-            stride: std::mem::size_of::<ShaderVertVertex>() as u32,
-            input_rate: vk::VertexInputRate::VERTEX,
-        }];
-        let vert_module_desc = ShaderModuleDescription::Internal {
-            stage: vk::ShaderStageFlags::VERTEX,
-            spv: COMPILED_MAIN_VERT_SHADER,
-            entry_point_name: ENTRY_POINT_NAME_SHADER_VERT,
-            vertex_attribute_descriptions: VERTEX_ATTRIBUTE_DESCRIPTIONS,
-            vertex_input_bindings,
-        };
-        let vert_module = renderer
-            .shader_modules_mut()
-            .access_or_create(vert_module_desc)?;
-
-        let frag_module_desc = ShaderModuleDescription::Internal {
-            stage: vk::ShaderStageFlags::FRAGMENT,
-            spv: COMPILED_MAIN_FRAG_SHADER,
-            entry_point_name: ENTRY_POINT_NAME_SHADER_FRAG,
-            vertex_attribute_descriptions: &[],
-            vertex_input_bindings: &[],
-        };
-        let frag_module = renderer
-            .shader_modules_mut()
-            .access_or_create(frag_module_desc)?;
-
-        let descriptor_pool = {
-            let pool_sizes = [
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::UNIFORM_BUFFER,
-                    descriptor_count: MAX_FRAME_COUNT as u32 * 3,
-                },
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::STORAGE_BUFFER,
-                    descriptor_count: MAX_FRAME_COUNT as u32 * 2 + 1,
-                },
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                    descriptor_count: MAX_SCENE_IMAGE_COUNT + MAX_FRAME_COUNT as u32,
-                },
-            ];
-            let create_info = vk::DescriptorPoolCreateInfo {
-                max_sets: pool_sizes.iter().map(|s| s.descriptor_count).sum(),
-                pool_size_count: pool_sizes.len() as u32,
-                p_pool_sizes: pool_sizes.as_ptr(),
-                ..Default::default()
-            };
-
-            unsafe { device.create_descriptor_pool(&create_info) }?
-        };
-
-        let per_frame_descriptor_sets: [vk::DescriptorSet; MAX_FRAME_COUNT as usize] = {
-            let per_frame_set_layout = *renderer
-                .descriptor_set_layouts_mut()
-                .get(per_frame_descriptor_set_layout)
-                .unwrap();
-            let set_layouts = [per_frame_set_layout; MAX_FRAME_COUNT as usize];
-            let alloc_info = vk::DescriptorSetAllocateInfo {
-                descriptor_pool,
-                descriptor_set_count: set_layouts.len() as u32,
-                p_set_layouts: set_layouts.as_ptr(),
-                ..Default::default()
-            };
-            let sets = unsafe { device.allocate_descriptor_sets(&alloc_info) }?;
-
-            sets.try_into()
-                .expect("Incorrect number of descriptor sets")
-        };
-
-        let other_descriptor_set = {
-            let other_set_layout = *renderer
-                .descriptor_set_layouts_mut()
-                .get(other_descriptor_set_layout)
-                .unwrap();
-            let set_layouts = [other_set_layout];
-            let alloc_info = vk::DescriptorSetAllocateInfo {
-                descriptor_pool,
-                descriptor_set_count: set_layouts.len() as u32,
-                p_set_layouts: set_layouts.as_ptr(),
-                ..Default::default()
-            };
-            let sets = unsafe { device.allocate_descriptor_sets(&alloc_info) }?;
-            sets[0]
-        };
-
-        {
-            let image_info: Box<[vk::DescriptorImageInfo]> = scene
-                .images
-                .iter()
-                .map(|(sampler, image)| {
-                    let img = renderer.get_image(*image).unwrap();
-                    vk::DescriptorImageInfo {
-                        sampler: *sampler,
-                        image_view: img.view,
-                        image_layout: img.layout,
+        for (color_attachment, color_target) in self.color.iter().zip(target.color_images.iter()) {
+            let (resolve_mode, resolve_image_view, resolve_image_layout) =
+                match color_target.resolve_hanlde {
+                    Some(handle) => {
+                        let img = renderer
+                            .get_image_mut(handle)
+                            .ok_or(Error::ResourceMissing)?;
+                        let new_layout = vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL;
+                        if img.layout != new_layout {
+                            barriers.push(vk::ImageMemoryBarrier2 {
+                                src_stage_mask: vk::PipelineStageFlags2::TOP_OF_PIPE,
+                                src_access_mask: vk::AccessFlags2::empty(),
+                                dst_stage_mask: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                                dst_access_mask: vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+                                old_layout: img.layout,
+                                new_layout,
+                                image: img.handle,
+                                subresource_range: vk::ImageSubresourceRange {
+                                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                                    base_mip_level: 0,
+                                    level_count: img.mip_level_count,
+                                    base_array_layer: 0,
+                                    layer_count: img.layer_count,
+                                },
+                                ..Default::default()
+                            });
+                            img.layout = new_layout;
+                        }
+                        (vk::ResolveModeFlags::AVERAGE, img.view, img.layout)
                     }
-                })
-                .collect();
-
-            let (global_light_offset, global_light_size) = scene.global_light_range;
-            let global_light_buffer_info = [vk::DescriptorBufferInfo {
-                buffer: scene.uniform_buffer.handle,
-                offset: global_light_offset,
-                range: global_light_size,
-            }];
-            let material_buffer_info = [vk::DescriptorBufferInfo {
-                buffer: scene.storage_buffer.handle,
-                offset: 0,
-                range: vk::WHOLE_SIZE,
-            }];
-            let writes = [
-                vk::WriteDescriptorSet {
-                    dst_set: other_descriptor_set,
-                    dst_binding: 0,
-                    dst_array_element: 0,
-                    descriptor_count: global_light_buffer_info.len() as u32,
-                    descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
-                    p_buffer_info: global_light_buffer_info.as_ptr(),
-                    ..Default::default()
-                },
-                vk::WriteDescriptorSet {
-                    dst_set: other_descriptor_set,
-                    dst_binding: 1,
-                    dst_array_element: 0,
-                    descriptor_count: image_info.len() as u32,
-                    descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                    p_image_info: image_info.as_ptr(),
-                    ..Default::default()
-                },
-                vk::WriteDescriptorSet {
-                    dst_set: other_descriptor_set,
-                    dst_binding: 2,
-                    dst_array_element: 0,
-                    descriptor_count: material_buffer_info.len() as u32,
-                    descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
-                    p_buffer_info: material_buffer_info.as_ptr(),
-                    ..Default::default()
-                },
-            ];
-            unsafe { device.update_descriptor_sets(&writes, &[]) };
-        }
-
-        Ok(Self {
-            device,
-            per_frame_descriptor_set_layout,
-            other_descriptor_set_layout,
-            descriptor_pool,
-            per_frame_descriptor_sets,
-            other_descriptor_set,
-            pipeline_layout,
-            vert_module,
-            frag_module,
-        })
-    }
-    pub fn update_context(
-        &mut self,
-        ctx: &mut FrameContext,
-        camera_data_range: &AllocationRange,
-        instance_data_range: &AllocationRange,
-        point_lights_data_range: &AllocationRange,
-        global_light_data_range: &AllocationRange,
-        depth_image_index: usize,
-        renderer: &Renderer,
-    ) -> Result<()> {
-        let camera_infos: Box<[vk::DescriptorBufferInfo]> = (0..MAX_FRAME_COUNT as usize)
-            .map(|i| vk::DescriptorBufferInfo {
-                buffer: ctx.frames()[i].allocator().uniform_buffer_raw(),
-                offset: camera_data_range.offset,
-                range: camera_data_range.size,
-            })
-            .collect();
-
-        let instance_infos: Box<[vk::DescriptorBufferInfo]> = (0..MAX_FRAME_COUNT as usize)
-            .map(|i| vk::DescriptorBufferInfo {
-                buffer: ctx.frames()[i].allocator().storage_buffer_raw(),
-                offset: instance_data_range.offset,
-                range: instance_data_range.size,
-            })
-            .collect();
-
-        let point_light_infos: Box<[vk::DescriptorBufferInfo]> = (0..MAX_FRAME_COUNT as usize)
-            .map(|i| vk::DescriptorBufferInfo {
-                buffer: ctx.frames()[i].allocator().storage_buffer_raw(),
-                offset: point_lights_data_range.offset,
-                range: point_lights_data_range.size,
-            })
-            .collect();
-
-        let light_infos: Box<[vk::DescriptorBufferInfo]> = (0..MAX_FRAME_COUNT as usize)
-            .map(|i| vk::DescriptorBufferInfo {
-                buffer: ctx.frames()[i].allocator().uniform_buffer_raw(),
-                offset: global_light_data_range.offset,
-                range: global_light_data_range.size,
-            })
-            .collect();
-
-        let mut depth_image_infos =
-            Vec::<vk::DescriptorImageInfo>::with_capacity(MAX_FRAME_COUNT as usize);
-        for i in 0..MAX_FRAME_COUNT as usize {
-            let handle = ctx.frames()[i]
-                .get_image(depth_image_index)
+                    None => (
+                        vk::ResolveModeFlags::default(),
+                        vk::ImageView::default(),
+                        vk::ImageLayout::default(),
+                    ),
+                };
+            let img = renderer
+                .get_image_mut(color_target.handle)
                 .ok_or(Error::ResourceMissing)?;
-            let image = renderer.get_image(handle).ok_or(Error::ResourceMissing)?;
-            depth_image_infos.push(vk::DescriptorImageInfo {
-                image_view: image.view,
-                sampler: renderer.shadowmap_sampler(),
-                image_layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-            })
+
+            let new_layout = vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL;
+            if img.layout != new_layout {
+                barriers.push(vk::ImageMemoryBarrier2 {
+                    // NOTE: TOP_OF_PIPE should not be hard coded.
+                    // In the future, multiple passes will be used and TOP_OF_PIPE will not always be correct
+                    src_stage_mask: vk::PipelineStageFlags2::TOP_OF_PIPE,
+                    src_access_mask: vk::AccessFlags2::empty(),
+                    dst_stage_mask: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                    dst_access_mask: vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+                    old_layout: img.layout,
+                    new_layout,
+                    image: img.handle,
+                    subresource_range: vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: img.mip_level_count,
+                        base_array_layer: 0,
+                        layer_count: img.layer_count,
+                    },
+                    ..Default::default()
+                });
+                img.layout = new_layout;
+            }
+
+            color_attachments.push(vk::RenderingAttachmentInfo {
+                image_view: img.view,
+                image_layout: img.layout,
+                load_op: color_attachment.load_op,
+                store_op: color_attachment.store_op,
+                clear_value: color_attachment.clear_val,
+                resolve_mode,
+                resolve_image_view,
+                resolve_image_layout,
+                ..Default::default()
+            });
         }
+        if let (Some(depth_image), Some(attachment)) = (target.depth_image, &self.depth) {
+            let img = renderer
+                .get_image_mut(depth_image)
+                .ok_or(Error::ResourceMissing)?;
+            let new_layout = vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
-        let writes: Box<[vk::WriteDescriptorSet]> = (0..MAX_FRAME_COUNT as usize)
-            .flat_map(|i| {
-                [
-                    vk::WriteDescriptorSet {
-                        dst_set: self.per_frame_descriptor_sets[i],
-                        dst_binding: 0,
-                        descriptor_count: 1,
-                        p_buffer_info: &instance_infos[i],
-                        descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
-                        ..Default::default()
+            if img.layout != new_layout {
+                let aspect_mask = if matches!(
+                    img.format,
+                    vk::Format::D32_SFLOAT_S8_UINT
+                        | vk::Format::D24_UNORM_S8_UINT
+                        | vk::Format::D16_UNORM_S8_UINT
+                ) {
+                    vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+                } else {
+                    vk::ImageAspectFlags::DEPTH
+                };
+                // NOTE: This renderer currently only uses combined depth stencil images.
+                barriers.push(vk::ImageMemoryBarrier2 {
+                    src_stage_mask: vk::PipelineStageFlags2::TOP_OF_PIPE,
+                    src_access_mask: vk::AccessFlags2::empty(),
+                    dst_stage_mask: vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS,
+                    dst_access_mask: vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                    old_layout: img.layout,
+                    new_layout,
+                    image: img.handle,
+                    subresource_range: vk::ImageSubresourceRange {
+                        aspect_mask,
+                        base_mip_level: 0,
+                        level_count: img.mip_level_count,
+                        base_array_layer: 0,
+                        layer_count: img.layer_count,
                     },
-                    vk::WriteDescriptorSet {
-                        dst_set: self.per_frame_descriptor_sets[i],
-                        dst_binding: 1,
-                        descriptor_count: 1,
-                        p_buffer_info: &camera_infos[i],
-                        descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
-                        ..Default::default()
-                    },
-                    vk::WriteDescriptorSet {
-                        dst_set: self.per_frame_descriptor_sets[i],
-                        dst_binding: 2,
-                        descriptor_count: 1,
-                        p_buffer_info: &point_light_infos[i],
-                        descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
-                        ..Default::default()
-                    },
-                    vk::WriteDescriptorSet {
-                        dst_set: self.per_frame_descriptor_sets[i],
-                        dst_binding: 3,
-                        descriptor_count: 1,
-                        p_buffer_info: &light_infos[i],
-                        descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
-                        ..Default::default()
-                    },
-                    vk::WriteDescriptorSet {
-                        dst_set: self.per_frame_descriptor_sets[i],
-                        dst_binding: 4,
-                        descriptor_count: 1,
-                        p_image_info: &depth_image_infos[i],
-                        descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                        ..Default::default()
-                    },
-                ]
-                .into_iter()
-            })
-            .collect();
+                    ..Default::default()
+                });
+                img.layout = new_layout;
+            }
 
-        unsafe { self.device.update_descriptor_sets(&writes, &[]) };
+            depth_attachment = vk::RenderingAttachmentInfo {
+                image_view: img.view,
+                image_layout: img.layout,
+                load_op: attachment.load_op,
+                store_op: attachment.store_op,
+                clear_value: attachment.clear_val,
+                ..Default::default()
+            };
+        }
+        let dependency_info = vk::DependencyInfo {
+            image_memory_barrier_count: barriers.len() as u32,
+            p_image_memory_barriers: barriers.as_ptr(),
+            ..Default::default()
+        };
+        unsafe { renderer.device.cmd_pipeline_barrier2(cmd, &dependency_info) };
+
+        // begin dynamic rendering
+        let rendering_info = vk::RenderingInfo {
+            render_area: target.render_area,
+            layer_count: 1,
+            view_mask: 0,
+            color_attachment_count: color_attachments.len() as u32,
+            p_color_attachments: color_attachments.as_ptr(),
+            p_depth_attachment: if self.depth.is_some() {
+                &depth_attachment
+            } else {
+                std::ptr::null()
+            },
+            ..Default::default()
+        };
+
+        unsafe {
+            renderer.device.cmd_begin_rendering(cmd, &rendering_info);
+        };
 
         Ok(())
     }
-    pub fn render(
+
+    pub fn end_rendering(
         &self,
-        ctx: &mut FrameContext,
+        target: &RenderTarget,
         renderer: &mut Renderer,
-        scene: &Scene,
-        indirect_offset: u64,
-        draw_count: u32,
-        stride: u32,
+        cmd: vk::CommandBuffer,
     ) -> Result<()> {
-        let (pipeline, layout) = {
-            let layout = renderer
-                .pipeline_layouts
-                .get(self.pipeline_layout)
-                .ok_or(Error::ResourceMissing)?
-                .raw;
-            let pipeline_desc = PipelineDescription::DynamicGraphics {
-                pipeline_layout: self.pipeline_layout,
-                vert_shader: self.vert_module,
-                frag_shader: self.frag_module,
-                topology: vk::PrimitiveTopology::TRIANGLE_LIST,
-                color_formats: Box::new([ctx.get_color_format()]),
-                depth_format: Some(ctx.depth_format()),
-                stencil_format: None,
-                samples: renderer.samples(),
-            };
-            let pipeline_handle = renderer.pipelines.access_or_create(
-                pipeline_desc,
-                &mut renderer.pipeline_layouts,
-                &mut renderer.shader_modules,
-            )?;
-            let pipeline = renderer
-                .pipelines
-                .get(pipeline_handle)
-                .ok_or(Error::ResourceMissing)?;
+        debug_assert!(target.color_images.len() == self.color.len());
+        debug_assert!(target.depth_image.is_some() && self.depth.is_some());
 
-            (*pipeline, layout)
-        };
-
-        let current_frame_index = ctx.frame_index;
-        let frame = ctx.get_current_frame_mut();
-
-        let cmd = frame.command_buffer();
-
+        // end rendering
         unsafe {
-            self.device
-                .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
-
-            // bind per frame ds
-            let sets = &[self.per_frame_descriptor_sets[current_frame_index]];
-            let dynamic_offsets = &[];
-            self.device.cmd_bind_descriptor_sets(
-                cmd,
-                vk::PipelineBindPoint::GRAPHICS,
-                layout,
-                0,
-                sets,
-                dynamic_offsets,
-            );
-
-            // bind other ds
-            let sets = &[self.other_descriptor_set];
-            let dynamic_offsets = &[];
-            self.device.cmd_bind_descriptor_sets(
-                cmd,
-                vk::PipelineBindPoint::GRAPHICS,
-                layout,
-                1,
-                sets,
-                dynamic_offsets,
-            );
-
-            let mesh_arena = renderer.mesh_arenas.get(scene.mesh_arena_handle).unwrap();
-
-            let (vb, ib) = (
-                mesh_arena.vertex_buffer.handle,
-                mesh_arena.index_buffer.handle,
-            );
-            self.device.cmd_bind_vertex_buffers(cmd, 0, &[vb], &[0]);
-            self.device
-                .cmd_bind_index_buffer(cmd, ib, 0, vk::IndexType::UINT32);
-
-            self.device.cmd_draw_indexed_indirect(
-                cmd,
-                frame.allocator_mut().indirect_buffer_raw(),
-                indirect_offset,
-                draw_count,
-                stride,
-            );
-        };
-
-        Ok(())
-    }
-}
-
-#[allow(dead_code)]
-pub struct GridRenderPass {
-    device: SharedDeviceRef,
-    per_frame_descriptor_set_layout: DescriptorSetLayoutResourceHandle,
-    other_descriptor_set_layout: DescriptorSetLayoutResourceHandle,
-    descriptor_pool: vk::DescriptorPool,
-    per_frame_descriptor_sets: [vk::DescriptorSet; MAX_FRAME_COUNT as usize],
-    other_descriptor_set: vk::DescriptorSet,
-    pipeline_layout: PipelineLayoutResourceHandle,
-    vert_module: ShaderModuleResourceHandle,
-    frag_module: ShaderModuleResourceHandle,
-}
-
-impl Drop for GridRenderPass {
-    fn drop(&mut self) {
-        unsafe {
-            self.device.destroy_descriptor_pool(self.descriptor_pool);
+            renderer.device.cmd_end_rendering(cmd);
         }
-    }
-}
 
-#[allow(dead_code)]
-impl GridRenderPass {
-    pub fn new(scene: &Scene, renderer: &mut Renderer) -> Result<Self> {
-        let device = renderer.device.clone();
+        let mut barriers = Vec::with_capacity(self.color.len() + 2);
+        for (attachment, color_target) in self.color.iter().zip(target.color_images.iter()) {
+            let img = match color_target.resolve_hanlde {
+                Some(img) => img,
+                None => color_target.handle,
+            };
+            let img = renderer.get_image_mut(img).ok_or(Error::ResourceMissing)?;
 
-        let descriptor_set_layout_bindings: &[&[DescriptorSetLayoutBindingInfo]] = &[
-            // SET 0 - per frame
-            &[DescriptorSetLayoutBindingInfo {
-                binding: 0,
-                ty: vk::DescriptorType::UNIFORM_BUFFER,
-                count: 1,
-                stage_flags: vk::ShaderStageFlags::VERTEX,
-            }],
-            // SET 1 - other
-            &[
-                // global light
-                DescriptorSetLayoutBindingInfo {
-                    binding: 0,
-                    ty: vk::DescriptorType::UNIFORM_BUFFER,
-                    count: 1,
-                    stage_flags: vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::VERTEX,
+            if img.layout == attachment.final_layout {
+                continue;
+            }
+
+            barriers.push(vk::ImageMemoryBarrier2 {
+                src_stage_mask: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                src_access_mask: vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+                dst_stage_mask: vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+                dst_access_mask: vk::AccessFlags2::empty(),
+                old_layout: img.layout,
+                new_layout: attachment.final_layout,
+                image: img.handle,
+                subresource_range: vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: img.mip_level_count,
+                    base_array_layer: 0,
+                    layer_count: img.layer_count,
                 },
-            ],
-        ];
-
-        let per_frame_descriptor_set_layout_desc = DescriptorSetLayoutDescription {
-            bindings: descriptor_set_layout_bindings[0].into(),
-        };
-        let per_frame_descriptor_set_layout = renderer
-            .descriptor_set_layouts_mut()
-            .access_or_create(per_frame_descriptor_set_layout_desc)?;
-        let other_descriptor_set_layout_desc = DescriptorSetLayoutDescription {
-            bindings: descriptor_set_layout_bindings[1].into(),
-        };
-        let other_descriptor_set_layout = renderer
-            .descriptor_set_layouts_mut()
-            .access_or_create(other_descriptor_set_layout_desc)?;
-
-        let pipeline_layout_desc = PipelineLayoutDescription {
-            descriptor_set_layouts: Box::new([
-                per_frame_descriptor_set_layout,
-                other_descriptor_set_layout,
-            ]),
-            bind_point: vk::PipelineBindPoint::GRAPHICS,
-        };
-
-        let pipeline_layout = renderer.access_or_create_pipeline_layout(pipeline_layout_desc)?;
-
-        const VERTEX_ATTRIBUTE_DESCRIPTIONS: &[vk::VertexInputAttributeDescription] =
-            &[vk::VertexInputAttributeDescription {
-                location: 0,
-                binding: 0,
-                format: vk::Format::R32G32B32_SFLOAT,
-                offset: std::mem::offset_of!(crate::ShaderVertVertex, position) as u32,
-            }];
-        let vertex_input_bindings = &[vk::VertexInputBindingDescription {
-            binding: 0,
-            stride: std::mem::size_of::<ShaderVertVertex>() as u32,
-            input_rate: vk::VertexInputRate::VERTEX,
-        }];
-        let vert_module_desc = ShaderModuleDescription::Internal {
-            stage: vk::ShaderStageFlags::VERTEX,
-            spv: COMPILED_GRID_VERT_SHADER,
-            entry_point_name: ENTRY_POINT_NAME_GRID_VERT,
-            vertex_attribute_descriptions: VERTEX_ATTRIBUTE_DESCRIPTIONS,
-            vertex_input_bindings,
-        };
-        let vert_module = renderer
-            .shader_modules_mut()
-            .access_or_create(vert_module_desc)?;
-
-        let frag_module_desc = ShaderModuleDescription::Internal {
-            stage: vk::ShaderStageFlags::FRAGMENT,
-            spv: COMPILED_GRID_FRAG_SHADER,
-            entry_point_name: ENTRY_POINT_NAME_GRID_FRAG,
-            vertex_attribute_descriptions: &[],
-            vertex_input_bindings: &[],
-        };
-        let frag_module = renderer
-            .shader_modules_mut()
-            .access_or_create(frag_module_desc)?;
-
-        let descriptor_pool = {
-            let pool_sizes = [vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::UNIFORM_BUFFER,
-                descriptor_count: MAX_FRAME_COUNT as u32 + 1,
-            }];
-            let create_info = vk::DescriptorPoolCreateInfo {
-                max_sets: MAX_FRAME_COUNT as u32 + 1,
-                pool_size_count: pool_sizes.len() as u32,
-                p_pool_sizes: pool_sizes.as_ptr(),
                 ..Default::default()
-            };
-
-            unsafe { device.create_descriptor_pool(&create_info) }?
-        };
-
-        let per_frame_descriptor_sets: [vk::DescriptorSet; MAX_FRAME_COUNT as usize] = {
-            let per_frame_set_layout = *renderer
-                .descriptor_set_layouts_mut()
-                .get(per_frame_descriptor_set_layout)
-                .unwrap();
-            let set_layouts = [per_frame_set_layout; MAX_FRAME_COUNT as usize];
-            let alloc_info = vk::DescriptorSetAllocateInfo {
-                descriptor_pool,
-                descriptor_set_count: set_layouts.len() as u32,
-                p_set_layouts: set_layouts.as_ptr(),
-                ..Default::default()
-            };
-            let sets = unsafe { device.allocate_descriptor_sets(&alloc_info) }?;
-
-            sets.try_into()
-                .expect("Incorrect number of descriptor sets")
-        };
-
-        let other_descriptor_set = {
-            let other_set_layout = *renderer
-                .descriptor_set_layouts_mut()
-                .get(other_descriptor_set_layout)
-                .unwrap();
-            let set_layouts = [other_set_layout];
-            let alloc_info = vk::DescriptorSetAllocateInfo {
-                descriptor_pool,
-                descriptor_set_count: set_layouts.len() as u32,
-                p_set_layouts: set_layouts.as_ptr(),
-                ..Default::default()
-            };
-            let sets = unsafe { device.allocate_descriptor_sets(&alloc_info) }?;
-            sets[0]
-        };
-
-        {
-            let (grid_data_offset, grid_data_size) = scene.grid_data_range;
-            let grid_buffer_info = [vk::DescriptorBufferInfo {
-                buffer: scene.uniform_buffer.handle,
-                offset: grid_data_offset,
-                range: grid_data_size,
-            }];
-            let writes = [vk::WriteDescriptorSet {
-                dst_set: other_descriptor_set,
-                dst_binding: 0,
-                dst_array_element: 0,
-                descriptor_count: grid_buffer_info.len() as u32,
-                descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
-                p_buffer_info: grid_buffer_info.as_ptr(),
-                ..Default::default()
-            }];
-            unsafe { device.update_descriptor_sets(&writes, &[]) };
+            });
+            img.layout = attachment.final_layout;
         }
 
-        Ok(Self {
-            device,
-            per_frame_descriptor_set_layout,
-            other_descriptor_set_layout,
-            descriptor_pool,
-            per_frame_descriptor_sets,
-            other_descriptor_set,
-            pipeline_layout,
-            vert_module,
-            frag_module,
-        })
-    }
-    pub fn update_context(&self, ctx: &FrameContext, camera_data_range: &AllocationRange) {
-        const CAMERA_SIZE: u64 = std::mem::size_of::<CameraUBO>() as u64;
-        const INSTANCE_SIZE: u64 = std::mem::size_of::<InstanceData>() as u64;
-
-        let camera_infos: Box<[vk::DescriptorBufferInfo]> = (0..MAX_FRAME_COUNT as usize)
-            .map(|i| vk::DescriptorBufferInfo {
-                buffer: ctx.frames()[i].allocator().uniform_buffer_raw(),
-                offset: camera_data_range.offset,
-                range: camera_data_range.size,
-            })
-            .collect();
-
-        let writes: Box<[vk::WriteDescriptorSet]> = (0..MAX_FRAME_COUNT as usize)
-            .flat_map(|i| {
-                [vk::WriteDescriptorSet {
-                    dst_set: self.per_frame_descriptor_sets[i],
-                    dst_binding: 0,
-                    descriptor_count: 1,
-                    p_buffer_info: &camera_infos[i],
-                    descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
+        if let (Some(attachment), Some(depth_target)) = (&self.depth, target.depth_image) {
+            let img = renderer
+                .get_image_mut(depth_target)
+                .ok_or(Error::ResourceMissing)?;
+            let aspect_mask = if matches!(
+                img.format,
+                vk::Format::D32_SFLOAT_S8_UINT
+                    | vk::Format::D24_UNORM_S8_UINT
+                    | vk::Format::D16_UNORM_S8_UINT
+            ) {
+                vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+            } else {
+                vk::ImageAspectFlags::DEPTH
+            };
+            if img.layout != attachment.final_layout {
+                // NOTE: This renderer currently only uses combined depth stencil images.
+                barriers.push(vk::ImageMemoryBarrier2 {
+                    src_stage_mask: vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS,
+                    src_access_mask: vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                    dst_stage_mask: vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS,
+                    dst_access_mask: vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ,
+                    old_layout: img.layout,
+                    new_layout: attachment.final_layout,
+                    image: img.handle,
+                    subresource_range: vk::ImageSubresourceRange {
+                        aspect_mask,
+                        base_mip_level: 0,
+                        level_count: img.mip_level_count,
+                        base_array_layer: 0,
+                        layer_count: img.layer_count,
+                    },
                     ..Default::default()
-                }]
-                .into_iter()
-            })
-            .collect();
-
-        unsafe { self.device.update_descriptor_sets(&writes, &[]) };
-    }
-    pub fn render(
-        &self,
-        ctx: &mut FrameContext,
-        renderer: &mut Renderer,
-        scene: &Scene,
-        indirect_offset: u64,
-        draw_count: u32,
-        stride: u32,
-    ) -> Result<()> {
-        let (pipeline, layout) = {
-            let layout = renderer
-                .pipeline_layouts
-                .get(self.pipeline_layout)
-                .ok_or(Error::ResourceMissing)?
-                .raw;
-            let pipeline_desc = PipelineDescription::DynamicGraphics {
-                pipeline_layout: self.pipeline_layout,
-                vert_shader: self.vert_module,
-                frag_shader: self.frag_module,
-                topology: vk::PrimitiveTopology::TRIANGLE_LIST,
-                color_formats: Box::new([ctx.get_color_format()]),
-                depth_format: Some(ctx.depth_format()),
-                stencil_format: None,
-                samples: renderer.samples(),
-            };
-            let pipeline_handle = renderer.pipelines.access_or_create(
-                pipeline_desc,
-                &mut renderer.pipeline_layouts,
-                &mut renderer.shader_modules,
-            )?;
-            let pipeline = *renderer
-                .pipelines
-                .get(pipeline_handle)
-                .ok_or(Error::ResourceMissing)?;
-
-            (pipeline, layout)
-        };
-
-        let current_frame_index = ctx.frame_index;
-        let frame = ctx.get_current_frame_mut();
-        let cmd = frame.command_buffer();
-
-        unsafe {
-            self.device
-                .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
-
-            // bind per frame ds
-            let sets = &[self.per_frame_descriptor_sets[current_frame_index]];
-            self.device.cmd_bind_descriptor_sets(
-                cmd,
-                vk::PipelineBindPoint::GRAPHICS,
-                layout,
-                0,
-                sets,
-                &[],
-            );
-
-            // bind other ds
-            let sets = &[self.other_descriptor_set];
-            self.device.cmd_bind_descriptor_sets(
-                cmd,
-                vk::PipelineBindPoint::GRAPHICS,
-                layout,
-                1,
-                sets,
-                &[],
-            );
-
-            let mesh_arena = renderer.mesh_arenas.get(scene.mesh_arena_handle).unwrap();
-
-            let (vb, ib) = (
-                mesh_arena.vertex_buffer.handle,
-                mesh_arena.index_buffer.handle,
-            );
-            self.device.cmd_bind_vertex_buffers(cmd, 0, &[vb], &[0]);
-            self.device
-                .cmd_bind_index_buffer(cmd, ib, 0, vk::IndexType::UINT32);
-
-            self.device.cmd_draw_indexed_indirect(
-                cmd,
-                frame.allocator_mut().indirect_buffer_raw(),
-                indirect_offset,
-                draw_count,
-                stride,
-            );
-        };
-
-        Ok(())
-    }
-}
-
-#[allow(dead_code)]
-pub struct DepthRenderPass {
-    device: SharedDeviceRef,
-    per_frame_descriptor_set_layout: DescriptorSetLayoutResourceHandle,
-    // other_descriptor_set_layout: DescriptorSetLayoutResourceHandle,
-    descriptor_pool: vk::DescriptorPool,
-    per_frame_descriptor_sets: [vk::DescriptorSet; MAX_FRAME_COUNT as usize],
-    // other_descriptor_set: vk::DescriptorSet,
-    pipeline_layout: PipelineLayoutResourceHandle,
-    vert_module: ShaderModuleResourceHandle,
-    frag_module: ShaderModuleResourceHandle,
-}
-
-impl Drop for DepthRenderPass {
-    fn drop(&mut self) {
-        unsafe {
-            self.device.destroy_descriptor_pool(self.descriptor_pool);
+                });
+                img.layout = attachment.final_layout;
+            }
         }
-    }
-}
 
-impl DepthRenderPass {
-    pub fn new(renderer: &mut Renderer) -> Result<Self> {
-        let device = renderer.device.clone();
-
-        let descriptor_set_layout_bindings: &[&[DescriptorSetLayoutBindingInfo]] = &[
-            // SET 0 - per frame
-            &[
-                DescriptorSetLayoutBindingInfo {
-                    binding: 0,
-                    ty: vk::DescriptorType::STORAGE_BUFFER,
-                    count: 1,
-                    stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                },
-                DescriptorSetLayoutBindingInfo {
-                    binding: 1,
-                    ty: vk::DescriptorType::UNIFORM_BUFFER,
-                    count: 1,
-                    stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                },
-            ],
-        ];
-
-        let per_frame_descriptor_set_layout_desc = DescriptorSetLayoutDescription {
-            bindings: descriptor_set_layout_bindings[0].into(),
-        };
-        let per_frame_descriptor_set_layout = renderer
-            .descriptor_set_layouts_mut()
-            .access_or_create(per_frame_descriptor_set_layout_desc)?;
-        // let other_descriptor_set_layout_desc = DescriptorSetLayoutDescription {
-        //     bindings: descriptor_set_layout_bindings[1].into(),
-        // };
-        // let other_descriptor_set_layout = renderer
-        //     .descriptor_set_layouts_mut()
-        //     .access_or_create(other_descriptor_set_layout_desc)?;
-
-        let pipeline_layout_desc = PipelineLayoutDescription {
-            descriptor_set_layouts: Box::new([per_frame_descriptor_set_layout]),
-            bind_point: vk::PipelineBindPoint::GRAPHICS,
+        let dependency_info = vk::DependencyInfo {
+            image_memory_barrier_count: barriers.len() as u32,
+            p_image_memory_barriers: barriers.as_ptr(),
+            ..Default::default()
         };
 
-        let pipeline_layout = renderer.access_or_create_pipeline_layout(pipeline_layout_desc)?;
-
-        // TODO: it seems like this could be generated by build.rs or a macro?
-        const VERTEX_ATTRIBUTE_DESCRIPTIONS: &[vk::VertexInputAttributeDescription] =
-            &[vk::VertexInputAttributeDescription {
-                location: 0,
-                binding: 0,
-                format: vk::Format::R32G32B32_SFLOAT,
-                offset: std::mem::offset_of!(crate::ShaderVertVertex, position) as u32,
-            }];
-        let vertex_input_bindings = &[vk::VertexInputBindingDescription {
-            binding: 0,
-            stride: std::mem::size_of::<ShaderVertVertex>() as u32,
-            input_rate: vk::VertexInputRate::VERTEX,
-        }];
-        let vert_module_desc = ShaderModuleDescription::Internal {
-            stage: vk::ShaderStageFlags::VERTEX,
-            spv: COMPILED_DEPTH_VERT_SHADER,
-            entry_point_name: ENTRY_POINT_NAME_SHADER_VERT,
-            vertex_attribute_descriptions: VERTEX_ATTRIBUTE_DESCRIPTIONS,
-            vertex_input_bindings,
-        };
-        let vert_module = renderer
-            .shader_modules_mut()
-            .access_or_create(vert_module_desc)?;
-
-        let frag_module_desc = ShaderModuleDescription::Internal {
-            stage: vk::ShaderStageFlags::FRAGMENT,
-            spv: COMPILED_DEPTH_FRAG_SHADER,
-            entry_point_name: ENTRY_POINT_NAME_SHADER_FRAG,
-            vertex_attribute_descriptions: &[],
-            vertex_input_bindings: &[],
-        };
-        let frag_module = renderer
-            .shader_modules_mut()
-            .access_or_create(frag_module_desc)?;
-
-        let descriptor_pool = {
-            let pool_sizes = [
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::UNIFORM_BUFFER,
-                    descriptor_count: MAX_FRAME_COUNT as u32,
-                },
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::STORAGE_BUFFER,
-                    descriptor_count: MAX_FRAME_COUNT as u32,
-                },
-            ];
-            let create_info = vk::DescriptorPoolCreateInfo {
-                max_sets: (MAX_FRAME_COUNT as u32 * 2),
-                pool_size_count: pool_sizes.len() as u32,
-                p_pool_sizes: pool_sizes.as_ptr(),
-                ..Default::default()
-            };
-
-            unsafe { device.create_descriptor_pool(&create_info) }?
-        };
-
-        let per_frame_descriptor_sets: [vk::DescriptorSet; MAX_FRAME_COUNT as usize] = {
-            let per_frame_set_layout = *renderer
-                .descriptor_set_layouts_mut()
-                .get(per_frame_descriptor_set_layout)
-                .unwrap();
-            let set_layouts = [per_frame_set_layout; MAX_FRAME_COUNT as usize];
-            let alloc_info = vk::DescriptorSetAllocateInfo {
-                descriptor_pool,
-                descriptor_set_count: set_layouts.len() as u32,
-                p_set_layouts: set_layouts.as_ptr(),
-                ..Default::default()
-            };
-            let sets = unsafe { device.allocate_descriptor_sets(&alloc_info) }?;
-
-            sets.try_into()
-                .expect("Incorrect number of descriptor sets")
-        };
-
-        // let other_descriptor_set = {
-        //     let other_set_layout = *renderer
-        //         .descriptor_set_layouts_mut()
-        //         .get(other_descriptor_set_layout)
-        //         .unwrap();
-        //     let set_layouts = [other_set_layout];
-        //     let alloc_info = vk::DescriptorSetAllocateInfo {
-        //         descriptor_pool,
-        //         descriptor_set_count: set_layouts.len() as u32,
-        //         p_set_layouts: set_layouts.as_ptr(),
-        //         ..Default::default()
-        //     };
-        //     let sets = unsafe { device.allocate_descriptor_sets(&alloc_info) }?;
-        //     sets[0]
-        // };
-
-        Ok(Self {
-            device,
-            per_frame_descriptor_set_layout,
-            // other_descriptor_set_layout,
-            descriptor_pool,
-            per_frame_descriptor_sets,
-            // other_descriptor_set,
-            pipeline_layout,
-            vert_module,
-            frag_module,
-        })
-    }
-    pub fn update_context(
-        &mut self,
-        ctx: &FrameContext,
-        light_data_range: &AllocationRange,
-        instance_data_range: &AllocationRange,
-    ) {
-        let light_infos: Box<[vk::DescriptorBufferInfo]> = (0..MAX_FRAME_COUNT as usize)
-            .map(|i| vk::DescriptorBufferInfo {
-                buffer: ctx.frames()[i].allocator().uniform_buffer_raw(),
-                offset: light_data_range.offset,
-                range: light_data_range.size,
-            })
-            .collect();
-
-        let instance_infos: Box<[vk::DescriptorBufferInfo]> = (0..MAX_FRAME_COUNT as usize)
-            .map(|i| vk::DescriptorBufferInfo {
-                buffer: ctx.frames()[i].allocator().storage_buffer_raw(),
-                offset: instance_data_range.offset,
-                range: instance_data_range.size,
-            })
-            .collect();
-
-        let writes: Box<[vk::WriteDescriptorSet]> = (0..MAX_FRAME_COUNT as usize)
-            .flat_map(|i| {
-                [
-                    vk::WriteDescriptorSet {
-                        dst_set: self.per_frame_descriptor_sets[i],
-                        dst_binding: 0,
-                        descriptor_count: 1,
-                        p_buffer_info: &instance_infos[i],
-                        descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
-                        ..Default::default()
-                    },
-                    vk::WriteDescriptorSet {
-                        dst_set: self.per_frame_descriptor_sets[i],
-                        dst_binding: 1,
-                        descriptor_count: 1,
-                        p_buffer_info: &light_infos[i],
-                        descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
-                        ..Default::default()
-                    },
-                ]
-                .into_iter()
-            })
-            .collect();
-
-        unsafe { self.device.update_descriptor_sets(&writes, &[]) };
-    }
-    pub fn render(
-        &self,
-        ctx: &mut FrameContext,
-        pipelines: &mut PipelineResourceManager,
-        pipeline_layouts: &mut PipelineLayoutResourceManager,
-        shader_modules: &mut ShaderModuleResourceManager,
-        mesh_arenas: &slotmap::DenseSlotMap<MeshArenaHandle, MeshArena>,
-        scene: &Scene,
-        indirect_offset: u64,
-        draw_count: u32,
-        stride: u32,
-    ) -> Result<()> {
-        let (pipeline, layout) = {
-            let layout = pipeline_layouts
-                .get(self.pipeline_layout)
-                .ok_or(Error::ResourceMissing)?
-                .raw;
-            let pipeline_desc = PipelineDescription::DynamicGraphics {
-                pipeline_layout: self.pipeline_layout,
-                vert_shader: self.vert_module,
-                frag_shader: self.frag_module,
-                topology: vk::PrimitiveTopology::TRIANGLE_LIST,
-                color_formats: Box::new([]),
-                depth_format: Some(vk::Format::D32_SFLOAT),
-                stencil_format: None,
-                samples: vk::SampleCountFlags::TYPE_1,
-            };
-            let pipeline_handle =
-                pipelines.access_or_create(pipeline_desc, pipeline_layouts, shader_modules)?;
-            let pipeline = *pipelines
-                .get(pipeline_handle)
-                .ok_or(Error::ResourceMissing)?;
-
-            (pipeline, layout)
-        };
-
-        let current_frame_index = ctx.frame_index;
-        let frame = ctx.get_current_frame_mut();
-
-        let cmd = frame.command_buffer();
-
-        unsafe {
-            self.device
-                .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
-
-            // bind per frame ds
-            let sets = &[self.per_frame_descriptor_sets[current_frame_index]];
-            let dynamic_offsets = &[];
-            self.device.cmd_bind_descriptor_sets(
-                cmd,
-                vk::PipelineBindPoint::GRAPHICS,
-                layout,
-                0,
-                sets,
-                dynamic_offsets,
-            );
-
-            // bind other ds
-            // let sets = &[self.other_descriptor_set];
-            // let dynamic_offsets = &[];
-            // self.device.cmd_bind_descriptor_sets(
-            //     cmd,
-            //     vk::PipelineBindPoint::GRAPHICS,
-            //     layout,
-            //     1,
-            //     sets,
-            //     dynamic_offsets,
-            // );
-
-            let mesh_arena = mesh_arenas.get(scene.mesh_arena_handle).unwrap();
-
-            let (vb, ib) = (
-                mesh_arena.vertex_buffer.handle,
-                mesh_arena.index_buffer.handle,
-            );
-            self.device.cmd_bind_vertex_buffers(cmd, 0, &[vb], &[0]);
-            self.device
-                .cmd_bind_index_buffer(cmd, ib, 0, vk::IndexType::UINT32);
-
-            self.device.cmd_draw_indexed_indirect(
-                cmd,
-                frame.allocator_mut().indirect_buffer_raw(),
-                indirect_offset,
-                draw_count,
-                stride,
-            );
-        };
+        unsafe { renderer.device.cmd_pipeline_barrier2(cmd, &dependency_info) };
 
         Ok(())
     }

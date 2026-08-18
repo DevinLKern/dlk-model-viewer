@@ -3,6 +3,7 @@ mod render_pass;
 mod resource_manager;
 mod result;
 mod scene;
+mod techniques;
 
 include!(concat!(env!("OUT_DIR"), "/variable_types.rs"));
 include!(concat!(env!("OUT_DIR"), "/shader_paths.rs"));
@@ -14,6 +15,7 @@ pub(crate) use resource_manager::*;
 pub use result::Error;
 pub use result::Result;
 pub use scene::*;
+pub use techniques::*;
 
 use ash::vk;
 use slotmap::SlotMap;
@@ -192,42 +194,42 @@ impl Renderer {
             samples,
         })
     }
-    // TODO: Add RenderPass trait
+    // TODO: Add Technique trait
     #[inline]
     pub fn render_main_scene(
         &mut self,
         ctx: &mut FrameContext,
         scene: &Scene,
-        pass: &MainRenderPass,
+        technique: &MainTechnique,
         indirect_offset: u64,
         draw_count: u32,
         stride: u32,
     ) -> Result<()> {
-        pass.render(ctx, self, scene, indirect_offset, draw_count, stride)
+        technique.render(ctx, self, scene, indirect_offset, draw_count, stride)
     }
     #[inline]
     pub fn render_grid_scene(
         &mut self,
         ctx: &mut FrameContext,
         scene: &Scene,
-        pass: &GridRenderPass,
+        technique: &GridTechnique,
         indirect_offset: u64,
         draw_count: u32,
         stride: u32,
     ) -> Result<()> {
-        pass.render(ctx, self, scene, indirect_offset, draw_count, stride)
+        technique.render(ctx, self, scene, indirect_offset, draw_count, stride)
     }
     #[inline]
     pub fn render_depth_scene(
         &mut self,
         ctx: &mut FrameContext,
         scene: &Scene,
-        pass: &DepthRenderPass,
+        technique: &DepthTechnique,
         indirect_offset: u64,
         draw_count: u32,
         stride: u32,
     ) -> Result<()> {
-        pass.render(
+        technique.render(
             ctx,
             &mut self.pipelines,
             &mut self.pipeline_layouts,
