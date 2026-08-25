@@ -2,13 +2,12 @@ use ash::vk;
 use vulkan::SharedDeviceRef;
 
 use crate::{
-    AllocationRange, CameraUBO, DescriptorSetLayoutBindingInfo, DescriptorSetLayoutDescription,
+    CameraUBO, DescriptorSetLayoutBindingInfo, DescriptorSetLayoutDescription,
     DescriptorSetLayoutResourceHandle, ENTRY_POINT_NAME_GRID_FRAG, ENTRY_POINT_NAME_GRID_VERT,
     ENTRY_POINT_NAME_SHADER_FRAG, ENTRY_POINT_NAME_SHADER_VERT, Error, FrameContext, InstanceData,
-    MAX_FRAME_COUNT, MAX_SCENE_IMAGE_COUNT, MeshArena, MeshArenaHandle, PipelineDescription,
-    PipelineLayoutDescription, PipelineLayoutResourceHandle, PipelineLayoutResourceManager,
-    PipelineResourceManager, Renderer, Result, Scene, ShaderModuleDescription,
-    ShaderModuleResourceHandle, ShaderModuleResourceManager, ShaderVertVertex,
+    MAX_FRAME_COUNT, MAX_SCENE_IMAGE_COUNT, PipelineDescription, PipelineLayoutDescription,
+    PipelineLayoutResourceHandle, RenderTarget, Renderer, Result, Scene, ShaderModuleDescription,
+    ShaderModuleResourceHandle, ShaderVertVertex,
 };
 
 slotmap::new_key_type! { pub struct InstanceDataHandle; }
@@ -22,6 +21,16 @@ const COMPILED_GRID_FRAG_SHADER: &[u8] = include_bytes!("../shaders/grid.frag.sp
 
 const COMPILED_DEPTH_VERT_SHADER: &[u8] = include_bytes!("../shaders/depth.vert.spv");
 const COMPILED_DEPTH_FRAG_SHADER: &[u8] = include_bytes!("../shaders/depth.frag.spv");
+
+pub trait Technique {
+    fn bind(
+        &self,
+        cmd: vk::CommandBuffer,
+        ctx: &FrameContext,
+        renderer: &mut Renderer,
+        target: &RenderTarget,
+    ) -> Result<()>;
+}
 
 #[allow(dead_code)]
 pub struct MainTechnique {
@@ -252,7 +261,10 @@ impl MainTechnique {
                 })
                 .collect();
 
-            let (global_light_offset, global_light_size) = scene.global_light_range;
+            let (global_light_offset, global_light_size) = (
+                scene.global_light_range.offset,
+                scene.global_light_range.size,
+            );
             let global_light_buffer_info = [vk::DescriptorBufferInfo {
                 buffer: scene.uniform_buffer.handle,
                 offset: global_light_offset,
@@ -310,16 +322,16 @@ impl MainTechnique {
     pub fn update_context(
         &mut self,
         ctx: &mut FrameContext,
-        camera_data_range: &AllocationRange,
-        instance_data_range: &AllocationRange,
-        point_lights_data_range: &AllocationRange,
-        global_light_data_range: &AllocationRange,
+        camera_data_range: &vulkan::AllocationRange,
+        instance_data_range: &vulkan::AllocationRange,
+        point_lights_data_range: &vulkan::AllocationRange,
+        global_light_data_range: &vulkan::AllocationRange,
         depth_image_index: usize,
         renderer: &Renderer,
     ) -> Result<()> {
         let camera_infos: Box<[vk::DescriptorBufferInfo]> = (0..MAX_FRAME_COUNT as usize)
             .map(|i| vk::DescriptorBufferInfo {
-                buffer: ctx.frames()[i].allocator().uniform_buffer_raw(),
+                buffer: ctx.frames()[i].allocator().uniform_allocator().buffer(),
                 offset: camera_data_range.offset,
                 range: camera_data_range.size,
             })
@@ -327,7 +339,7 @@ impl MainTechnique {
 
         let instance_infos: Box<[vk::DescriptorBufferInfo]> = (0..MAX_FRAME_COUNT as usize)
             .map(|i| vk::DescriptorBufferInfo {
-                buffer: ctx.frames()[i].allocator().storage_buffer_raw(),
+                buffer: ctx.frames()[i].allocator().storage_allocator().buffer(),
                 offset: instance_data_range.offset,
                 range: instance_data_range.size,
             })
@@ -335,7 +347,7 @@ impl MainTechnique {
 
         let point_light_infos: Box<[vk::DescriptorBufferInfo]> = (0..MAX_FRAME_COUNT as usize)
             .map(|i| vk::DescriptorBufferInfo {
-                buffer: ctx.frames()[i].allocator().storage_buffer_raw(),
+                buffer: ctx.frames()[i].allocator().storage_allocator().buffer(),
                 offset: point_lights_data_range.offset,
                 range: point_lights_data_range.size,
             })
@@ -343,7 +355,7 @@ impl MainTechnique {
 
         let light_infos: Box<[vk::DescriptorBufferInfo]> = (0..MAX_FRAME_COUNT as usize)
             .map(|i| vk::DescriptorBufferInfo {
-                buffer: ctx.frames()[i].allocator().uniform_buffer_raw(),
+                buffer: ctx.frames()[i].allocator().uniform_allocator().buffer(),
                 offset: global_light_data_range.offset,
                 range: global_light_data_range.size,
             })
@@ -415,14 +427,15 @@ impl MainTechnique {
 
         Ok(())
     }
-    pub fn render(
+}
+
+impl Technique for MainTechnique {
+    fn bind(
         &self,
-        ctx: &mut FrameContext,
+        cmd: vk::CommandBuffer,
+        ctx: &FrameContext,
         renderer: &mut Renderer,
-        scene: &Scene,
-        indirect_offset: u64,
-        draw_count: u32,
-        stride: u32,
+        target: &RenderTarget,
     ) -> Result<()> {
         let (pipeline, layout) = {
             let layout = renderer
@@ -430,13 +443,32 @@ impl MainTechnique {
                 .get(self.pipeline_layout)
                 .ok_or(Error::ResourceMissing)?
                 .raw;
+
+            let mut color_formats: Vec<vk::Format> = Vec::with_capacity(8);
+            for target_image in target.color_images.iter() {
+                let img = renderer
+                    .images
+                    .get(target_image.handle)
+                    .ok_or(Error::ResourceMissing)?;
+                color_formats.push(img.format);
+            }
+
+            let depth_format = if let Some(img_handle) = target.depth_image {
+                let img = renderer
+                    .get_image(img_handle)
+                    .ok_or(Error::ResourceMissing)?;
+                Some(img.format)
+            } else {
+                None
+            };
+
             let pipeline_desc = PipelineDescription::DynamicGraphics {
                 pipeline_layout: self.pipeline_layout,
                 vert_shader: self.vert_module,
                 frag_shader: self.frag_module,
                 topology: vk::PrimitiveTopology::TRIANGLE_LIST,
-                color_formats: Box::new([ctx.get_color_format()]),
-                depth_format: Some(ctx.depth_format()),
+                color_formats: color_formats.into_boxed_slice(),
+                depth_format,
                 stencil_format: None,
                 samples: renderer.samples(),
             };
@@ -454,9 +486,6 @@ impl MainTechnique {
         };
 
         let current_frame_index = ctx.frame_index;
-        let frame = ctx.get_current_frame_mut();
-
-        let cmd = frame.command_buffer();
 
         unsafe {
             self.device
@@ -474,7 +503,6 @@ impl MainTechnique {
                 dynamic_offsets,
             );
 
-            // bind other ds
             let sets = &[self.other_descriptor_set];
             let dynamic_offsets = &[];
             self.device.cmd_bind_descriptor_sets(
@@ -485,25 +513,7 @@ impl MainTechnique {
                 sets,
                 dynamic_offsets,
             );
-
-            let mesh_arena = renderer.mesh_arenas.get(scene.mesh_arena_handle).unwrap();
-
-            let (vb, ib) = (
-                mesh_arena.vertex_buffer.handle,
-                mesh_arena.index_buffer.handle,
-            );
-            self.device.cmd_bind_vertex_buffers(cmd, 0, &[vb], &[0]);
-            self.device
-                .cmd_bind_index_buffer(cmd, ib, 0, vk::IndexType::UINT32);
-
-            self.device.cmd_draw_indexed_indirect(
-                cmd,
-                frame.allocator_mut().indirect_buffer_raw(),
-                indirect_offset,
-                draw_count,
-                stride,
-            );
-        };
+        }
 
         Ok(())
     }
@@ -662,7 +672,8 @@ impl GridTechnique {
         };
 
         {
-            let (grid_data_offset, grid_data_size) = scene.grid_data_range;
+            let (grid_data_offset, grid_data_size) =
+                (scene.grid_data_range.offset, scene.grid_data_range.size);
             let grid_buffer_info = [vk::DescriptorBufferInfo {
                 buffer: scene.uniform_buffer.handle,
                 offset: grid_data_offset,
@@ -692,13 +703,13 @@ impl GridTechnique {
             frag_module,
         })
     }
-    pub fn update_context(&self, ctx: &FrameContext, camera_data_range: &AllocationRange) {
+    pub fn update_context(&self, ctx: &FrameContext, camera_data_range: &vulkan::AllocationRange) {
         const CAMERA_SIZE: u64 = std::mem::size_of::<CameraUBO>() as u64;
         const INSTANCE_SIZE: u64 = std::mem::size_of::<InstanceData>() as u64;
 
         let camera_infos: Box<[vk::DescriptorBufferInfo]> = (0..MAX_FRAME_COUNT as usize)
             .map(|i| vk::DescriptorBufferInfo {
-                buffer: ctx.frames()[i].allocator().uniform_buffer_raw(),
+                buffer: ctx.frames()[i].allocator().uniform_allocator().buffer(),
                 offset: camera_data_range.offset,
                 range: camera_data_range.size,
             })
@@ -720,14 +731,15 @@ impl GridTechnique {
 
         unsafe { self.device.update_descriptor_sets(&writes, &[]) };
     }
-    pub fn render(
+}
+
+impl Technique for GridTechnique {
+    fn bind(
         &self,
-        ctx: &mut FrameContext,
+        cmd: vk::CommandBuffer,
+        ctx: &FrameContext,
         renderer: &mut Renderer,
-        scene: &Scene,
-        indirect_offset: u64,
-        draw_count: u32,
-        stride: u32,
+        target: &RenderTarget,
     ) -> Result<()> {
         let (pipeline, layout) = {
             let layout = renderer
@@ -735,13 +747,32 @@ impl GridTechnique {
                 .get(self.pipeline_layout)
                 .ok_or(Error::ResourceMissing)?
                 .raw;
+
+            let mut color_formats: Vec<vk::Format> = Vec::with_capacity(8);
+            for target_image in target.color_images.iter() {
+                let img = renderer
+                    .images
+                    .get(target_image.handle)
+                    .ok_or(Error::ResourceMissing)?;
+                color_formats.push(img.format);
+            }
+
+            let depth_format = if let Some(img_handle) = target.depth_image {
+                let img = renderer
+                    .get_image(img_handle)
+                    .ok_or(Error::ResourceMissing)?;
+                Some(img.format)
+            } else {
+                None
+            };
+
             let pipeline_desc = PipelineDescription::DynamicGraphics {
                 pipeline_layout: self.pipeline_layout,
                 vert_shader: self.vert_module,
                 frag_shader: self.frag_module,
                 topology: vk::PrimitiveTopology::TRIANGLE_LIST,
-                color_formats: Box::new([ctx.get_color_format()]),
-                depth_format: Some(ctx.depth_format()),
+                color_formats: color_formats.into_boxed_slice(),
+                depth_format,
                 stencil_format: None,
                 samples: renderer.samples(),
             };
@@ -750,17 +781,15 @@ impl GridTechnique {
                 &mut renderer.pipeline_layouts,
                 &mut renderer.shader_modules,
             )?;
-            let pipeline = *renderer
+            let pipeline = renderer
                 .pipelines
                 .get(pipeline_handle)
                 .ok_or(Error::ResourceMissing)?;
 
-            (pipeline, layout)
+            (*pipeline, layout)
         };
 
         let current_frame_index = ctx.frame_index;
-        let frame = ctx.get_current_frame_mut();
-        let cmd = frame.command_buffer();
 
         unsafe {
             self.device
@@ -768,44 +797,27 @@ impl GridTechnique {
 
             // bind per frame ds
             let sets = &[self.per_frame_descriptor_sets[current_frame_index]];
+            let dynamic_offsets = &[];
             self.device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::GRAPHICS,
                 layout,
                 0,
                 sets,
-                &[],
+                dynamic_offsets,
             );
 
-            // bind other ds
             let sets = &[self.other_descriptor_set];
+            let dynamic_offsets = &[];
             self.device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::GRAPHICS,
                 layout,
                 1,
                 sets,
-                &[],
+                dynamic_offsets,
             );
-
-            let mesh_arena = renderer.mesh_arenas.get(scene.mesh_arena_handle).unwrap();
-
-            let (vb, ib) = (
-                mesh_arena.vertex_buffer.handle,
-                mesh_arena.index_buffer.handle,
-            );
-            self.device.cmd_bind_vertex_buffers(cmd, 0, &[vb], &[0]);
-            self.device
-                .cmd_bind_index_buffer(cmd, ib, 0, vk::IndexType::UINT32);
-
-            self.device.cmd_draw_indexed_indirect(
-                cmd,
-                frame.allocator_mut().indirect_buffer_raw(),
-                indirect_offset,
-                draw_count,
-                stride,
-            );
-        };
+        }
 
         Ok(())
     }
@@ -860,12 +872,6 @@ impl DepthTechnique {
         let per_frame_descriptor_set_layout = renderer
             .descriptor_set_layouts_mut()
             .access_or_create(per_frame_descriptor_set_layout_desc)?;
-        // let other_descriptor_set_layout_desc = DescriptorSetLayoutDescription {
-        //     bindings: descriptor_set_layout_bindings[1].into(),
-        // };
-        // let other_descriptor_set_layout = renderer
-        //     .descriptor_set_layouts_mut()
-        //     .access_or_create(other_descriptor_set_layout_desc)?;
 
         let pipeline_layout_desc = PipelineLayoutDescription {
             descriptor_set_layouts: Box::new([per_frame_descriptor_set_layout]),
@@ -948,29 +954,11 @@ impl DepthTechnique {
                 .expect("Incorrect number of descriptor sets")
         };
 
-        // let other_descriptor_set = {
-        //     let other_set_layout = *renderer
-        //         .descriptor_set_layouts_mut()
-        //         .get(other_descriptor_set_layout)
-        //         .unwrap();
-        //     let set_layouts = [other_set_layout];
-        //     let alloc_info = vk::DescriptorSetAllocateInfo {
-        //         descriptor_pool,
-        //         descriptor_set_count: set_layouts.len() as u32,
-        //         p_set_layouts: set_layouts.as_ptr(),
-        //         ..Default::default()
-        //     };
-        //     let sets = unsafe { device.allocate_descriptor_sets(&alloc_info) }?;
-        //     sets[0]
-        // };
-
         Ok(Self {
             device,
             per_frame_descriptor_set_layout,
-            // other_descriptor_set_layout,
             descriptor_pool,
             per_frame_descriptor_sets,
-            // other_descriptor_set,
             pipeline_layout,
             vert_module,
             frag_module,
@@ -979,12 +967,12 @@ impl DepthTechnique {
     pub fn update_context(
         &mut self,
         ctx: &FrameContext,
-        light_data_range: &AllocationRange,
-        instance_data_range: &AllocationRange,
+        light_data_range: &vulkan::AllocationRange,
+        instance_data_range: &vulkan::AllocationRange,
     ) {
         let light_infos: Box<[vk::DescriptorBufferInfo]> = (0..MAX_FRAME_COUNT as usize)
             .map(|i| vk::DescriptorBufferInfo {
-                buffer: ctx.frames()[i].allocator().uniform_buffer_raw(),
+                buffer: ctx.frames()[i].allocator().uniform_allocator().buffer(),
                 offset: light_data_range.offset,
                 range: light_data_range.size,
             })
@@ -992,7 +980,7 @@ impl DepthTechnique {
 
         let instance_infos: Box<[vk::DescriptorBufferInfo]> = (0..MAX_FRAME_COUNT as usize)
             .map(|i| vk::DescriptorBufferInfo {
-                buffer: ctx.frames()[i].allocator().storage_buffer_raw(),
+                buffer: ctx.frames()[i].allocator().storage_allocator().buffer(),
                 offset: instance_data_range.offset,
                 range: instance_data_range.size,
             })
@@ -1024,46 +1012,64 @@ impl DepthTechnique {
 
         unsafe { self.device.update_descriptor_sets(&writes, &[]) };
     }
-    pub fn render(
+}
+
+impl Technique for DepthTechnique {
+    fn bind(
         &self,
-        ctx: &mut FrameContext,
-        pipelines: &mut PipelineResourceManager,
-        pipeline_layouts: &mut PipelineLayoutResourceManager,
-        shader_modules: &mut ShaderModuleResourceManager,
-        mesh_arenas: &slotmap::DenseSlotMap<MeshArenaHandle, MeshArena>,
-        scene: &Scene,
-        indirect_offset: u64,
-        draw_count: u32,
-        stride: u32,
+        cmd: vk::CommandBuffer,
+        ctx: &FrameContext,
+        renderer: &mut Renderer,
+        target: &RenderTarget,
     ) -> Result<()> {
         let (pipeline, layout) = {
-            let layout = pipeline_layouts
+            let layout = renderer
+                .pipeline_layouts
                 .get(self.pipeline_layout)
                 .ok_or(Error::ResourceMissing)?
                 .raw;
+            let mut color_formats: Vec<vk::Format> = Vec::with_capacity(8);
+            for target_image in target.color_images.iter() {
+                let img = renderer
+                    .images
+                    .get(target_image.handle)
+                    .ok_or(Error::ResourceMissing)?;
+                color_formats.push(img.format);
+            }
+
+            let depth_format = if let Some(img_handle) = target.depth_image {
+                let img = renderer
+                    .get_image(img_handle)
+                    .ok_or(Error::ResourceMissing)?;
+                Some(img.format)
+            } else {
+                None
+            };
+
             let pipeline_desc = PipelineDescription::DynamicGraphics {
                 pipeline_layout: self.pipeline_layout,
                 vert_shader: self.vert_module,
                 frag_shader: self.frag_module,
                 topology: vk::PrimitiveTopology::TRIANGLE_LIST,
-                color_formats: Box::new([]),
-                depth_format: Some(vk::Format::D32_SFLOAT),
+                color_formats: color_formats.into_boxed_slice(),
+                depth_format,
                 stencil_format: None,
                 samples: vk::SampleCountFlags::TYPE_1,
             };
-            let pipeline_handle =
-                pipelines.access_or_create(pipeline_desc, pipeline_layouts, shader_modules)?;
-            let pipeline = *pipelines
+            let pipeline_handle = renderer.pipelines.access_or_create(
+                pipeline_desc,
+                &mut renderer.pipeline_layouts,
+                &mut renderer.shader_modules,
+            )?;
+            let pipeline = renderer
+                .pipelines
                 .get(pipeline_handle)
                 .ok_or(Error::ResourceMissing)?;
 
-            (pipeline, layout)
+            (*pipeline, layout)
         };
 
         let current_frame_index = ctx.frame_index;
-        let frame = ctx.get_current_frame_mut();
-
-        let cmd = frame.command_buffer();
 
         unsafe {
             self.device
@@ -1080,37 +1086,7 @@ impl DepthTechnique {
                 sets,
                 dynamic_offsets,
             );
-
-            // bind other ds
-            // let sets = &[self.other_descriptor_set];
-            // let dynamic_offsets = &[];
-            // self.device.cmd_bind_descriptor_sets(
-            //     cmd,
-            //     vk::PipelineBindPoint::GRAPHICS,
-            //     layout,
-            //     1,
-            //     sets,
-            //     dynamic_offsets,
-            // );
-
-            let mesh_arena = mesh_arenas.get(scene.mesh_arena_handle).unwrap();
-
-            let (vb, ib) = (
-                mesh_arena.vertex_buffer.handle,
-                mesh_arena.index_buffer.handle,
-            );
-            self.device.cmd_bind_vertex_buffers(cmd, 0, &[vb], &[0]);
-            self.device
-                .cmd_bind_index_buffer(cmd, ib, 0, vk::IndexType::UINT32);
-
-            self.device.cmd_draw_indexed_indirect(
-                cmd,
-                frame.allocator_mut().indirect_buffer_raw(),
-                indirect_offset,
-                draw_count,
-                stride,
-            );
-        };
+        }
 
         Ok(())
     }

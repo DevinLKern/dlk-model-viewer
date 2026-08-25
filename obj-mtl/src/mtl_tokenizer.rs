@@ -101,6 +101,8 @@ pub(crate) enum MtlToken {
         options: MtlOptions,
         file_name: Box<str>,
     },
+    D(f32),
+    Tr(f32),
 }
 
 #[allow(unused)]
@@ -349,7 +351,7 @@ impl MtlTokenizer {
             "Ni" => {
                 let ni = match rest.trim().parse::<f32>() {
                     Ok(f) => f,
-                    _ => return Some(Err(Error::Parse("Invalid Ns value"))),
+                    _ => return Some(Err(Error::Parse("Invalid Ni value"))),
                 };
 
                 MtlToken::Ni(ni)
@@ -357,7 +359,7 @@ impl MtlTokenizer {
             "illum" => {
                 let illum = match rest.trim().parse::<u32>() {
                     Ok(i) => i,
-                    _ => return Some(Err(Error::Parse("Invalid Ns value"))),
+                    _ => return Some(Err(Error::Parse("Invalid illum value"))),
                 };
 
                 MtlToken::Illum(illum)
@@ -369,6 +371,22 @@ impl MtlTokenizer {
                 };
 
                 MtlToken::Bump { options, file_name }
+            }
+            "d" => {
+                let d = match rest.trim().parse::<f32>() {
+                    Ok(f) => f,
+                    _ => return Some(Err(Error::Parse("Invalid d value"))),
+                };
+
+                MtlToken::D(d)
+            }
+            "tr" => {
+                let tr = match rest.trim().parse::<f32>() {
+                    Ok(f) => f,
+                    _ => return Some(Err(Error::Parse("Invalid tr value"))),
+                };
+
+                MtlToken::Tr(tr)
             }
             // "disp" => todo!(),
             // "refl" => todo!(),

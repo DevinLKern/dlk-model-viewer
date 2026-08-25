@@ -17,6 +17,7 @@ pub enum Error {
     WinitHandleError(winit::raw_window_handle::HandleError),
     ImageFeaturesNotSupported,
     CouldNotFindViableMemoryIndex,
+    OutsideAllocationRange,
     NotImplemented,
 }
 
@@ -44,6 +45,7 @@ impl std::fmt::Display for Error {
             Self::InvalidBufferType => write!(f, "Invalid buffer type"),
             Self::ImageFeaturesNotSupported => write!(f, "ImageFeaturesNotSupported"),
             Self::CouldNotFindViableMemoryIndex => write!(f, "CouldNotFindViableMemoryIndex"),
+            Self::OutsideAllocationRange => write!(f, "OutsideAllocationRange"),
             _ => write!(f, "Not implemented"),
         }
     }

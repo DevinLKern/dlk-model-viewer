@@ -1,4 +1,4 @@
-use crate::MtlTokenizer;
+use crate::{Error, MtlTokenizer, Result};
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Channel {
@@ -134,6 +134,7 @@ pub struct MtlMaterial {
     pub opacity: TexturedValue<f32>,
     pub roughness: TexturedValue<f32>,
     pub metallic: TexturedValue<f32>,
+    pub dissolve: TexturedValue<f32>,
 
     pub illum: IllumModel,
     pub ior: Option<f32>,
@@ -154,6 +155,7 @@ impl Default for MtlMaterial {
             opacity: TexturedValue::default(),
             roughness: TexturedValue::default(),
             metallic: TexturedValue::default(),
+            dissolve: TexturedValue::default(),
             illum: IllumModel::UnlitColor,
             ior: None,
             normal_map: None,
@@ -163,7 +165,7 @@ impl Default for MtlMaterial {
     }
 }
 
-pub fn load_materials(file_path: &std::path::Path) -> crate::Result<Box<[MtlMaterial]>> {
+pub fn load_materials(file_path: &std::path::Path) -> Result<Box<[MtlMaterial]>> {
     let mut tokenizer = MtlTokenizer::from_path(file_path)?;
 
     let mut materials = Vec::<MtlMaterial>::with_capacity(4);
@@ -180,13 +182,13 @@ pub fn load_materials(file_path: &std::path::Path) -> crate::Result<Box<[MtlMate
             MtlToken::Ka { r, g, b } => {
                 let mat = materials
                     .last_mut()
-                    .ok_or(crate::Error::Parse("Mtl 'Ka' before any 'newmtl' material"))?;
+                    .ok_or(Error::Parse("Mtl 'Ka' before any 'newmtl' material"))?;
                 mat.ambient.value = Some([r, g, b]);
             }
             MtlToken::MapKa { options, file_name } => {
-                let mat = materials.last_mut().ok_or(crate::Error::Parse(
-                    "Mtl 'map_Ka' before any 'newmtl' material",
-                ))?;
+                let mat = materials
+                    .last_mut()
+                    .ok_or(Error::Parse("Mtl 'map_Ka' before any 'newmtl' material"))?;
                 let mm = options.mm.unwrap_or(crate::Mm {
                     base: 0.0,
                     gain: 1.0,
@@ -213,9 +215,9 @@ pub fn load_materials(file_path: &std::path::Path) -> crate::Result<Box<[MtlMate
                 mat.diffuse.value = Some([r, g, b]);
             }
             MtlToken::MapKd { options, file_name } => {
-                let mat = materials.last_mut().ok_or(crate::Error::Parse(
-                    "Mtl 'map_Kd' before any 'newmtl' material",
-                ))?;
+                let mat = materials
+                    .last_mut()
+                    .ok_or(Error::Parse("Mtl 'map_Kd' before any 'newmtl' material"))?;
                 let mm = options.mm.unwrap_or(crate::Mm {
                     base: 0.0,
                     gain: 1.0,
@@ -238,13 +240,13 @@ pub fn load_materials(file_path: &std::path::Path) -> crate::Result<Box<[MtlMate
             MtlToken::Ks { r, g, b } => {
                 let mat = materials
                     .last_mut()
-                    .ok_or(crate::Error::Parse("Mtl 'Ks' before any 'newmtl' material"))?;
+                    .ok_or(Error::Parse("Mtl 'Ks' before any 'newmtl' material"))?;
                 mat.specular.value = Some([r, g, b]);
             }
             MtlToken::MapKs { options, file_name } => {
-                let mat = materials.last_mut().ok_or(crate::Error::Parse(
-                    "Mtl 'map_Ks' before any 'newmtl' material",
-                ))?;
+                let mat = materials
+                    .last_mut()
+                    .ok_or(Error::Parse("Mtl 'map_Ks' before any 'newmtl' material"))?;
                 let mm = options.mm.unwrap_or(crate::Mm {
                     base: 0.0,
                     gain: 1.0,
@@ -272,9 +274,9 @@ pub fn load_materials(file_path: &std::path::Path) -> crate::Result<Box<[MtlMate
                 mat.shininess.value = Some(specular_exponent);
             }
             MtlToken::MapNs { options, file_name } => {
-                let mat = materials.last_mut().ok_or(crate::Error::Parse(
-                    "Mtl 'map_Ns' before any 'newmtl' material",
-                ))?;
+                let mat = materials
+                    .last_mut()
+                    .ok_or(Error::Parse("Mtl 'map_Ns' before any 'newmtl' material"))?;
                 let mm = options.mm.unwrap_or(crate::Mm {
                     base: 0.0,
                     gain: 1.0,
@@ -302,16 +304,16 @@ pub fn load_materials(file_path: &std::path::Path) -> crate::Result<Box<[MtlMate
                 mat.ior = Some(optical_density);
             }
             MtlToken::Illum(illum) => {
-                let mat = materials.last_mut().ok_or(crate::Error::Parse(
-                    "Mtl 'illum' before any 'newmtl' material",
-                ))?;
-                mat.illum = IllumModel::from_u32(illum)
-                    .ok_or(crate::Error::Parse("Unrecognized Illum value"))?;
+                let mat = materials
+                    .last_mut()
+                    .ok_or(Error::Parse("Mtl 'illum' before any 'newmtl' material"))?;
+                mat.illum =
+                    IllumModel::from_u32(illum).ok_or(Error::Parse("Unrecognized Illum value"))?;
             }
             MtlToken::Bump { options, file_name } => {
-                let mat = materials.last_mut().ok_or(crate::Error::Parse(
-                    "Mtl 'bump' before any 'newmtl' material",
-                ))?;
+                let mat = materials
+                    .last_mut()
+                    .ok_or(Error::Parse("Mtl 'bump' before any 'newmtl' material"))?;
                 let mm = options.mm.unwrap_or(crate::Mm {
                     base: 0.0,
                     gain: 1.0,
@@ -330,6 +332,18 @@ pub fn load_materials(file_path: &std::path::Path) -> crate::Result<Box<[MtlMate
                     resolution: options.texres.unwrap_or(1),
                     imfchan: options.imfchan.unwrap_or(Channel::Red),
                 });
+            }
+            MtlToken::D(d) => {
+                let mat = materials
+                    .last_mut()
+                    .ok_or(Error::Parse("Mtl 'd' before any 'newmtl' material"))?;
+                mat.dissolve.value = Some(d);
+            }
+            MtlToken::Tr(tr) => {
+                let mat = materials
+                    .last_mut()
+                    .ok_or(Error::Parse("Mtl 'Tr' before any 'newmtl' material"))?;
+                mat.dissolve.value = Some(tr);
             }
         }
     }

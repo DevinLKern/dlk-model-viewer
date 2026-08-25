@@ -325,7 +325,7 @@ impl Drop for PipelineLayoutResourceManager {
 
 #[allow(unused)]
 #[derive(Hash, Eq, PartialEq, PartialOrd, Ord, Clone)]
-pub(crate) enum PipelineDescription {
+pub enum PipelineDescription {
     DynamicGraphics {
         pipeline_layout: PipelineLayoutResourceHandle,
         vert_shader: ShaderModuleResourceHandle,

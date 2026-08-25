@@ -60,7 +60,6 @@ unsafe extern "system" fn vulkan_debug_callback(
     vk::FALSE
 }
 
-#[allow(unused)]
 pub struct Renderer {
     pub device: SharedDeviceRef,
     command_pool: vk::CommandPool,
@@ -194,52 +193,37 @@ impl Renderer {
             samples,
         })
     }
-    // TODO: Add Technique trait
     #[inline]
-    pub fn render_main_scene(
+    pub fn render_scene(
         &mut self,
         ctx: &mut FrameContext,
         scene: &Scene,
-        technique: &MainTechnique,
+        technique: &dyn Technique,
+        target: &RenderTarget,
         indirect_offset: u64,
         draw_count: u32,
         stride: u32,
     ) -> Result<()> {
-        technique.render(ctx, self, scene, indirect_offset, draw_count, stride)
-    }
-    #[inline]
-    pub fn render_grid_scene(
-        &mut self,
-        ctx: &mut FrameContext,
-        scene: &Scene,
-        technique: &GridTechnique,
-        indirect_offset: u64,
-        draw_count: u32,
-        stride: u32,
-    ) -> Result<()> {
-        technique.render(ctx, self, scene, indirect_offset, draw_count, stride)
-    }
-    #[inline]
-    pub fn render_depth_scene(
-        &mut self,
-        ctx: &mut FrameContext,
-        scene: &Scene,
-        technique: &DepthTechnique,
-        indirect_offset: u64,
-        draw_count: u32,
-        stride: u32,
-    ) -> Result<()> {
-        technique.render(
-            ctx,
-            &mut self.pipelines,
-            &mut self.pipeline_layouts,
-            &mut self.shader_modules,
-            &self.mesh_arenas,
-            scene,
-            indirect_offset,
-            draw_count,
-            stride,
-        )
+        let frame = ctx.get_current_frame();
+        let cmd = frame.command_buffer();
+
+        technique.bind(cmd, ctx, self, target)?;
+
+        unsafe {
+            let mesh_arena = self.mesh_arenas.get(scene.mesh_arena_handle).unwrap();
+
+            mesh_arena.bind(cmd, self);
+
+            self.device.cmd_draw_indexed_indirect(
+                cmd,
+                frame.allocator().indirect_allocator().buffer(),
+                indirect_offset,
+                draw_count,
+                stride,
+            );
+        };
+
+        Ok(())
     }
     pub fn access_or_create_pipeline_layout(
         &mut self,

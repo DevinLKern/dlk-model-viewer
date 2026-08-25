@@ -9,9 +9,8 @@ use constants::*;
 use input_manager::{Input, InputEvent, InputManager};
 use obj_mtl::{Vertex, VertexNormal};
 use renderer::{
-    AllocationRange, CameraUBO, DepthTechnique, GridTechnique, InstanceData, MainTechnique,
-    MaterialBuilderData, PointLightsUBO, Renderer, Scene, SceneBuilder, ShaderVertVertex,
-    TextureIndexValue,
+    DepthTechnique, GridTechnique, InstanceData, MAX_INDIRECT_COMMAND_DATA_COUNT, MainTechnique,
+    MaterialBuilderData, Renderer, Scene, SceneBuilder, ShaderVertVertex, TextureIndexValue,
 };
 use result::{Error, Result};
 use settings::{Command, Event, Settings};
@@ -56,10 +55,13 @@ struct Application {
     orbit_controller: OrbitCameraController,
     windows: HashMap<WindowId, (renderer::FrameContext, Window)>,
     renderer: renderer::Renderer,
-    camera_data_range: AllocationRange,
-    instance_data_range: AllocationRange,
-    point_lights_ubo_data_range: AllocationRange,
-    light_data_range: AllocationRange,
+    camera_data_range: vulkan::AllocationRange,
+    instance_data_range: vulkan::AllocationRange,
+    point_light_count_ubo_data_range: vulkan::AllocationRange,
+    point_light_data_range: vulkan::AllocationRange,
+    light_data_range: vulkan::AllocationRange,
+    indirect_command_range: vulkan::AllocationRange,
+    grid_indirect_command_range: vulkan::AllocationRange,
     main_scene: Scene,
     main_technique: MainTechnique,
     grid_technique: GridTechnique,
@@ -69,8 +71,8 @@ struct Application {
     grid_first_vertex: usize,
     grid_index_count: usize,
     grid_first_index: usize,
-    // (first_index_count, index_count, material_index)
-    model_shape_info: Vec<(usize, usize, usize)>,
+    // (submesh, material_index)
+    model_shape_info: Vec<(renderer::SubMesh, usize)>,
     model_import_transform: math::Mat4<f32>,
     model_transform: math::AffineTransform,
     global_light_direction: Vec3<f32>,
@@ -270,8 +272,8 @@ impl Application {
         let mut vertex_map = HashMap::<obj_mtl::VtnIndex, usize>::new();
         let mut model_min = Vec3::scalar(f32::MAX);
         let mut model_max = Vec3::scalar(f32::MIN);
-        // Vec<(index_count, first_index, material_info)>
-        let mut model_shape_info = Vec::<(usize, usize, usize)>::new();
+        // Vec<(submesh, material_info)>
+        let mut model_shape_info = Vec::<(renderer::SubMesh, usize)>::new();
         while let Some(shape) = obj_scene.next_shape() {
             let triangles = shape.primitives().flat_map(|p| match p {
                 obj_mtl::Primitive::Triangle { v0, v1, v2 } => vec![(*v0, *v1, *v2)].into_iter(),
@@ -348,7 +350,12 @@ impl Application {
                 .and_then(|(name, _idx, _count)| material_name_to_index.get(name))
                 .unwrap_or(&default_material_index);
 
-            model_shape_info.push((first_index, index_count, *material_index));
+            let submesh = renderer::SubMesh {
+                first_index: first_index as u32,
+                index_count: index_count as u32,
+            };
+
+            model_shape_info.push((submesh, *material_index));
         }
 
         let model_scale = model_max.sub(model_min);
@@ -450,8 +457,7 @@ impl Application {
                 .map(|i| *i + grid_first_vertex as u32),
         );
 
-        let main_scene =
-            scene_builder.build(renderer.device.clone(), renderer.mesh_arenas_mut())?;
+        let main_scene = scene_builder.build(renderer.device.clone(), &mut renderer)?;
 
         let main_technique = renderer::MainTechnique::new(&main_scene, &mut renderer)?;
 
@@ -473,10 +479,13 @@ impl Application {
             orbit_camera,
             orbit_controller,
             windows: HashMap::new(),
-            camera_data_range: AllocationRange { offset: 0, size: 0 },
-            instance_data_range: AllocationRange { offset: 0, size: 0 },
-            point_lights_ubo_data_range: AllocationRange { offset: 0, size: 0 },
-            light_data_range: AllocationRange { offset: 0, size: 0 },
+            camera_data_range: vulkan::AllocationRange::default(),
+            instance_data_range: vulkan::AllocationRange::default(),
+            point_light_count_ubo_data_range: vulkan::AllocationRange::default(),
+            point_light_data_range: vulkan::AllocationRange::default(),
+            light_data_range: vulkan::AllocationRange::default(),
+            indirect_command_range: vulkan::AllocationRange::default(),
+            grid_indirect_command_range: vulkan::AllocationRange::default(),
             depth_image_index: 0,
             main_scene,
             main_technique,
@@ -644,18 +653,30 @@ impl Application {
 
         Ok(())
     }
-    #[allow(unused)]
+    fn reset_allocations(&mut self, ctx: &mut renderer::FrameContext) {
+        ctx.reset_frames(&mut self.renderer);
+
+        self.camera_data_range = vulkan::AllocationRange::default();
+        self.instance_data_range = vulkan::AllocationRange::default();
+        self.point_light_count_ubo_data_range = vulkan::AllocationRange::default();
+        self.point_light_data_range = vulkan::AllocationRange::default();
+        self.light_data_range = vulkan::AllocationRange::default();
+        self.indirect_command_range = vulkan::AllocationRange::default();
+        self.grid_indirect_command_range = vulkan::AllocationRange::default();
+
+        self.depth_image_index = 0;
+    }
     fn update_context(&mut self, ctx: &mut renderer::FrameContext) -> Result<()> {
-        const CAMERA_SIZE: u64 = std::mem::size_of::<CameraUBO>() as u64;
+        const CAMERA_SIZE: u64 = std::mem::size_of::<renderer::CameraUBO>() as u64;
         const INSTANCE_SIZE: u64 = std::mem::size_of::<InstanceData>() as u64;
-        const POINT_LIGHTS_UBO_SIZE: u64 = std::mem::size_of::<renderer::PointLightsUBO>() as u64;
+        const POINT_LIGHT_COUNT_SIZE: u64 = std::mem::size_of::<renderer::PointLightsUBO>() as u64;
         const POINT_LIGHT_SIZE: u64 = std::mem::size_of::<renderer::PointLightData>() as u64;
         const LIGHT_SIZE: u64 = std::mem::size_of::<renderer::DirectionalLightUBO>() as u64;
 
         self.camera_data_range = ctx
             .reserve_uniform_data(CAMERA_SIZE, CAMERA_SIZE)
             .ok_or_else(|| {
-                ctx.destroy_images(&mut self.renderer);
+                self.reset_allocations(ctx);
                 renderer::Error::BufferCapacityExceeded
             })?;
         self.instance_data_range = ctx
@@ -664,23 +685,48 @@ impl Application {
                 INSTANCE_SIZE,
             )
             .ok_or_else(|| {
-                ctx.destroy_images(&mut self.renderer);
+                self.reset_allocations(ctx);
                 renderer::Error::BufferCapacityExceeded
             })?;
-        self.point_lights_ubo_data_range = ctx
+
+        let temp_alloc = ctx
             .reserve_storage_data(
-                POINT_LIGHTS_UBO_SIZE + (renderer::MAX_POINT_LIGHT_COUNT * POINT_LIGHT_SIZE),
-                POINT_LIGHT_SIZE,
+                POINT_LIGHT_COUNT_SIZE + (renderer::MAX_POINT_LIGHT_COUNT * POINT_LIGHT_SIZE),
+                POINT_LIGHT_COUNT_SIZE,
             )
             .ok_or_else(|| {
-                ctx.destroy_images(&mut self.renderer);
+                self.reset_allocations(ctx);
                 renderer::Error::BufferCapacityExceeded
             })?;
+
+        self.point_light_count_ubo_data_range = vulkan::AllocationRange {
+            offset: temp_alloc.offset,
+            size: POINT_LIGHT_COUNT_SIZE,
+        };
+        self.point_light_data_range = vulkan::AllocationRange {
+            offset: temp_alloc.offset + POINT_LIGHT_COUNT_SIZE,
+            size: temp_alloc.size - POINT_LIGHT_COUNT_SIZE,
+        };
 
         self.light_data_range = ctx
             .reserve_uniform_data(LIGHT_SIZE, LIGHT_SIZE)
             .ok_or_else(|| {
-                ctx.destroy_images(&mut self.renderer);
+                self.reset_allocations(ctx);
+                renderer::Error::BufferCapacityExceeded
+            })?;
+        const SIZE_INDIRECT: u64 = std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u64;
+        const DRAW_COUNT: u64 = MAX_INDIRECT_COMMAND_DATA_COUNT / 3;
+        self.indirect_command_range = ctx
+            .reserve_indirect_data(DRAW_COUNT * SIZE_INDIRECT, SIZE_INDIRECT)
+            .ok_or_else(|| {
+                self.reset_allocations(ctx);
+                renderer::Error::BufferCapacityExceeded
+            })?;
+
+        self.grid_indirect_command_range = ctx
+            .reserve_indirect_data(DRAW_COUNT * SIZE_INDIRECT, SIZE_INDIRECT)
+            .ok_or_else(|| {
+                self.reset_allocations(ctx);
                 renderer::Error::BufferCapacityExceeded
             })?;
 
@@ -699,17 +745,24 @@ impl Application {
                 samples: vk::SampleCountFlags::TYPE_1,
             };
             ctx.create_image(&image_create_info, &mut self.renderer)
-        }?;
+        }
+        .inspect_err(|_| {
+            self.reset_allocations(ctx);
+        })?;
 
-        self.main_technique.update_context(
-            ctx,
-            &self.camera_data_range,
-            &self.instance_data_range,
-            &self.point_lights_ubo_data_range,
-            &self.light_data_range,
-            self.depth_image_index,
-            &self.renderer,
-        )?;
+        self.main_technique
+            .update_context(
+                ctx,
+                &self.camera_data_range,
+                &self.instance_data_range,
+                &temp_alloc,
+                &self.light_data_range,
+                self.depth_image_index,
+                &self.renderer,
+            )
+            .inspect_err(|_| {
+                self.reset_allocations(ctx);
+            })?;
         self.grid_technique
             .update_context(&ctx, &self.camera_data_range);
         self.depth_technique.update_context(
@@ -818,21 +871,79 @@ impl Application {
                         CameraInUse::Orbit => &self.orbit_camera,
                     };
 
-                    CameraUBO {
+                    renderer::CameraUBO {
                         view_matrix: cur_camera.view_matrix().as_2d_arr(),
                         proj_matrix: cur_camera.projection_matrix().as_2d_arr(),
                     }
                 };
 
+                let mut indirect_command_data =
+                    Vec::<vk::DrawIndexedIndirectCommand>::with_capacity(64);
+                let mut instance_data = Vec::<InstanceData>::with_capacity(64);
+
+                let stride = std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u64;
+                for (submesh, material_index) in self.model_shape_info.iter() {
+                    let model_matrix = self
+                        .model_transform
+                        .as_mat4()
+                        .mul(&self.model_import_transform);
+
+                    let normal_matrix = model_matrix
+                        .as_mat3()
+                        .transposed()
+                        .inverse()
+                        .unwrap_or(Mat3::IDENTITY)
+                        .into_mat4(1.0);
+
+                    indirect_command_data.push(vk::DrawIndexedIndirectCommand {
+                        index_count: submesh.index_count,
+                        instance_count: 1,
+                        first_index: submesh.first_index,
+                        vertex_offset: 0,
+                        first_instance: instance_data.len() as u32,
+                    });
+                    instance_data.push(InstanceData {
+                        model_matrix: model_matrix.as_2d_arr(),
+                        normal_matrix: normal_matrix.as_2d_arr(),
+                        material_index: *material_index as u32,
+                        _pad0: 0,
+                        _pad1: 0,
+                        _pad2: 0,
+                    });
+                }
+
+                unsafe {
+                    context
+                        .get_current_frame_mut()
+                        .allocator_mut()
+                        .storage_allocator_mut()
+                        .upload_data(self.instance_data_range, &instance_data)
+                        .map_err(|e| renderer::Error::VulkanError(e))?;
+
+                    context
+                        .get_current_frame_mut()
+                        .allocator_mut()
+                        .indirect_allocator_mut()
+                        .upload_data(self.indirect_command_range, &indirect_command_data)
+                        .map_err(|e| renderer::Error::VulkanError(e))?;
+
+                    context
+                        .get_current_frame_mut()
+                        .allocator_mut()
+                        .uniform_allocator_mut()
+                        .upload_data(self.camera_data_range, &[camera_data])
+                        .map_err(|e| renderer::Error::VulkanError(e))?;
+                }
+
                 let swapchain_extent = context.swapchain_extent();
 
                 let cmd = context.get_current_frame().command_buffer();
 
-                self.main_scene.reset();
                 context
                     .get_current_frame_mut()
                     .allocator_mut()
-                    .reset_indirect();
+                    .indirect_allocator_mut()
+                    .reset();
 
                 let swapchain_target = context.get_swapchain_render_target()?;
 
@@ -874,63 +985,6 @@ impl Application {
 
                 depth_pass.begin_rendering(&depth_target, &mut self.renderer, cmd)?;
 
-                let mut indirect_command_data =
-                    Vec::<vk::DrawIndexedIndirectCommand>::with_capacity(64);
-                let mut instance_data = Vec::<InstanceData>::with_capacity(64);
-
-                let stride = std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u64;
-                for (first_index, index_count, material_index) in self.model_shape_info.iter() {
-                    self.main_scene.add_submesh(*first_index, *index_count);
-
-                    let model_matrix = self
-                        .model_transform
-                        .as_mat4()
-                        .mul(&self.model_import_transform);
-
-                    let normal_matrix = model_matrix
-                        .as_mat3()
-                        .transposed()
-                        .inverse()
-                        .unwrap_or(Mat3::IDENTITY)
-                        .into_mat4(1.0);
-
-                    indirect_command_data.push(vk::DrawIndexedIndirectCommand {
-                        index_count: *index_count as u32,
-                        instance_count: 1,
-                        first_index: *first_index as u32,
-                        vertex_offset: 0,
-                        first_instance: instance_data.len() as u32,
-                    });
-                    instance_data.push(InstanceData {
-                        model_matrix: model_matrix.as_2d_arr(),
-                        normal_matrix: normal_matrix.as_2d_arr(),
-                        material_index: *material_index as u32,
-                        _pad0: 0,
-                        _pad1: 0,
-                        _pad2: 0,
-                    });
-                }
-
-                let indirect_offset = unsafe {
-                    context
-                        .get_current_frame_mut()
-                        .allocator_mut()
-                        .upload_storage_data(self.instance_data_range.offset, &instance_data)?;
-
-                    let offset = context
-                        .get_current_frame_mut()
-                        .allocator_mut()
-                        .upload_indirect_data(&indirect_command_data, stride)?;
-
-                    offset
-                };
-                unsafe {
-                    context
-                        .get_current_frame_mut()
-                        .allocator_mut()
-                        .upload_uniform_data(self.camera_data_range.offset, &[camera_data])
-                }?;
-
                 // PART 0 - MESH
 
                 {
@@ -962,15 +1016,18 @@ impl Application {
                         context
                             .get_current_frame_mut()
                             .allocator_mut()
-                            .upload_uniform_data(self.light_data_range.offset, &light_data)?;
+                            .uniform_allocator_mut()
+                            .upload_data(self.light_data_range, &light_data)
+                            .map_err(|e| renderer::Error::VulkanError(e))?;
                     }
                 }
 
-                self.renderer.render_depth_scene(
+                self.renderer.render_scene(
                     context,
                     &self.main_scene,
                     &self.depth_technique,
-                    indirect_offset,
+                    &depth_target,
+                    self.indirect_command_range.offset,
                     indirect_command_data.len() as u32,
                     stride as u32,
                 )?;
@@ -999,6 +1056,7 @@ impl Application {
                         final_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                     }),
                 };
+
                 main_pass.begin_rendering(&swapchain_target, &mut self.renderer, cmd)?;
 
                 {
@@ -1021,11 +1079,9 @@ impl Application {
                         context
                             .get_current_frame_mut()
                             .allocator_mut()
-                            .upload_storage_data(
-                                self.point_lights_ubo_data_range.offset
-                                    + std::mem::size_of::<PointLightsUBO>() as u64,
-                                &point_light_data,
-                            )
+                            .storage_allocator_mut()
+                            .upload_data(self.point_light_data_range, &point_light_data)
+                            .map_err(|e| renderer::Error::VulkanError(e))
                     }?;
                     let point_light_count_data = [renderer::PointLightsUBO {
                         count: point_light_data.len() as u32,
@@ -1038,24 +1094,26 @@ impl Application {
                         context
                             .get_current_frame_mut()
                             .allocator_mut()
-                            .upload_storage_data(
-                                self.point_lights_ubo_data_range.offset,
+                            .storage_allocator_mut()
+                            .upload_data(
+                                self.point_light_count_ubo_data_range,
                                 &point_light_count_data,
                             )
+                            .map_err(|e| renderer::Error::VulkanError(e))
                     }?;
                 }
 
-                self.renderer.render_main_scene(
+                self.renderer.render_scene(
                     context,
                     &self.main_scene,
                     &self.main_technique,
-                    indirect_offset,
+                    &swapchain_target,
+                    self.indirect_command_range.offset,
                     indirect_command_data.len() as u32,
                     stride as u32,
                 )?;
 
                 // PART 2 - GRID
-                self.main_scene.reset();
                 instance_data.clear();
                 indirect_command_data.clear();
                 unsafe {
@@ -1063,10 +1121,6 @@ impl Application {
                     self.renderer.device.cmd_set_viewport(cmd, 0, &[viewport]);
                     self.renderer.device.cmd_set_scissor(cmd, 0, &[scissor]);
                 }
-
-                let _submesh_index = self
-                    .main_scene
-                    .add_submesh(self.grid_first_index, self.grid_index_count);
 
                 let (indirect_offset, draw_count, stride) = {
                     let frame = context.get_current_frame_mut();
@@ -1077,11 +1131,7 @@ impl Application {
 
                         size.next_multiple_of(align) as u64
                     };
-                    let first_instance_offset = frame
-                        .allocator()
-                        .storage_buffer_offset()
-                        .next_multiple_of(stride)
-                        / stride;
+                    let first_instance_offset = self.grid_indirect_command_range.offset / stride;
                     indirect_command_data.push(vk::DrawIndexedIndirectCommand {
                         index_count: self.grid_index_count as u32,
                         instance_count: 1,
@@ -1090,24 +1140,26 @@ impl Application {
                         first_instance: 1 + first_instance_offset as u32,
                     });
 
-                    let indirect_offset = unsafe {
-                        frame.allocator_mut().upload_indirect_data(
-                            &indirect_command_data,
-                            std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u64,
-                        )
-                    }?;
+                    unsafe {
+                        frame
+                            .allocator_mut()
+                            .indirect_allocator_mut()
+                            .upload_data(self.grid_indirect_command_range, &indirect_command_data)
+                    }
+                    .map_err(|e| renderer::Error::VulkanError(e))?;
 
                     let draw_count = indirect_command_data.len() as u32;
                     let stride = std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u32;
 
-                    (indirect_offset, draw_count, stride)
+                    (first_instance_offset, draw_count, stride)
                 };
 
-                self.renderer.render_grid_scene(
+                self.renderer.render_scene(
                     context,
                     &self.main_scene,
                     &self.grid_technique,
-                    indirect_offset,
+                    &swapchain_target,
+                    self.grid_indirect_command_range.offset,
                     draw_count,
                     stride,
                 )?;

@@ -1,4 +1,6 @@
-use crate::{GlobalLightUBO, GridData, ImageHandle, MaterialUBO, Result, ShaderVertVertex};
+use crate::{
+    GlobalLightUBO, GridData, ImageHandle, MaterialUBO, Renderer, Result, ShaderVertVertex,
+};
 
 use math::{Identity, Mat4, Vec3, Zero};
 use vulkan::SharedDeviceRef;
@@ -13,15 +15,36 @@ pub struct MeshArena {
     pub vertex_buffer: vulkan::Buffer,
     pub index_buffer: vulkan::Buffer,
 }
+
+impl MeshArena {
+    #[inline]
+    pub fn bind(&self, cmd: vk::CommandBuffer, renderer: &Renderer) {
+        unsafe {
+            renderer.device.cmd_bind_index_buffer(
+                cmd,
+                self.index_buffer.handle,
+                self.index_buffer.offset,
+                vk::IndexType::UINT32,
+            );
+            renderer
+                .device
+                .cmd_bind_vertex_buffers(cmd, 0, &[self.vertex_buffer.handle], &[0]);
+        }
+    }
+}
+
 slotmap::new_key_type! { pub struct MeshArenaHandle; }
 
 #[allow(dead_code)]
 pub struct SubMesh {
-    pub geometry: MeshArenaHandle,
     pub first_index: u32,
     pub index_count: u32,
 }
-slotmap::new_key_type! { pub struct SubMeshHandle; }
+
+#[allow(dead_code)]
+pub struct Mesh {
+    meshes: Vec<SubMesh>,
+}
 
 pub struct TextureIndexValue<T> {
     pub value: T,
@@ -112,11 +135,7 @@ impl SceneBuilder {
         return res;
     }
     #[allow(unused)]
-    pub fn build(
-        self,
-        device: SharedDeviceRef,
-        mesh_arenas: &mut slotmap::DenseSlotMap<MeshArenaHandle, MeshArena>,
-    ) -> Result<Scene> {
+    pub fn build(self, device: SharedDeviceRef, renderer: &mut Renderer) -> Result<Scene> {
         let mesh_arena = {
             let vertex_buffer = {
                 let create_info = vulkan::BufferCreateInfo {
@@ -156,7 +175,7 @@ impl SceneBuilder {
                 index_buffer,
             }
         };
-        let mesh_arena_handle = mesh_arenas.insert(mesh_arena);
+        let mesh_arena_handle = renderer.mesh_arenas.insert(mesh_arena);
 
         let alignment = device.get_uniform_buffer_min_offset_alignment();
 
@@ -165,15 +184,18 @@ impl SceneBuilder {
         let global_light_offset = uniform_buffer_offset;
         uniform_buffer_offset += std::mem::size_of::<GlobalLightUBO>() as u64;
         uniform_buffer_offset = uniform_buffer_offset.next_multiple_of(alignment);
-        let global_light_range = (
-            global_light_offset,
-            uniform_buffer_offset - global_light_offset,
-        );
+        let global_light_range = vulkan::AllocationRange {
+            offset: global_light_offset,
+            size: uniform_buffer_offset - global_light_offset,
+        };
 
         let grid_data_offset = uniform_buffer_offset;
         uniform_buffer_offset += std::mem::size_of::<GridData>() as u64;
         uniform_buffer_offset = uniform_buffer_offset.next_multiple_of(alignment);
-        let grid_data_range = (grid_data_offset, uniform_buffer_offset - grid_data_offset);
+        let grid_data_range = vulkan::AllocationRange {
+            offset: grid_data_offset,
+            size: uniform_buffer_offset - grid_data_offset,
+        };
 
         let uniform_buffer = {
             let size = uniform_buffer_offset;
@@ -188,7 +210,8 @@ impl SceneBuilder {
         };
 
         unsafe {
-            let dst = uniform_buffer.map_memory(global_light_offset, global_light_range.1)?;
+            let dst =
+                uniform_buffer.map_memory(global_light_range.offset, global_light_range.size)?;
             let dst = dst as *mut GlobalLightUBO;
             *dst = GlobalLightUBO {
                 direction: self.light_direction.as_vec4(0.0).as_arr(),
@@ -199,7 +222,7 @@ impl SceneBuilder {
         }
 
         unsafe {
-            let dst = uniform_buffer.map_memory(grid_data_offset, grid_data_range.1)?;
+            let dst = uniform_buffer.map_memory(grid_data_range.offset, grid_data_range.size)?;
             let dst = dst as *mut GridData;
             *dst = GridData {
                 model_matrix: Mat4::IDENTITY.into_2d_arr(),
@@ -284,7 +307,10 @@ impl SceneBuilder {
             grid_data_range,
             uniform_buffer,
             storage_buffer,
-            submeshes: Vec::new(),
+            point_light_range: vulkan::AllocationRange::default(),
+            instance_range: vulkan::AllocationRange::default(),
+            indirect_draw_call_range: vulkan::AllocationRange::default(),
+            // draws: Vec::with_capacity(16),
             light_dir: self.light_direction,
         })
     }
@@ -293,25 +319,29 @@ impl SceneBuilder {
 pub struct Scene {
     pub(crate) mesh_arena_handle: MeshArenaHandle,
     pub(crate) images: Vec<(vk::Sampler, ImageHandle)>,
-    pub(crate) global_light_range: (u64, u64),
-    pub(crate) grid_data_range: (u64, u64),
+    pub(crate) global_light_range: vulkan::AllocationRange,
+    pub(crate) grid_data_range: vulkan::AllocationRange,
     pub(crate) uniform_buffer: vulkan::Buffer,
     pub(crate) storage_buffer: vulkan::Buffer,
-    // (first_index, index_count)
-    pub submeshes: Vec<(usize, usize)>,
+    point_light_range: vulkan::AllocationRange,
+    instance_range: vulkan::AllocationRange,
+    indirect_draw_call_range: vulkan::AllocationRange,
+    // (submesh, material_index, transform)
+    // draws: Vec<(SubMesh, usize, Mat4<f32>)>,
     light_dir: Vec3<f32>,
 }
 
 impl Scene {
     #[inline]
-    pub fn add_submesh(&mut self, first_index: usize, index_count: usize) -> usize {
-        let res = self.submeshes.len();
-        self.submeshes.push((first_index, index_count));
-        return res;
-    }
-    #[inline]
-    pub fn reset(&mut self) {
-        self.submeshes.clear();
+    pub fn update_context(
+        &mut self,
+        point_light_range: vulkan::AllocationRange,
+        instance_range: vulkan::AllocationRange,
+        indirect_draw_call_range: vulkan::AllocationRange,
+    ) {
+        self.point_light_range = point_light_range;
+        self.instance_range = instance_range;
+        self.indirect_draw_call_range = indirect_draw_call_range;
     }
     #[inline]
     pub fn light_dir(&self) -> Vec3<f32> {
