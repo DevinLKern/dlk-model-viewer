@@ -133,6 +133,7 @@ fn generate_struct_types(
 
         let inputs = module.get_inputs();
         writeln!(w, "#[repr(C)]")?;
+        writeln!(w, "#[derive(Clone, Copy, Debug)]")?;
         writeln!(w, "pub struct {}Vertex {{", module.name)?;
         for info in inputs {
             let ty_str = if let TypeInfo::Pointer { ptr_type } = info.type_info {

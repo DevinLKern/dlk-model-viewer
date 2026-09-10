@@ -3,12 +3,24 @@
 // DISCLAIMER: I used the shader described in the article below.
 // https://bgolus.medium.com/the-best-darn-grid-shader-yet-727f9278b9d8
 
-layout(set = 1, binding = 0) uniform GridData {
-    mat4 model_matrix;
-    vec2 scale;
+#extension GL_EXT_nonuniform_qualifier : enable
+
+layout(location = 0) in vec2 v_uv;
+layout(location = 1) flat in uint v_material_index;
+
+layout(location = 0) out vec4 f_color;
+
+// other
+struct GridMaterialUBO {
     vec4 base_color;
     vec4 line_color;
-} grid;
+    vec2 line_width;
+    vec2 scale;
+};
+
+layout(set = 1, binding = 0) buffer GridMaterialsUBO {
+    GridMaterialUBO arr [];
+} materials;
 
 float infinite_grid(vec2 uv, vec2 line_width) {
     vec2 ddx = dFdx(uv);
@@ -43,18 +55,14 @@ float infinite_grid(vec2 uv, vec2 line_width) {
     return mix(grid2.x, 1.0, grid2.y);
 }
 
-layout(location = 0) in vec2 v_uv;
-layout(location = 0) out vec4 f_color;
+void main() {
+    GridMaterialUBO mat = materials.arr[nonuniformEXT(v_material_index)];
 
-void main()
-{
-    vec2 line_width = vec2(0.01);
-
-    float grid_mul = infinite_grid(v_uv * grid.scale, line_width);
+    float grid_mul = infinite_grid(v_uv * mat.scale, mat.line_width);
 
     f_color = mix(
-        grid.base_color,
-        grid.line_color,
-        grid_mul * grid.line_color.a
+        mat.base_color,
+        mat.line_color,
+        grid_mul * mat.line_color.a
     );
 }

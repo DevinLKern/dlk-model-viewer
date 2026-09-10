@@ -1,33 +1,27 @@
-use crate::{Error, ImageHandle, Renderer, Result};
+use crate::{Error, Renderer, Result};
 
 use ash::vk;
 
-pub struct TargetImage {
+pub struct TargetImage<ImageHandle>
+where
+    ImageHandle: Copy + Clone,
+{
     pub handle: ImageHandle,
-    pub resolve_hanlde: Option<ImageHandle>,
+    pub resolve_handle: Option<ImageHandle>,
 }
 
-pub struct RenderTarget {
-    pub color_images: Box<[TargetImage]>,
-    pub depth_image: Option<ImageHandle>,
-    pub render_area: vk::Rect2D,
+pub trait RenderStorage {
+    type ImageHandle: Copy + Clone;
+    fn get_image(&self, image_handle: Self::ImageHandle) -> Option<&vulkan::Image>;
+    fn get_image_mut(&mut self, image_handle: Self::ImageHandle) -> Option<&mut vulkan::Image>;
 }
 
-impl RenderTarget {
-    #[inline]
-    pub fn get_default_scissor_and_viewport(&self) -> (vk::Rect2D, vk::Viewport) {
-        let scissor = self.render_area;
-        let viewport = vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: scissor.extent.width as f32,
-            height: scissor.extent.height as f32,
-            min_depth: 0.0,
-            max_depth: 1.0,
-        };
-
-        return (scissor, viewport);
-    }
+pub trait RenderTarget {
+    type ImageHandle: Copy + Clone;
+    fn get_default_scissor_and_viewport(&self) -> (vk::Rect2D, vk::Viewport);
+    fn color_images(&self) -> &[TargetImage<Self::ImageHandle>];
+    fn depth_image(&self) -> Option<Self::ImageHandle>;
+    fn render_area(&self) -> vk::Rect2D;
 }
 
 #[allow(dead_code)]
@@ -46,25 +40,32 @@ pub struct RenderPass {
 }
 
 impl RenderPass {
-    pub fn begin_rendering(
+    pub fn begin_rendering<Target, Storage, Handle>(
         &self,
-        target: &RenderTarget,
+        target: &Target,
+        storage: &mut Storage,
         renderer: &mut Renderer,
         cmd: vk::CommandBuffer,
-    ) -> Result<()> {
-        debug_assert!(target.color_images.len() == self.color.len());
-        debug_assert!(target.depth_image.is_some() && self.depth.is_some());
+    ) -> Result<()>
+    where
+        Handle: Clone + Copy,
+        Target: RenderTarget<ImageHandle = Handle>,
+        Storage: RenderStorage<ImageHandle = Handle>,
+    {
+        debug_assert!(target.color_images().len() == self.color.len());
+        debug_assert!(target.depth_image().is_some() && self.depth.is_some());
 
         let mut barriers = Vec::with_capacity(self.color.len() + 2);
         let mut color_attachments = Vec::with_capacity(self.color.len());
         let mut depth_attachment = vk::RenderingAttachmentInfo::default();
 
-        for (color_attachment, color_target) in self.color.iter().zip(target.color_images.iter()) {
+        for (color_attachment, color_target) in self.color.iter().zip(target.color_images().iter())
+        {
             let (resolve_mode, resolve_image_view, resolve_image_layout) =
-                match color_target.resolve_hanlde {
-                    Some(handle) => {
-                        let img = renderer
-                            .get_image_mut(handle)
+                match color_target.resolve_handle {
+                    Some(image_handle) => {
+                        let img = storage
+                            .get_image_mut(image_handle)
                             .ok_or(Error::ResourceMissing)?;
                         let new_layout = vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL;
                         if img.layout != new_layout {
@@ -95,12 +96,12 @@ impl RenderPass {
                         vk::ImageLayout::default(),
                     ),
                 };
-            let img = renderer
+            let image = storage
                 .get_image_mut(color_target.handle)
                 .ok_or(Error::ResourceMissing)?;
 
             let new_layout = vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL;
-            if img.layout != new_layout {
+            if image.layout != new_layout {
                 barriers.push(vk::ImageMemoryBarrier2 {
                     // NOTE: TOP_OF_PIPE should not be hard coded.
                     // In the future, multiple passes will be used and TOP_OF_PIPE will not always be correct
@@ -108,24 +109,24 @@ impl RenderPass {
                     src_access_mask: vk::AccessFlags2::empty(),
                     dst_stage_mask: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
                     dst_access_mask: vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
-                    old_layout: img.layout,
+                    old_layout: image.layout,
                     new_layout,
-                    image: img.handle,
+                    image: image.handle,
                     subresource_range: vk::ImageSubresourceRange {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
                         base_mip_level: 0,
-                        level_count: img.mip_level_count,
+                        level_count: image.mip_level_count,
                         base_array_layer: 0,
-                        layer_count: img.layer_count,
+                        layer_count: image.layer_count,
                     },
                     ..Default::default()
                 });
-                img.layout = new_layout;
+                image.layout = new_layout;
             }
 
             color_attachments.push(vk::RenderingAttachmentInfo {
-                image_view: img.view,
-                image_layout: img.layout,
+                image_view: image.view,
+                image_layout: image.layout,
                 load_op: color_attachment.load_op,
                 store_op: color_attachment.store_op,
                 clear_value: color_attachment.clear_val,
@@ -135,8 +136,8 @@ impl RenderPass {
                 ..Default::default()
             });
         }
-        if let (Some(depth_image), Some(attachment)) = (target.depth_image, &self.depth) {
-            let img = renderer
+        if let (Some(depth_image), Some(attachment)) = (target.depth_image(), &self.depth) {
+            let img = storage
                 .get_image_mut(depth_image)
                 .ok_or(Error::ResourceMissing)?;
             let new_layout = vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
@@ -191,7 +192,7 @@ impl RenderPass {
 
         // begin dynamic rendering
         let rendering_info = vk::RenderingInfo {
-            render_area: target.render_area,
+            render_area: target.render_area(),
             layer_count: 1,
             view_mask: 0,
             color_attachment_count: color_attachments.len() as u32,
@@ -211,14 +212,20 @@ impl RenderPass {
         Ok(())
     }
 
-    pub fn end_rendering(
+    pub fn end_rendering<Target, Storage, Handle>(
         &self,
-        target: &RenderTarget,
+        target: &Target,
+        storage: &mut Storage,
         renderer: &mut Renderer,
         cmd: vk::CommandBuffer,
-    ) -> Result<()> {
-        debug_assert!(target.color_images.len() == self.color.len());
-        debug_assert!(target.depth_image.is_some() && self.depth.is_some());
+    ) -> Result<()>
+    where
+        Handle: Clone + Copy,
+        Target: RenderTarget<ImageHandle = Handle>,
+        Storage: RenderStorage<ImageHandle = Handle>,
+    {
+        debug_assert!(target.color_images().len() == self.color.len());
+        debug_assert!(target.depth_image().is_some() && self.depth.is_some());
 
         // end rendering
         unsafe {
@@ -226,14 +233,14 @@ impl RenderPass {
         }
 
         let mut barriers = Vec::with_capacity(self.color.len() + 2);
-        for (attachment, color_target) in self.color.iter().zip(target.color_images.iter()) {
-            let img = match color_target.resolve_hanlde {
+        for (attachment, color_target) in self.color.iter().zip(target.color_images().iter()) {
+            let image = match color_target.resolve_handle {
                 Some(img) => img,
                 None => color_target.handle,
             };
-            let img = renderer.get_image_mut(img).ok_or(Error::ResourceMissing)?;
+            let image = storage.get_image_mut(image).ok_or(Error::ResourceMissing)?;
 
-            if img.layout == attachment.final_layout {
+            if image.layout == attachment.final_layout {
                 continue;
             }
 
@@ -242,23 +249,23 @@ impl RenderPass {
                 src_access_mask: vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
                 dst_stage_mask: vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
                 dst_access_mask: vk::AccessFlags2::empty(),
-                old_layout: img.layout,
+                old_layout: image.layout,
                 new_layout: attachment.final_layout,
-                image: img.handle,
+                image: image.handle,
                 subresource_range: vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
                     base_mip_level: 0,
-                    level_count: img.mip_level_count,
+                    level_count: image.mip_level_count,
                     base_array_layer: 0,
-                    layer_count: img.layer_count,
+                    layer_count: image.layer_count,
                 },
                 ..Default::default()
             });
-            img.layout = attachment.final_layout;
+            image.layout = attachment.final_layout;
         }
 
-        if let (Some(attachment), Some(depth_target)) = (&self.depth, target.depth_image) {
-            let img = renderer
+        if let (Some(attachment), Some(depth_target)) = (&self.depth, target.depth_image()) {
+            let img = storage
                 .get_image_mut(depth_target)
                 .ok_or(Error::ResourceMissing)?;
             let aspect_mask = if matches!(

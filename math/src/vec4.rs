@@ -20,6 +20,10 @@ where
     T: Copy,
 {
     #[inline]
+    pub const fn scalar(x: T) -> Self {
+        Self([x; 4])
+    }
+    #[inline]
     pub const fn from_vec3(v: crate::vec3::Vec3<T>, d: T) -> Self {
         Self::new(v.x(), v.y(), v.z(), d)
     }

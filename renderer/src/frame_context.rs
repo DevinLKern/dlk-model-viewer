@@ -1,7 +1,9 @@
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use ash::vk;
 use vulkan::device::SharedDeviceRef;
 
-use crate::{CameraUBO, ImageHandle, InstanceData, RenderTarget, Renderer, Result, TargetImage};
+use crate::{CameraUBO, InstanceUBO, RenderStorage, RenderTarget, Renderer, Result, TargetImage};
 
 pub const MAX_FRAME_COUNT: u64 = 3;
 pub const MAX_CAMERA_DATA_COUNT: u64 = 32;
@@ -76,7 +78,10 @@ pub struct FrameData {
     command_pool: vk::CommandPool,
     command_buffer: vk::CommandBuffer,
     allocator: FrameAllocator,
-    images: Vec<ImageHandle>,
+    images: Vec<vulkan::Image>,
+    // TODO: static resources should get aded to this struct
+    #[allow(dyn_drop)]
+    persistent_resources_in_use: Vec<std::sync::Arc<dyn Drop>>,
 }
 
 impl std::fmt::Debug for FrameData {
@@ -96,7 +101,7 @@ impl FrameData {
         };
 
         let instance_data_element_size = {
-            let size = std::mem::size_of::<InstanceData>() as u64;
+            let size = std::mem::size_of::<InstanceUBO>() as u64;
             let properties = unsafe { device.get_physical_device_properties() };
 
             size.next_multiple_of(properties.limits.min_storage_buffer_offset_alignment)
@@ -183,7 +188,8 @@ impl FrameData {
             command_pool,
             command_buffer,
             allocator,
-            images: Vec::new(),
+            images: Vec::with_capacity(16),
+            persistent_resources_in_use: Vec::with_capacity(16),
         })
     }
     #[inline]
@@ -201,13 +207,32 @@ impl FrameData {
     #[inline]
     pub fn reset(&mut self, renderer: &mut Renderer) {
         self.allocator.reset();
-        while let Some(handle) = self.images.pop() {
-            renderer.destroy_image(handle);
-        }
+        self.images.clear();
+        self.persistent_resources_in_use.clear();
     }
     #[inline]
-    pub fn get_image(&self, index: usize) -> Option<ImageHandle> {
-        self.images.get(index).copied()
+    pub fn create_image(&mut self, create_info: vulkan::ImageCreateInfo) -> Result<u32> {
+        let image = vulkan::Image::new(self.device.clone(), &create_info)?;
+        let index = self.images.len() as u32;
+        self.images.push(image);
+        Ok(index)
+    }
+    #[inline]
+    pub(crate) fn get_image(&self, index: u32) -> Option<&vulkan::Image> {
+        self.images.get(index as usize)
+    }
+    #[inline]
+    pub fn get_image_mut(&mut self, index: u32) -> Option<&mut vulkan::Image> {
+        self.images.get_mut(index as usize)
+    }
+    #[inline]
+    #[allow(dyn_drop)]
+    pub fn attach_persistent_resources(&mut self, resources: std::sync::Arc<dyn Drop>) {
+        self.persistent_resources_in_use.push(resources);
+    }
+    #[inline]
+    pub fn clear_persistent_resources(&mut self) {
+        self.persistent_resources_in_use.clear();
     }
 }
 
@@ -222,20 +247,175 @@ impl Drop for FrameData {
     }
 }
 
+#[derive(Copy, Clone, Debug)]
+pub enum FrameContextImageHandle {
+    Swapchain { id: u32, index: u32 },
+    Depth { id: u32, index: u32 },
+    Resolve { id: u32, index: u32 },
+    Frame { id: u32, index: u32 },
+}
+
+impl FrameContextImageHandle {
+    pub fn index(&self) -> u32 {
+        match self {
+            &Self::Swapchain { index, .. } => index,
+            &Self::Depth { index, .. } => index,
+            &Self::Resolve { index, .. } => index,
+            &Self::Frame { index, .. } => index,
+        }
+    }
+}
+
+impl Default for FrameContextImageHandle {
+    fn default() -> Self {
+        Self::Frame {
+            id: u32::MAX,
+            index: u32::MAX,
+        }
+    }
+}
+
+struct SwapchainImage {
+    swapchain: vulkan::Image,
+    depth: vulkan::Image,
+    resolve: vulkan::Image,
+}
+
 #[allow(dead_code)]
 pub struct FrameContext {
+    id: u32,
     device: SharedDeviceRef,
     swapchain: vulkan::Swapchain,
     depth_format: vk::Format,
     straight_to_resolve: bool,
-    // (swapchain, depth, color)
-    images: Vec<(ImageHandle, ImageHandle, ImageHandle)>,
+    swapchain_images: Vec<SwapchainImage>,
     frames: [FrameData; MAX_FRAME_COUNT as usize],
     pub frame_index: usize,
     swapchain_image_index: usize,
 }
 
+static NEXT_FRAME_CONTEXT_ID: AtomicU32 = AtomicU32::new(0);
 impl FrameContext {
+    fn get_id() -> u32 {
+        NEXT_FRAME_CONTEXT_ID.fetch_add(1, Ordering::Relaxed)
+    }
+    pub unsafe fn new(renderer: &mut Renderer, window: &winit::window::Window) -> Result<Self> {
+        let device = renderer.device.clone();
+
+        let mut frames = Vec::<FrameData>::with_capacity(MAX_FRAME_COUNT as usize);
+        for _ in 0..MAX_FRAME_COUNT {
+            let frame = FrameData::new(device.clone())?;
+            frames.push(frame);
+        }
+        let frames: [FrameData; MAX_FRAME_COUNT as usize] =
+            frames.try_into().expect("Incorrect number of frames");
+
+        let swapchain = vulkan::Swapchain::new(device.clone(), window)
+            .inspect_err(|e| tracing::error!("{e}"))?;
+
+        let swapchain_images = {
+            let raw_images = unsafe { swapchain.get_images() }?;
+            let mut images = Vec::with_capacity(raw_images.len());
+            for vk_img in raw_images {
+                let image = unsafe {
+                    vulkan::Image::new_swapchain_image(
+                        renderer.device.clone(),
+                        vk_img,
+                        swapchain.format(),
+                        vk::ImageLayout::UNDEFINED,
+                        swapchain.extent().width,
+                        swapchain.extent().height,
+                    )
+                }?;
+                images.push(image);
+            }
+            images
+        };
+
+        let depth_format = device
+            .find_viable_depth_stencil_format()
+            .ok_or(vulkan::result::Error::CouldNotDetermineFormat)?;
+
+        let depth_images = {
+            let mut images = Vec::with_capacity(swapchain_images.len());
+
+            let depth_image_create_info = vulkan::image::ImageCreateInfo {
+                memory_property_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                mip_level_count: 1,
+                image_type: vk::ImageType::TYPE_2D,
+                format: depth_format,
+                width: swapchain.extent().width,
+                height: swapchain.extent().height,
+                depth: 1,
+                usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+                layer_count: 1,
+                level_count: 1,
+                samples: renderer.samples(),
+            };
+
+            for _ in 0..swapchain_images.len() {
+                let image = vulkan::Image::new(renderer.device.clone(), &depth_image_create_info)?;
+                images.push(image);
+            }
+
+            images
+        };
+        let color_images = {
+            let mut images = Vec::with_capacity(swapchain_images.len());
+
+            // TODO: At some point in the future, the code here that creates images should determine if
+            // it can use the preferred image flags. This is fine for now though.
+            let _preferred_memory_flags =
+                vk::MemoryPropertyFlags::LAZILY_ALLOCATED | vk::MemoryPropertyFlags::DEVICE_LOCAL;
+            let fallback_memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+            let usage_flags =
+                vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT;
+            let color_image_create_info = {
+                vulkan::image::ImageCreateInfo {
+                    memory_property_flags: fallback_memory_flags,
+                    mip_level_count: 1,
+                    image_type: vk::ImageType::TYPE_2D,
+                    format: swapchain.format(),
+                    width: swapchain.extent().width,
+                    height: swapchain.extent().height,
+                    depth: 1,
+                    usage: usage_flags,
+                    layer_count: 1,
+                    level_count: 1,
+                    samples: renderer.samples(),
+                }
+            };
+
+            for _ in 0..swapchain_images.len() {
+                let image = vulkan::Image::new(renderer.device.clone(), &color_image_create_info)?;
+                images.push(image);
+            }
+
+            images
+        };
+
+        let images = swapchain_images
+            .into_iter()
+            .zip(depth_images.into_iter())
+            .zip(color_images.into_iter())
+            .map(|((swapchain, depth), color)| SwapchainImage {
+                swapchain,
+                depth,
+                resolve: color,
+            });
+
+        Ok(Self {
+            id: Self::get_id(),
+            device,
+            swapchain,
+            frames,
+            depth_format,
+            straight_to_resolve: renderer.samples() == vk::SampleCountFlags::TYPE_1,
+            swapchain_images: images.collect(),
+            frame_index: 0,
+            swapchain_image_index: 0,
+        })
+    }
     fn reserve_data(
         &mut self,
         byte_count: u64,
@@ -270,7 +450,7 @@ impl FrameContext {
             .iter_mut()
             .map(|f| select_allocator(f.allocator_mut()))
         {
-            let cur_range = unsafe { allocator.reserve_data(byte_count, alignment) }.unwrap();
+            let cur_range = allocator.reserve_data(byte_count, alignment).unwrap();
 
             if cur_range != last_range {
                 return None;
@@ -323,7 +503,7 @@ impl FrameContext {
         &mut self,
         image_create_info: &vulkan::ImageCreateInfo,
         renderer: &mut Renderer,
-    ) -> Result<usize> {
+    ) -> Result<FrameContextImageHandle> {
         let mut index = None;
         let mut cleanup = 0;
         let mut error = None;
@@ -335,7 +515,7 @@ impl FrameContext {
                     break;
                 }
             }
-            let imgage_handle = match renderer.create_image(image_create_info) {
+            let image = match vulkan::Image::new(renderer.device.clone(), image_create_info) {
                 Ok(img) => img,
                 Err(e) => {
                     error = Some(e);
@@ -343,181 +523,27 @@ impl FrameContext {
                     break;
                 }
             };
-            frame.images.push(imgage_handle);
+            frame.images.push(image);
             index = Some(cur_idx);
-        }
-
-        for i in 0..cleanup {
-            if let Some(image_handle) = self.frames[i].images.pop() {
-                renderer.destroy_image(image_handle);
-            }
         }
 
         if cleanup != 0 && error.is_none() {
             unreachable!("This should never panic");
         } else if let Some(e) = error {
-            return Err(e);
+            return Err(crate::Error::VulkanError(e));
         }
 
-        Ok(index.unwrap())
-    }
-    pub fn destroy_images(&mut self, renderer: &mut Renderer) {
-        for frame in self.frames.iter_mut() {
-            while let Some(image_handle) = frame.images.pop() {
-                renderer.destroy_image(image_handle);
-            }
-        }
-        while let Some((swapchain, depth, color)) = self.images.pop() {
-            renderer.destroy_image(color);
-            renderer.destroy_image(swapchain);
-            renderer.destroy_image(depth);
-        }
-    }
-    // this is unsafe because the handles to images need to get released with renderer.destroy_image
-    pub unsafe fn new(renderer: &mut Renderer, window: &winit::window::Window) -> Result<Self> {
-        let device = renderer.device.clone();
-
-        let mut frames = Vec::<FrameData>::with_capacity(MAX_FRAME_COUNT as usize);
-        for _ in 0..MAX_FRAME_COUNT {
-            let frame = FrameData::new(device.clone())?;
-            frames.push(frame);
-        }
-        let frames: [FrameData; MAX_FRAME_COUNT as usize] =
-            frames.try_into().expect("Incorrect number of frames");
-
-        let swapchain = vulkan::Swapchain::new(device.clone(), window)
-            .inspect_err(|e| tracing::error!("{e}"))?;
-
-        let mut swapchain_images = {
-            let raw_images = unsafe { swapchain.get_images() }?;
-            let mut images = Vec::with_capacity(raw_images.len());
-            for vk_img in raw_images {
-                let img = unsafe { renderer.create_swapchain_image(vk_img, &swapchain) }
-                    .inspect_err(|_| {
-                        while let Some(img) = images.pop() {
-                            renderer.destroy_image(img);
-                        }
-                    })?;
-                images.push(img);
-            }
-            images
-        };
-
-        let depth_format = device.find_viable_depth_stencil_format().ok_or_else(|| {
-            while let Some(img) = swapchain_images.pop() {
-                renderer.destroy_image(img);
-            }
-            vulkan::result::Error::CouldNotDetermineFormat
-        })?;
-
-        let mut depth_images = {
-            let mut images = Vec::with_capacity(swapchain_images.len());
-
-            let depth_image_create_info = vulkan::image::ImageCreateInfo {
-                memory_property_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
-                mip_level_count: 1,
-                image_type: vk::ImageType::TYPE_2D,
-                format: depth_format,
-                width: swapchain.extent().width,
-                height: swapchain.extent().height,
-                depth: 1,
-                usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
-                layer_count: 1,
-                level_count: 1,
-                samples: renderer.samples(),
-            };
-
-            for _ in 0..swapchain_images.len() {
-                let img = renderer
-                    .create_image(&depth_image_create_info)
-                    .inspect_err(|_| {
-                        while let Some(img) = images.pop() {
-                            renderer.destroy_image(img);
-                        }
-                        while let Some(img) = swapchain_images.pop() {
-                            renderer.destroy_image(img);
-                        }
-                    })?;
-                images.push(img);
-            }
-
-            images
-        };
-
-        let color_images = {
-            let mut images = Vec::with_capacity(swapchain_images.len());
-
-            // TODO: At some point in the future, the code here that creates images should determine if
-            // it can use the preferred image flags. This is fine for now though.
-            let _preferred_memory_flags =
-                vk::MemoryPropertyFlags::LAZILY_ALLOCATED | vk::MemoryPropertyFlags::DEVICE_LOCAL;
-            let fallback_memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
-            let usage_flags =
-                vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT;
-            let color_image_create_info = {
-                vulkan::image::ImageCreateInfo {
-                    memory_property_flags: fallback_memory_flags,
-                    mip_level_count: 1,
-                    image_type: vk::ImageType::TYPE_2D,
-                    format: swapchain.format(),
-                    width: swapchain.extent().width,
-                    height: swapchain.extent().height,
-                    depth: 1,
-                    usage: usage_flags,
-                    layer_count: 1,
-                    level_count: 1,
-                    samples: renderer.samples(),
-                }
-            };
-
-            for _ in 0..swapchain_images.len() {
-                let img = renderer
-                    .create_image(&color_image_create_info)
-                    .inspect_err(|_| {
-                        while let Some(img) = images.pop() {
-                            renderer.destroy_image(img);
-                        }
-                        while let Some(img) = depth_images.pop() {
-                            renderer.destroy_image(img);
-                        }
-                        while let Some(img) = swapchain_images.pop() {
-                            renderer.destroy_image(img);
-                        }
-                    })?;
-                images.push(img);
-            }
-
-            images
-        };
-
-        let images = swapchain_images
-            .into_iter()
-            .zip(depth_images.into_iter())
-            .zip(color_images.into_iter())
-            .map(|((swapchain, depth), color)| (swapchain, depth, color));
-
-        Ok(Self {
-            device,
-            swapchain,
-            frames,
-            depth_format,
-            straight_to_resolve: renderer.samples() == vk::SampleCountFlags::TYPE_1,
-            images: images.collect(),
-            frame_index: 0,
-            swapchain_image_index: 0,
+        Ok(FrameContextImageHandle::Frame {
+            id: self.id,
+            index: index.unwrap().try_into().expect("usize exceeds u32"),
         })
     }
-}
-
-impl Drop for FrameContext {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = self.device.device_wait_idle();
+    pub fn destroy_images(&mut self) {
+        for frame in self.frames.iter_mut() {
+            frame.images.clear();
         }
+        self.swapchain_images.clear();
     }
-}
-
-impl FrameContext {
     #[inline]
     pub fn get_color_format(&self) -> vk::Format {
         self.swapchain.format()
@@ -539,7 +565,7 @@ impl FrameContext {
     pub fn swapchain_extent(&self) -> vk::Extent2D {
         *self.swapchain.extent()
     }
-    pub fn get_swapchain_render_target(&mut self) -> Result<RenderTarget> {
+    pub fn get_swapchain_render_target(&mut self) -> Result<FrameContextRenderTarget> {
         let (swapchain_image_index, swapchain_image, depth_image, color_image) = {
             let frame = self.get_current_frame();
 
@@ -552,15 +578,23 @@ impl FrameContext {
                 self.swapchain
                     .acquire_next_image(frame.image_acquired, vk::Fence::null())?
             };
-            let (swapchain_image, depth_image, color_image) = self.images[image_index as usize];
 
             unsafe { self.device.reset_fences(&[frame.command_buffer_executed])? };
 
             (
                 image_index as usize,
-                swapchain_image,
-                depth_image,
-                color_image,
+                FrameContextImageHandle::Swapchain {
+                    id: self.id,
+                    index: image_index,
+                },
+                FrameContextImageHandle::Depth {
+                    id: self.id,
+                    index: image_index,
+                },
+                FrameContextImageHandle::Resolve {
+                    id: self.id,
+                    index: image_index,
+                },
             )
         };
 
@@ -583,16 +617,16 @@ impl FrameContext {
                 .begin_command_buffer(frame.command_buffer, &begin_info)?;
         }
 
-        let (img, resolve_img) = if self.straight_to_resolve {
+        let (image, resolve_image) = if self.straight_to_resolve {
             (swapchain_image, None)
         } else {
             (color_image, Some(swapchain_image))
         };
 
-        Ok(RenderTarget {
+        Ok(FrameContextRenderTarget {
             color_images: Box::new([TargetImage {
-                handle: img,
-                resolve_hanlde: resolve_img,
+                handle: image,
+                resolve_handle: resolve_image,
             }]),
             depth_image: Some(depth_image),
             render_area: vk::Rect2D {
@@ -654,5 +688,119 @@ impl FrameContext {
         self.frame_index %= max_frames;
 
         Ok(())
+    }
+}
+
+impl RenderStorage for FrameContext {
+    type ImageHandle = FrameContextImageHandle;
+    fn get_image(&self, image_handle: FrameContextImageHandle) -> Option<&vulkan::Image> {
+        match image_handle {
+            FrameContextImageHandle::Swapchain { id, index } => {
+                if id != self.id {
+                    return None;
+                }
+                self.swapchain_images
+                    .get(index as usize)
+                    .and_then(|image| Some(&image.swapchain))
+            }
+            FrameContextImageHandle::Depth { id, index } => {
+                if id != self.id {
+                    return None;
+                }
+                self.swapchain_images
+                    .get(index as usize)
+                    .and_then(|image| Some(&image.depth))
+            }
+            FrameContextImageHandle::Resolve { id, index } => {
+                if id != self.id {
+                    return None;
+                }
+                self.swapchain_images
+                    .get(index as usize)
+                    .and_then(|image| Some(&image.resolve))
+            }
+            FrameContextImageHandle::Frame { id, index } => {
+                if id != self.id {
+                    return None;
+                }
+                self.get_current_frame().get_image(index)
+            }
+        }
+    }
+    fn get_image_mut(
+        &mut self,
+        image_handle: FrameContextImageHandle,
+    ) -> Option<&mut vulkan::Image> {
+        match image_handle {
+            FrameContextImageHandle::Swapchain { id, index } => {
+                if id != self.id {
+                    return None;
+                }
+                self.swapchain_images
+                    .get_mut(index as usize)
+                    .and_then(|image| Some(&mut image.swapchain))
+            }
+            FrameContextImageHandle::Depth { id, index } => {
+                if id != self.id {
+                    return None;
+                }
+                self.swapchain_images
+                    .get_mut(index as usize)
+                    .and_then(|image| Some(&mut image.depth))
+            }
+            FrameContextImageHandle::Resolve { id, index } => {
+                if id != self.id {
+                    return None;
+                }
+                self.swapchain_images
+                    .get_mut(index as usize)
+                    .and_then(|image| Some(&mut image.resolve))
+            }
+            FrameContextImageHandle::Frame { id, index } => {
+                if id != self.id {
+                    return None;
+                }
+                self.get_current_frame_mut().get_image_mut(index)
+            }
+        }
+    }
+}
+
+impl Drop for FrameContext {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = self.device.device_wait_idle();
+        }
+    }
+}
+
+pub struct FrameContextRenderTarget {
+    pub render_area: vk::Rect2D,
+    pub color_images: Box<[TargetImage<FrameContextImageHandle>]>,
+    pub depth_image: Option<FrameContextImageHandle>,
+}
+
+impl RenderTarget for FrameContextRenderTarget {
+    type ImageHandle = FrameContextImageHandle;
+    fn get_default_scissor_and_viewport(&self) -> (vk::Rect2D, vk::Viewport) {
+        let scissor = self.render_area;
+        let viewport = vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: scissor.extent.width as f32,
+            height: scissor.extent.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        return (scissor, viewport);
+    }
+    fn render_area(&self) -> vk::Rect2D {
+        self.render_area
+    }
+    fn color_images(&self) -> &[TargetImage<Self::ImageHandle>] {
+        &self.color_images
+    }
+    fn depth_image(&self) -> Option<Self::ImageHandle> {
+        self.depth_image
     }
 }

@@ -6,7 +6,7 @@ const uint MATERIAL_FLAG_DIFFUSE_TEXTURE_BIT = (1 << 0);
 const uint MATERIAL_FLAG_AMBIENT_TEXTURE_BIT = (1 << 1);
 const uint MATERIAL_FLAG_SPECULAR_TEXTURE_BIT = (1 << 2);
 
-struct InstanceData {
+struct InstanceUBO {
     mat4 model_matrix;
     mat4 normal_matrix;
     uint material_index;
@@ -16,7 +16,7 @@ struct InstanceData {
 };
 
 layout(std430, set = 0, binding = 0) buffer InstanceBuffer {
-    InstanceData arr [];
+    InstanceUBO arr [];
 } instances;
 
 layout(std140, set = 0, binding = 1) uniform CameraUBO {
@@ -24,7 +24,7 @@ layout(std140, set = 0, binding = 1) uniform CameraUBO {
     mat4 proj_matrix;
 } camera;
 
-struct PointLightData {
+struct PointLightUBO {
     // w is intensity / brightness
     vec4 color;
     vec3 position;
@@ -36,7 +36,7 @@ layout(std430, set = 0, binding = 2) buffer PointLightsUBO {
     uint _pad1;
     uint _pad2;
     
-    PointLightData arr [];
+    PointLightUBO arr [];
 } point_lights;
 
 // layout(std140, set = 0, binding = 3) uniform DirectionalLightUBO {
@@ -56,7 +56,7 @@ layout(std140, set = 1, binding = 0) uniform GlobalLightUBO {
 
 layout(set = 1, binding = 1) uniform sampler2D global_textures[];
 
-struct MaterialUBO {
+struct MainMaterialUBO {
     vec3 diffuse_base;
     uint diffuse_texture_index;
     vec3 ambient_base;
@@ -70,8 +70,8 @@ struct MaterialUBO {
     uint _pad1;
 };
 
-layout(std140, set = 1, binding = 2) buffer MaterialsUBO {
-    MaterialUBO arr [];
+layout(std140, set = 1, binding = 2) buffer MainMaterialsUBO {
+    MainMaterialUBO arr [];
 } materials;
 
 layout (location = 0) in vec3 v_pos;
@@ -134,7 +134,7 @@ float shadow_calculation(vec4 frag_pos_light_space, vec3 light_dir, vec3 normal)
 //     return shadow;
 // }
 
-vec3 calc_point_light(PointLightData light, MaterialUBO mat, vec3 view_dir) {
+vec3 calc_point_light(PointLightUBO light, MainMaterialUBO mat, vec3 view_dir) {
     vec3 light_dir = normalize(light.position - v_pos);
     vec3 reflect_dir = reflect(-light_dir, v_normal_world_space);
 
@@ -159,7 +159,7 @@ vec3 calc_point_light(PointLightData light, MaterialUBO mat, vec3 view_dir) {
 }
 
 void main() {
-    MaterialUBO mat = materials.arr[nonuniformEXT(v_material_index)];
+    MainMaterialUBO mat = materials.arr[nonuniformEXT(v_material_index)];
 
     vec3 ambient = world_light.color.xyz * mat.ambient_base;
     if ((mat.flags & MATERIAL_FLAG_AMBIENT_TEXTURE_BIT) != 0) {
@@ -193,12 +193,12 @@ void main() {
         specular *= texture(global_textures[nonuniformEXT(mat.specular_texture_index)], v_tex_coord).rgb;
     }
     
-    float shadow = shadow_calculation(v_pos_light_space, v_normal_world_space, world_light_dir);
+    float shadow = shadow_calculation(v_pos_light_space, world_light_dir, v_normal_world_space);
 
     vec3 res = (diffuse + specular) * (1.0 - shadow) + ambient;
         
     for (int i = 0; i < point_lights.count; i++) {
-        PointLightData light = point_lights.arr[i];
+        PointLightUBO light = point_lights.arr[i];
         res += calc_point_light(light, mat, view_dir);
     }
 

@@ -1,8 +1,8 @@
 mod frame_context;
 mod render_pass;
 mod resource_manager;
+mod resources;
 mod result;
-mod scene;
 mod techniques;
 
 include!(concat!(env!("OUT_DIR"), "/variable_types.rs"));
@@ -12,16 +12,14 @@ include!(concat!(env!("OUT_DIR"), "/entry_points.rs"));
 pub use frame_context::*;
 pub use render_pass::*;
 pub(crate) use resource_manager::*;
+pub use resources::*;
 pub use result::Error;
 pub use result::Result;
-pub use scene::*;
 pub use techniques::*;
 
 use ash::vk;
-use slotmap::SlotMap;
 use std::rc::Rc;
 use std::u64;
-use vulkan::ImageCreateInfo;
 use vulkan::SharedDeviceRef;
 
 unsafe extern "system" fn vulkan_debug_callback(
@@ -67,10 +65,8 @@ pub struct Renderer {
     descriptor_set_layouts: DescriptorSetLayoutResourceManager,
     pipeline_layouts: PipelineLayoutResourceManager,
     pipelines: PipelineResourceManager,
-    images: SlotMap<ImageHandle, vulkan::Image>,
     repeat_sampler: vk::Sampler,
     shadowmap_sampler: vk::Sampler,
-    mesh_arenas: slotmap::DenseSlotMap<MeshArenaHandle, MeshArena>,
     samples: vk::SampleCountFlags,
 }
 
@@ -186,34 +182,30 @@ impl Renderer {
             descriptor_set_layouts,
             pipeline_layouts,
             pipelines,
-            mesh_arenas: slotmap::DenseSlotMap::with_key(),
-            images: slotmap::SlotMap::with_key(),
             repeat_sampler,
             shadowmap_sampler,
             samples,
         })
     }
     #[inline]
-    pub fn render_scene(
+    pub fn render<Technique>(
         &mut self,
         ctx: &mut FrameContext,
-        scene: &Scene,
-        technique: &dyn Technique,
-        target: &RenderTarget,
+        technique: &Technique,
+        resources: &Technique::TechniqueResources,
         indirect_offset: u64,
         draw_count: u32,
         stride: u32,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        Technique: RenderTechnique,
+    {
         let frame = ctx.get_current_frame();
         let cmd = frame.command_buffer();
 
-        technique.bind(cmd, ctx, self, target)?;
+        technique.bind(cmd, ctx, resources, self)?;
 
         unsafe {
-            let mesh_arena = self.mesh_arenas.get(scene.mesh_arena_handle).unwrap();
-
-            mesh_arena.bind(cmd, self);
-
             self.device.cmd_draw_indexed_indirect(
                 cmd,
                 frame.allocator().indirect_allocator().buffer(),
@@ -231,9 +223,6 @@ impl Renderer {
     ) -> Result<PipelineLayoutResourceHandle> {
         self.pipeline_layouts
             .access_or_create(desc, &self.descriptor_set_layouts)
-    }
-    pub fn mesh_arenas_mut(&mut self) -> &mut slotmap::DenseSlotMap<MeshArenaHandle, MeshArena> {
-        &mut self.mesh_arenas
     }
     pub fn pipeline_layouts_mut(&mut self) -> &mut PipelineLayoutResourceManager {
         &mut self.pipeline_layouts
@@ -366,38 +355,11 @@ impl Renderer {
             Ok(uniform_bv.buffer.unmap())
         }
     }
-    #[inline]
-    pub(crate) unsafe fn create_swapchain_image(
-        &mut self,
-        image: vk::Image,
-        swapchain: &vulkan::Swapchain,
-    ) -> result::Result<ImageHandle> {
-        let image = unsafe {
-            vulkan::Image::new_swapchain_image(
-                self.device.clone(),
-                image,
-                swapchain.format(),
-                vk::ImageLayout::UNDEFINED,
-                swapchain.extent().width,
-                swapchain.extent().height,
-            )
-        }?;
-
-        Ok(self.images.insert(image))
-    }
-    #[inline]
-    pub fn create_image(
-        &mut self,
-        image_create_info: &ImageCreateInfo,
-    ) -> result::Result<ImageHandle> {
-        let image = vulkan::Image::new(self.device.clone(), &image_create_info)?;
-        Ok(self.images.insert(image))
-    }
     pub fn create_and_populate_image(
         &mut self,
         image_data: image::DynamicImage,
         samples: vk::SampleCountFlags,
-    ) -> result::Result<ImageHandle> {
+    ) -> result::Result<vulkan::Image> {
         use image::GenericImageView;
 
         let (width, height) = image_data.dimensions();
@@ -553,85 +515,7 @@ impl Renderer {
             image.layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
         }
 
-        Ok(self.images.insert(image))
-    }
-    #[inline]
-    pub fn get_image(&self, handle: ImageHandle) -> Option<&vulkan::Image> {
-        self.images.get(handle)
-    }
-    #[inline]
-    #[allow(unused)]
-    pub fn get_image_mut(&mut self, handle: ImageHandle) -> Option<&mut vulkan::Image> {
-        self.images.get_mut(handle)
-    }
-    #[inline]
-    #[allow(unused)]
-    pub fn destroy_image(&mut self, handle: ImageHandle) -> bool {
-        self.images.remove(handle).is_some()
-    }
-    pub fn create_mesh_arena(
-        &mut self,
-        vertices: &[u8],
-        indices: &[u32],
-    ) -> Result<MeshArenaHandle> {
-        let buffer_size = vertices.len() as u64;
-
-        let vertex_buffer = {
-            let buffer_create_info = vulkan::BufferCreateInfo {
-                size: buffer_size,
-                usage: vk::BufferUsageFlags::VERTEX_BUFFER,
-                memory_property_flags: ash::vk::MemoryPropertyFlags::HOST_VISIBLE
-                    | vk::MemoryPropertyFlags::HOST_COHERENT,
-            };
-
-            vulkan::Buffer::new(self.device.clone(), &buffer_create_info)?
-        };
-
-        unsafe {
-            let src = vertices.as_ptr();
-            let dst = vertex_buffer.map_memory(0, buffer_size)? as *mut u8;
-
-            std::ptr::copy_nonoverlapping(src, dst, buffer_size as usize);
-
-            vertex_buffer.unmap();
-        }
-
-        let buffer_size = (indices.len() * std::mem::size_of::<u32>()) as u64;
-
-        let index_buffer = {
-            let buffer_create_info = vulkan::BufferCreateInfo {
-                size: buffer_size,
-                usage: vk::BufferUsageFlags::INDEX_BUFFER,
-                memory_property_flags: ash::vk::MemoryPropertyFlags::HOST_VISIBLE
-                    | vk::MemoryPropertyFlags::HOST_COHERENT,
-            };
-
-            vulkan::Buffer::new(self.device.clone(), &buffer_create_info)?
-        };
-
-        unsafe {
-            let src = indices.as_ptr();
-            let dst = index_buffer.map_memory(0, buffer_size)? as *mut u32;
-
-            std::ptr::copy_nonoverlapping(src, dst, indices.len());
-
-            index_buffer.unmap();
-        }
-
-        let handle = self.mesh_arenas.insert(MeshArena {
-            vertex_buffer,
-            index_buffer,
-        });
-
-        Ok(handle)
-    }
-    #[inline]
-    pub fn access_mesh_arena(&mut self, handle: MeshArenaHandle) -> Option<&MeshArena> {
-        self.mesh_arenas.get(handle)
-    }
-    #[inline]
-    pub fn destroy_mesh_arena(&mut self, handle: MeshArenaHandle) -> bool {
-        self.mesh_arenas.remove(handle).is_some()
+        Ok(image)
     }
     #[inline]
     pub fn bind_descriptor_sets(

@@ -28,6 +28,9 @@ impl<T: Zero + Copy> Vec2<T> {
     pub const fn into_vec4(self) -> Vec4<T> {
         Vec4::new(self.x(), self.y(), T::ZERO, T::ZERO)
     }
+    pub const fn into_arr(self) -> [T; 2] {
+        self.0
+    }
 }
 
 impl<T> Vec2<T>

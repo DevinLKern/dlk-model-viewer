@@ -525,17 +525,17 @@ impl Device {
     vk_delegate_destroy_many!(free_command_buffers, CommandPool, CommandBuffer);
 
     vk_delegate_forward!(update_descriptor_sets, (writes: &[WriteDescriptorSet], copies: &[CopyDescriptorSet]), ());
-    vk_delegate_forward!(cmd_copy_buffer2, (buffer: CommandBuffer, info: &CopyBufferInfo2), ());
-    vk_delegate_forward!(cmd_copy_buffer_to_image2, (buffer: CommandBuffer, info: &CopyBufferToImageInfo2), ());
+    vk_delegate_forward!(cmd_copy_buffer2, (cmd: CommandBuffer, info: &CopyBufferInfo2), ());
+    vk_delegate_forward!(cmd_copy_buffer_to_image2, (cmd: CommandBuffer, info: &CopyBufferToImageInfo2), ());
     vk_delegate_forward!(reset_fences, (fences: &[Fence]), VkResult<()>);
-    vk_delegate_forward!(reset_command_buffer, (buffer: CommandBuffer, flags: CommandBufferResetFlags), VkResult<()>);
-    vk_delegate_forward!(cmd_pipeline_barrier2, (cb: CommandBuffer, info: &DependencyInfo), ());
+    vk_delegate_forward!(reset_command_buffer, (cmd: CommandBuffer, flags: CommandBufferResetFlags), VkResult<()>);
+    vk_delegate_forward!(cmd_pipeline_barrier2, (cmd: CommandBuffer, info: &DependencyInfo), ());
     vk_delegate_forward!(device_wait_idle, (), VkResult<()>);
     vk_delegate_forward!(cmd_bind_pipeline, (cmd: CommandBuffer, bind_point: PipelineBindPoint, pipeline: Pipeline), ());
-    vk_delegate_forward!(cmd_set_viewport, (buffer: CommandBuffer, first_viewport: u32, viewports: &[Viewport]), ());
-    vk_delegate_forward!(cmd_set_scissor, (buffer: CommandBuffer, first_scissor: u32, scissors: &[Rect2D]), ());
-    vk_delegate_forward!(cmd_bind_vertex_buffers, (command_buffer: CommandBuffer, first_binding: u32, buffers: &[Buffer], offsets: &[DeviceSize]), ());
-    vk_delegate_forward!(cmd_bind_index_buffer, (command_buffer: CommandBuffer, buffer: Buffer, offset: DeviceSize, index_type: IndexType), ());
+    vk_delegate_forward!(cmd_set_viewport, (cmd: CommandBuffer, first_viewport: u32, viewports: &[Viewport]), ());
+    vk_delegate_forward!(cmd_set_scissor, (cmd: CommandBuffer, first_scissor: u32, scissors: &[Rect2D]), ());
+    vk_delegate_forward!(cmd_bind_vertex_buffers, (cmd: CommandBuffer, first_binding: u32, buffers: &[Buffer], offsets: &[DeviceSize]), ());
+    vk_delegate_forward!(cmd_bind_index_buffer, (cmd: CommandBuffer, buffer: Buffer, offset: DeviceSize, index_type: IndexType), ());
     vk_delegate_forward!(allocate_descriptor_sets, (info: &DescriptorSetAllocateInfo), VkResult<Vec<DescriptorSet>>);
     vk_delegate_forward!(free_descriptor_sets, (pool: DescriptorPool, sets: &[DescriptorSet]), VkResult<()>);
     vk_delegate_forward!(begin_command_buffer, (buffer: CommandBuffer,  info: &CommandBufferBeginInfo), VkResult<()>);

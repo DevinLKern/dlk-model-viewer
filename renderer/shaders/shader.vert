@@ -7,7 +7,7 @@ const uint MATERIAL_FLAG_SPECULAR_TEXTURE_BIT = (1 << 2);
 
 // per frame
 
-struct InstanceData {
+struct InstanceUBO {
     mat4 model_matrix;
     mat4 normal_matrix;
     uint material_index;
@@ -17,7 +17,7 @@ struct InstanceData {
 };
 
 layout(std430, set = 0, binding = 0) buffer InstanceBuffer {
-    InstanceData arr [];
+    InstanceUBO arr [];
 } instances;
 
 layout(std140, set = 0, binding = 1) uniform CameraUBO {
@@ -41,7 +41,7 @@ layout(location = 3) flat out uint v_material_index;
 layout(location = 4) out vec4 v_pos_light_space;
 
 void main() {
-    InstanceData data = instances.arr[gl_InstanceIndex];
+    InstanceUBO data = instances.arr[gl_InstanceIndex];
     gl_Position = camera.proj_matrix * camera.view_matrix * data.model_matrix * vec4(position, 1);
 
     v_pos = vec3(data.model_matrix * vec4(position, 1));

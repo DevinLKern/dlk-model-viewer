@@ -73,6 +73,30 @@ impl StackAllocator {
 
         Ok(Self { buffer, offset: 0 })
     }
+    pub fn new_vertex(device: crate::SharedDeviceRef, size: u64) -> Result<Self> {
+        let create_info = crate::BufferCreateInfo {
+            size,
+            usage: vk::BufferUsageFlags::VERTEX_BUFFER,
+            memory_property_flags: vk::MemoryPropertyFlags::HOST_COHERENT
+                | vk::MemoryPropertyFlags::HOST_VISIBLE,
+        };
+
+        let buffer = crate::Buffer::new(device, &create_info)?;
+
+        Ok(Self { buffer, offset: 0 })
+    }
+    pub fn new_index(device: crate::SharedDeviceRef, size: u64) -> Result<Self> {
+        let create_info = crate::BufferCreateInfo {
+            size,
+            usage: vk::BufferUsageFlags::INDEX_BUFFER,
+            memory_property_flags: vk::MemoryPropertyFlags::HOST_COHERENT
+                | vk::MemoryPropertyFlags::HOST_VISIBLE,
+        };
+
+        let buffer = crate::Buffer::new(device, &create_info)?;
+
+        Ok(Self { buffer, offset: 0 })
+    }
     pub fn can_reserve(&self, byte_count: u64, alignment: u64) -> Option<AllocationRange> {
         let offset = self.offset.next_multiple_of(alignment);
         if offset + byte_count > self.buffer.size {
@@ -84,11 +108,7 @@ impl StackAllocator {
             size: byte_count,
         })
     }
-    pub unsafe fn reserve_data(
-        &mut self,
-        byte_count: u64,
-        alignment: u64,
-    ) -> Option<AllocationRange> {
+    pub fn reserve_data(&mut self, byte_count: u64, alignment: u64) -> Option<AllocationRange> {
         if self.can_reserve(byte_count, alignment).is_none() {
             return None;
         }
@@ -106,7 +126,7 @@ impl StackAllocator {
     pub unsafe fn upload_data<T>(&mut self, allocation: AllocationRange, data: &[T]) -> Result<()> {
         debug_assert!(std::mem::size_of::<T>() != 0);
         debug_assert!(allocation.size != 0);
-        debug_assert!(allocation.offset + allocation.size < self.buffer.size);
+        debug_assert!(allocation.offset + allocation.size <= self.buffer.size);
 
         let buffer = &self.buffer;
 
@@ -131,7 +151,12 @@ impl StackAllocator {
     pub fn buffer(&self) -> vk::Buffer {
         self.buffer.handle
     }
+    #[inline]
     pub fn offset(&self) -> u64 {
         self.offset
+    }
+    #[inline]
+    pub fn into_buffer(self) -> Buffer {
+        self.buffer
     }
 }
