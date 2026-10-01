@@ -4,6 +4,7 @@ pub enum Error {
     ExpectedUniformBufferView,
     ResourceMissing,
     BufferCapacityExceeded,
+    BoxToSliceError,
     IoError(std::io::Error),
 }
 

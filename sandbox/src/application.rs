@@ -6,19 +6,20 @@ use crate::{
 };
 use obj_mtl::{Vertex, VertexNormal};
 use renderer::{
-    DepthResources, DepthTechnique, FrameContextImageHandle, GridInstanceUBO, GridMaterialData,
-    GridMaterialUBO, GridResources, GridResourcesRegistry, GridTechnique, GridVertVertex,
-    InstanceUBO, MAX_INDIRECT_COMMAND_DATA_COUNT, MainMaterialUBO, MainResources, MainTechnique,
-    MaterialHandle, MeshData, MeshNodeRegistry, RenderStorage, RenderTarget, RenderTechnique,
-    Renderer, ShaderVertVertex, TypedSubMeshHandle,
+    DepthResources, DepthTechnique, FrameContextImageHandle, FrameContextRange, GridInstanceUBO,
+    GridMaterialData, GridMaterialUBO, GridResources, GridResourcesRegistry, GridTechnique,
+    GridVertVertex, InstanceUBO, MAX_INDIRECT_COMMAND_DATA_COUNT, MainMaterialUBO, MainResources,
+    MainTechnique, MaterialHandle, MeshData, MeshNodeRegistry, RenderStorage, RenderTarget,
+    RenderTechnique, Renderer, ShaderVertVertex, TypedSubMeshHandle,
 };
 
 use ash::vk;
 
-use std::collections::HashSet;
 use std::str::FromStr;
+use std::u8;
 use std::{
     collections::HashMap,
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -34,6 +35,75 @@ use math::{Identity, Mat4, Quat, Vec2, Vec3, Vec4, Zero};
 pub const MAX_POINT_LIGHT_COUNT: u64 = 32;
 const DEFAULT_IMAGE: &[u8] = include_bytes!("../../files/images/default.png");
 
+#[derive(Default)]
+struct FrameContextState {
+    pub camera_data_range: renderer::FrameContextRange<renderer::Uniform>,
+    pub instance_data_range: renderer::FrameContextRange<renderer::Storage>,
+    pub grid_instance_data_range: renderer::FrameContextRange<renderer::Storage>,
+    pub point_light_count_ubo_data_range: renderer::FrameContextRange<renderer::Storage>,
+    pub point_light_data_range: renderer::FrameContextRange<renderer::Storage>,
+    pub global_light_data_range: renderer::FrameContextRange<renderer::Storage>,
+    pub directional_light_data_range: renderer::FrameContextRange<renderer::Uniform>,
+    pub indirect_command_range: vulkan::AllocationRange,
+    pub grid_indirect_command_range: vulkan::AllocationRange,
+    pub depth_image_handle: FrameContextImageHandle,
+}
+
+impl FrameContextState {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+impl renderer::HasBindingValue<renderer::InstanceBuffer> for FrameContextState {
+    type Value = FrameContextRange<renderer::Storage>;
+    fn get(&self) -> Self::Value {
+        self.instance_data_range
+    }
+}
+impl renderer::HasBindingValue<renderer::CameraUBO> for FrameContextState {
+    type Value = FrameContextRange<renderer::Uniform>;
+    fn get(&self) -> Self::Value {
+        self.camera_data_range
+    }
+}
+impl renderer::HasBindingValue<renderer::DepthImage> for FrameContextState {
+    type Value = renderer::FrameContextImageHandle;
+    fn get(&self) -> Self::Value {
+        self.depth_image_handle
+    }
+}
+impl renderer::HasBindingValue<renderer::PointLightsUBO> for FrameContextState {
+    type Value = FrameContextRange<renderer::Storage>;
+    fn get(&self) -> Self::Value {
+        let start = self
+            .point_light_count_ubo_data_range
+            .offset
+            .min(self.point_light_data_range.offset);
+        let end1 = self.point_light_count_ubo_data_range.offset
+            + self.point_light_count_ubo_data_range.size;
+        let end2 = self.point_light_data_range.offset + self.point_light_data_range.size;
+        let end = end1.max(end2);
+        let size = end - start;
+        vulkan::AllocationRange {
+            offset: start,
+            size,
+        }
+        .into()
+    }
+}
+impl renderer::HasBindingValue<renderer::DirectionalLightUBO> for FrameContextState {
+    type Value = FrameContextRange<renderer::Uniform>;
+    fn get(&self) -> Self::Value {
+        self.directional_light_data_range
+    }
+}
+impl renderer::HasBindingValue<renderer::GridInstanceBuffer> for FrameContextState {
+    type Value = FrameContextRange<renderer::Storage>;
+    fn get(&self) -> Self::Value {
+        self.grid_instance_data_range
+    }
+}
 #[derive(Debug, Copy, Clone)]
 pub enum CameraInUse {
     Fps,
@@ -55,22 +125,13 @@ pub struct Application {
     orbit_controller: camera::controllers::OrbitCameraController,
     windows: HashMap<WindowId, (renderer::FrameContext, Window)>,
     renderer: renderer::Renderer,
-    camera_data_range: vulkan::AllocationRange,
-    instance_data_range: vulkan::AllocationRange,
-    grid_instance_data_range: vulkan::AllocationRange,
-    point_light_count_ubo_data_range: vulkan::AllocationRange,
-    point_light_data_range: vulkan::AllocationRange,
-    global_light_data_range: vulkan::AllocationRange,
-    directional_light_data_range: vulkan::AllocationRange,
-    indirect_command_range: vulkan::AllocationRange,
-    grid_indirect_command_range: vulkan::AllocationRange,
+    frame_state: FrameContextState,
     main_resources: MainResources,
     main_technique: MainTechnique,
     grid_resources: GridResources,
     grid_technique: GridTechnique,
     depth_resources: DepthResources,
     depth_technique: DepthTechnique,
-    depth_image_handle: FrameContextImageHandle,
     default_texture_handle: renderer::MainImageHandle,
     model_import_transform: math::Mat4<f32>,
     model_transform: math::AffineTransform,
@@ -430,8 +491,8 @@ impl Application {
         }
         let scene_vertices = scene_vertices.register(&mut scene_resources);
         let main_resources = main_resources.register(&mut scene_resources);
-        let grid_resources = grid_resources.register(&mut scene_resources);
         let grid_mesh_data = grid_mesh_data.register(&mut scene_resources);
+        let grid_resources = grid_resources.register(&mut scene_resources);
 
         let mut scene_resources = scene_resources.register(&renderer)?;
 
@@ -513,16 +574,7 @@ impl Application {
             orbit_camera,
             orbit_controller,
             windows: HashMap::new(),
-            camera_data_range: vulkan::AllocationRange::default(),
-            instance_data_range: vulkan::AllocationRange::default(),
-            grid_instance_data_range: vulkan::AllocationRange::default(),
-            point_light_count_ubo_data_range: vulkan::AllocationRange::default(),
-            point_light_data_range: vulkan::AllocationRange::default(),
-            global_light_data_range: vulkan::AllocationRange::default(),
-            directional_light_data_range: vulkan::AllocationRange::default(),
-            indirect_command_range: vulkan::AllocationRange::default(),
-            grid_indirect_command_range: vulkan::AllocationRange::default(),
-            depth_image_handle: FrameContextImageHandle::default(),
+            frame_state: FrameContextState::default(),
             main_resources,
             main_technique,
             depth_resources,
@@ -693,18 +745,7 @@ impl Application {
     }
     fn reset_allocations(&mut self, ctx: &mut renderer::FrameContext) {
         ctx.reset_frames(&mut self.renderer);
-
-        self.camera_data_range = vulkan::AllocationRange::default();
-        self.instance_data_range = vulkan::AllocationRange::default();
-        self.grid_instance_data_range = vulkan::AllocationRange::default();
-        self.point_light_count_ubo_data_range = vulkan::AllocationRange::default();
-        self.point_light_data_range = vulkan::AllocationRange::default();
-        self.global_light_data_range = vulkan::AllocationRange::default();
-        self.directional_light_data_range = vulkan::AllocationRange::default();
-        self.indirect_command_range = vulkan::AllocationRange::default();
-        self.grid_indirect_command_range = vulkan::AllocationRange::default();
-
-        self.depth_image_handle = FrameContextImageHandle::default();
+        self.frame_state.reset();
     }
     fn update_context(&mut self, ctx: &mut renderer::FrameContext) -> Result<()> {
         let uniform_offset = self
@@ -720,13 +761,14 @@ impl Application {
         const DIRECTIONAL_LIGHT_SIZE: u64 =
             std::mem::size_of::<renderer::DirectionalLightUBO>() as u64;
 
-        self.camera_data_range = ctx
+        self.frame_state.camera_data_range = ctx
             .reserve_uniform_data(CAMERA_SIZE, CAMERA_SIZE)
             .ok_or_else(|| {
                 self.reset_allocations(ctx);
                 renderer::Error::BufferCapacityExceeded
-            })?;
-        self.instance_data_range = ctx
+            })?
+            .into();
+        self.frame_state.instance_data_range = ctx
             .reserve_storage_data(
                 renderer::MAX_INSTANCE_DATA_COUNT * INSTANCE_SIZE,
                 INSTANCE_SIZE,
@@ -734,8 +776,9 @@ impl Application {
             .ok_or_else(|| {
                 self.reset_allocations(ctx);
                 renderer::Error::BufferCapacityExceeded
-            })?;
-        self.grid_instance_data_range = ctx
+            })?
+            .into();
+        self.frame_state.grid_instance_data_range = ctx
             .reserve_storage_data(
                 renderer::MAX_INSTANCE_DATA_COUNT * GRID_INSTANCE_SIZE,
                 GRID_INSTANCE_SIZE,
@@ -743,7 +786,8 @@ impl Application {
             .ok_or_else(|| {
                 self.reset_allocations(ctx);
                 renderer::Error::BufferCapacityExceeded
-            })?;
+            })?
+            .into();
 
         let temp_alloc = ctx
             .reserve_storage_data(
@@ -755,44 +799,43 @@ impl Application {
                 renderer::Error::BufferCapacityExceeded
             })?;
 
-        self.point_light_count_ubo_data_range = vulkan::AllocationRange {
-            offset: temp_alloc.offset,
-            size: POINT_LIGHT_COUNT_SIZE,
-        };
-        self.point_light_data_range = vulkan::AllocationRange {
-            offset: temp_alloc.offset + POINT_LIGHT_COUNT_SIZE,
-            size: temp_alloc.size - POINT_LIGHT_COUNT_SIZE,
-        };
+        self.frame_state.point_light_count_ubo_data_range =
+            FrameContextRange::new(temp_alloc.offset, POINT_LIGHT_COUNT_SIZE);
+        self.frame_state.point_light_data_range = FrameContextRange::new(
+            temp_alloc.offset + POINT_LIGHT_COUNT_SIZE,
+            temp_alloc.size - POINT_LIGHT_COUNT_SIZE,
+        );
 
-        self.global_light_data_range = ctx
-            .reserve_uniform_data(GLOBAL_LIGHT_SIZE, uniform_offset)
+        self.frame_state.global_light_data_range = ctx
+            .reserve_storage_data(GLOBAL_LIGHT_SIZE, uniform_offset)
             .ok_or_else(|| {
                 self.reset_allocations(ctx);
                 renderer::Error::BufferCapacityExceeded
             })?;
-        self.directional_light_data_range = ctx
+        self.frame_state.directional_light_data_range = ctx
             .reserve_uniform_data(DIRECTIONAL_LIGHT_SIZE, uniform_offset)
             .ok_or_else(|| {
                 self.reset_allocations(ctx);
                 renderer::Error::BufferCapacityExceeded
-            })?;
+            })?
+            .into();
         const SIZE_INDIRECT: u64 = std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u64;
         const DRAW_COUNT: u64 = MAX_INDIRECT_COMMAND_DATA_COUNT / 3;
-        self.indirect_command_range = ctx
+        self.frame_state.indirect_command_range = ctx
             .reserve_indirect_data(DRAW_COUNT * SIZE_INDIRECT, SIZE_INDIRECT)
             .ok_or_else(|| {
                 self.reset_allocations(ctx);
                 renderer::Error::BufferCapacityExceeded
             })?;
 
-        self.grid_indirect_command_range = ctx
+        self.frame_state.grid_indirect_command_range = ctx
             .reserve_indirect_data(DRAW_COUNT * SIZE_INDIRECT, SIZE_INDIRECT)
             .ok_or_else(|| {
                 self.reset_allocations(ctx);
                 renderer::Error::BufferCapacityExceeded
             })?;
 
-        self.depth_image_handle = {
+        self.frame_state.depth_image_handle = {
             let image_create_info = vulkan::ImageCreateInfo {
                 memory_property_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
                 image_type: vk::ImageType::TYPE_2D,
@@ -813,28 +856,20 @@ impl Application {
         })?;
 
         self.main_technique
-            .update_context(
-                ctx,
-                &self.camera_data_range,
-                &self.instance_data_range,
-                &temp_alloc,
-                &self.directional_light_data_range,
-                self.depth_image_handle,
-                &self.renderer,
-            )
+            .update_context(ctx, &self.frame_state, &self.renderer)
             .inspect_err(|_| {
                 self.reset_allocations(ctx);
             })?;
-        self.grid_technique.update_context(
-            ctx,
-            &self.grid_instance_data_range,
-            &self.camera_data_range,
-        );
-        self.depth_technique.update_context(
-            &ctx,
-            &self.directional_light_data_range,
-            &self.instance_data_range,
-        );
+        self.grid_technique
+            .update_context(ctx, &self.frame_state, &self.renderer)
+            .inspect_err(|_| {
+                self.reset_allocations(ctx);
+            })?;
+        self.depth_technique
+            .update_context(ctx, &self.frame_state, &self.renderer)
+            .inspect_err(|_| {
+                self.reset_allocations(ctx);
+            })?;
 
         Ok(())
     }
@@ -957,7 +992,7 @@ impl Application {
                 };
 
                 let first_instance_offset =
-                    (self.instance_data_range.offset / instance_stride) as u32;
+                    (self.frame_state.instance_data_range.offset / instance_stride) as u32;
 
                 let model_matrix = self
                     .model_transform
@@ -995,21 +1030,24 @@ impl Application {
                         .get_current_frame_mut()
                         .allocator_mut()
                         .storage_allocator_mut()
-                        .upload_data(self.instance_data_range, &instance_data)
+                        .upload_data(self.frame_state.instance_data_range.into(), &instance_data)
                         .map_err(|e| renderer::Error::VulkanError(e))?;
 
                     context
                         .get_current_frame_mut()
                         .allocator_mut()
                         .indirect_allocator_mut()
-                        .upload_data(self.indirect_command_range, &indirect_command_data)
+                        .upload_data(
+                            self.frame_state.indirect_command_range.into(),
+                            &indirect_command_data,
+                        )
                         .map_err(|e| renderer::Error::VulkanError(e))?;
 
                     context
                         .get_current_frame_mut()
                         .allocator_mut()
                         .uniform_allocator_mut()
-                        .upload_data(self.camera_data_range, &[camera_data])
+                        .upload_data(self.frame_state.camera_data_range.into(), &[camera_data])
                         .map_err(|e| renderer::Error::VulkanError(e))?;
                 }
 
@@ -1026,7 +1064,9 @@ impl Application {
                 let swapchain_target = context.get_swapchain_render_target()?;
 
                 let (depth_pass, depth_target) = {
-                    let depth_image = context.get_image(self.depth_image_handle).unwrap();
+                    let depth_image = context
+                        .get_image(self.frame_state.depth_image_handle)
+                        .unwrap();
                     let (width, height) = (depth_image.width, depth_image.height);
                     let pass = renderer::RenderPass {
                         color: Box::new([]),
@@ -1045,7 +1085,7 @@ impl Application {
 
                     let target = renderer::FrameContextRenderTarget {
                         color_images: Box::new([]),
-                        depth_image: Some(self.depth_image_handle),
+                        depth_image: Some(self.frame_state.depth_image_handle),
                         render_area: vk::Rect2D {
                             offset: vk::Offset2D { x: 0, y: 0 },
                             extent: vk::Extent2D { width, height },
@@ -1087,7 +1127,10 @@ impl Application {
                             .get_current_frame_mut()
                             .allocator_mut()
                             .uniform_allocator_mut()
-                            .upload_data(self.directional_light_data_range, &light_data)
+                            .upload_data(
+                                self.frame_state.directional_light_data_range.into(),
+                                &light_data,
+                            )
                             .map_err(|e| renderer::Error::VulkanError(e))?;
                     }
                 }
@@ -1101,7 +1144,7 @@ impl Application {
                     context,
                     &self.depth_technique,
                     &self.depth_resources,
-                    self.indirect_command_range.offset,
+                    self.frame_state.indirect_command_range.offset,
                     indirect_command_data.len() as u32,
                     indirect_command_stride as u32,
                 )?;
@@ -1153,7 +1196,10 @@ impl Application {
                             .get_current_frame_mut()
                             .allocator_mut()
                             .storage_allocator_mut()
-                            .upload_data(self.point_light_data_range, &point_light_data)
+                            .upload_data(
+                                self.frame_state.point_light_data_range.into(),
+                                &point_light_data,
+                            )
                             .map_err(|e| renderer::Error::VulkanError(e))
                     }?;
                     let point_light_count_data = [renderer::PointLightsUBO {
@@ -1169,7 +1215,7 @@ impl Application {
                             .allocator_mut()
                             .storage_allocator_mut()
                             .upload_data(
-                                self.point_light_count_ubo_data_range,
+                                self.frame_state.point_light_count_ubo_data_range.into(),
                                 &point_light_count_data,
                             )
                             .map_err(|e| renderer::Error::VulkanError(e))
@@ -1185,7 +1231,7 @@ impl Application {
                     context,
                     &self.main_technique,
                     &self.main_resources,
-                    self.indirect_command_range.offset,
+                    self.frame_state.indirect_command_range.offset,
                     indirect_command_data.len() as u32,
                     indirect_command_stride as u32,
                 )?;
@@ -1218,14 +1264,20 @@ impl Application {
                         .get_current_frame_mut()
                         .allocator_mut()
                         .storage_allocator_mut()
-                        .upload_data(self.grid_instance_data_range, &grid_instance_data)
+                        .upload_data(
+                            self.frame_state.grid_instance_data_range.into(),
+                            &grid_instance_data,
+                        )
                         .map_err(|e| renderer::Error::VulkanError(e))?;
 
                     context
                         .get_current_frame_mut()
                         .allocator_mut()
                         .indirect_allocator_mut()
-                        .upload_data(self.grid_indirect_command_range, &indirect_command_data)
+                        .upload_data(
+                            self.frame_state.grid_indirect_command_range,
+                            &indirect_command_data,
+                        )
                         .map_err(|e| renderer::Error::VulkanError(e))?;
                 }
 
@@ -1241,7 +1293,7 @@ impl Application {
                     context,
                     &self.grid_technique,
                     &self.grid_resources,
-                    self.grid_indirect_command_range.offset,
+                    self.frame_state.grid_indirect_command_range.offset,
                     indirect_command_data.len() as u32,
                     indirect_command_stride as u32,
                 )?;

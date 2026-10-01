@@ -10,6 +10,16 @@ pub use main_technique::*;
 
 use crate::{FrameContext, Renderer, Result};
 
+pub trait HasBindingValue<T> {
+    type Value;
+    fn get(&self) -> Self::Value;
+}
+
+pub trait ShaderBinding<T> {
+    const SET: u32;
+    const BINDING: u32;
+}
+
 pub trait RenderTechnique {
     type TechniqueResources;
     fn bind(

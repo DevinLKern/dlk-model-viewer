@@ -1,4 +1,4 @@
-use crate::{Buffer, Result};
+use crate::{Buffer, Result, SharedDeviceRef};
 
 use ash::vk;
 
@@ -37,7 +37,7 @@ pub struct StackAllocator {
 }
 
 impl StackAllocator {
-    pub fn new_uniform(device: crate::SharedDeviceRef, size: u64) -> Result<Self> {
+    pub fn new_uniform(device: SharedDeviceRef, size: u64) -> Result<Self> {
         let create_info = crate::BufferCreateInfo {
             size,
             usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
@@ -49,7 +49,7 @@ impl StackAllocator {
 
         Ok(Self { buffer, offset: 0 })
     }
-    pub fn new_storage(device: crate::SharedDeviceRef, size: u64) -> Result<Self> {
+    pub fn new_storage(device: SharedDeviceRef, size: u64) -> Result<Self> {
         let create_info = crate::BufferCreateInfo {
             size,
             usage: vk::BufferUsageFlags::STORAGE_BUFFER,
@@ -61,7 +61,7 @@ impl StackAllocator {
 
         Ok(Self { buffer, offset: 0 })
     }
-    pub fn new_indirect(device: crate::SharedDeviceRef, size: u64) -> Result<Self> {
+    pub fn new_indirect(device: SharedDeviceRef, size: u64) -> Result<Self> {
         let create_info = crate::BufferCreateInfo {
             size,
             usage: vk::BufferUsageFlags::INDIRECT_BUFFER,
@@ -73,7 +73,7 @@ impl StackAllocator {
 
         Ok(Self { buffer, offset: 0 })
     }
-    pub fn new_vertex(device: crate::SharedDeviceRef, size: u64) -> Result<Self> {
+    pub fn new_vertex(device: SharedDeviceRef, size: u64) -> Result<Self> {
         let create_info = crate::BufferCreateInfo {
             size,
             usage: vk::BufferUsageFlags::VERTEX_BUFFER,
@@ -85,7 +85,7 @@ impl StackAllocator {
 
         Ok(Self { buffer, offset: 0 })
     }
-    pub fn new_index(device: crate::SharedDeviceRef, size: u64) -> Result<Self> {
+    pub fn new_index(device: SharedDeviceRef, size: u64) -> Result<Self> {
         let create_info = crate::BufferCreateInfo {
             size,
             usage: vk::BufferUsageFlags::INDEX_BUFFER,

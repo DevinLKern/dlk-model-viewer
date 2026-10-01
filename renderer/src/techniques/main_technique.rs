@@ -3,9 +3,13 @@ use std::{sync::Arc, sync::atomic::AtomicU32};
 use ash::vk;
 
 use crate::{
-    DescriptorSetLayoutDescription, DescriptorSetLayoutResourceHandle, Error, FrameContext,
-    GlobalLightUBO, ImageResourceHandle, MainMaterialUBO, MaterialHandle, RenderStorage,
-    RenderTarget, RenderTechnique, Renderer, ResourceRegistry, Resources, Result,
+    CameraUBO, CanResolveBindingValue, DescriptorSetLayoutDescription,
+    DescriptorSetLayoutResourceHandle, DirectionalLightUBO, Error, FrameContext,
+    FrameContextImageHandle, FrameContextRange, GlobalLightUBO, ImageResourceHandle,
+    InstanceBuffer, MAX_FRAME_COUNT, MainMaterialUBO, MaterialHandle, PointLightsUBO,
+    RenderStorage, RenderTarget, RenderTechnique, Renderer, ResourceRegistry, Resources, Result,
+    Storage, Uniform,
+    techniques::{HasBindingValue, ShaderBinding},
 };
 
 const COMPILED_MAIN_VERT_SHADER: &[u8] = include_bytes!("../../shaders/shader.vert.spv");
@@ -146,10 +150,6 @@ impl MainResourcesRegistry {
         );
 
         registry.add_descriptors(vk::DescriptorType::UNIFORM_BUFFER, 1);
-        // registry.add_descriptors(
-        //     vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-        //     self.images.len() as u32,
-        // );
         registry.add_descriptors(vk::DescriptorType::STORAGE_BUFFER, 1);
         registry.add_sets(1);
 
@@ -606,6 +606,29 @@ impl Drop for MainTechnique {
     }
 }
 
+// TODO: generate impmlementation or a macro that implements ShaderBinding<T> with build.rs.
+impl ShaderBinding<InstanceBuffer> for MainTechnique {
+    const BINDING: u32 = 0;
+    const SET: u32 = 0;
+}
+impl ShaderBinding<CameraUBO> for MainTechnique {
+    const BINDING: u32 = 1;
+    const SET: u32 = 0;
+}
+impl ShaderBinding<PointLightsUBO> for MainTechnique {
+    const BINDING: u32 = 2;
+    const SET: u32 = 0;
+}
+impl ShaderBinding<DirectionalLightUBO> for MainTechnique {
+    const BINDING: u32 = 3;
+    const SET: u32 = 0;
+}
+pub struct DepthImage;
+impl ShaderBinding<DepthImage> for MainTechnique {
+    const BINDING: u32 = 4;
+    const SET: u32 = 0;
+}
+
 impl MainTechnique {
     pub fn new(renderer: &mut crate::Renderer, resources: &MainResources) -> crate::Result<Self> {
         let device = renderer.device.clone();
@@ -615,15 +638,15 @@ impl MainTechnique {
             let pool_sizes = [
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::UNIFORM_BUFFER,
-                    descriptor_count: crate::MAX_FRAME_COUNT as u32 * 3,
+                    descriptor_count: MAX_FRAME_COUNT as u32 * 3,
                 },
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::STORAGE_BUFFER,
-                    descriptor_count: crate::MAX_FRAME_COUNT as u32 * 2,
+                    descriptor_count: MAX_FRAME_COUNT as u32 * 2,
                 },
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                    descriptor_count: crate::MAX_FRAME_COUNT as u32,
+                    descriptor_count: MAX_FRAME_COUNT as u32,
                 },
             ];
             let create_info = vk::DescriptorPoolCreateInfo {
@@ -661,68 +684,46 @@ impl MainTechnique {
             per_frame_descriptor_sets,
         })
     }
-    pub fn update_context(
+    pub fn update_context<T>(
         &mut self,
-        ctx: &mut crate::FrameContext,
-        camera_data_range: &vulkan::AllocationRange,
-        instance_data_range: &vulkan::AllocationRange,
-        point_lights_data_range: &vulkan::AllocationRange,
-        directional_light_data_range: &vulkan::AllocationRange,
-        depth_image_handle: crate::FrameContextImageHandle,
-        renderer: &crate::Renderer,
-    ) -> crate::Result<()> {
-        let camera_infos: Box<[vk::DescriptorBufferInfo]> = (0..crate::MAX_FRAME_COUNT as usize)
-            .map(|i| vk::DescriptorBufferInfo {
-                buffer: ctx.frames()[i].allocator().uniform_allocator().buffer(),
-                offset: camera_data_range.offset,
-                range: camera_data_range.size,
-            })
-            .collect();
+        ctx: &mut FrameContext,
+        ctx_state: &T,
+        renderer: &Renderer,
+    ) -> crate::Result<()>
+    where
+        Self: ShaderBinding<CameraUBO>
+            + ShaderBinding<InstanceBuffer>
+            + ShaderBinding<PointLightsUBO>
+            + ShaderBinding<DirectionalLightUBO>
+            + ShaderBinding<DepthImage>,
+        T: HasBindingValue<CameraUBO, Value = FrameContextRange<Uniform>>
+            + HasBindingValue<InstanceBuffer, Value = FrameContextRange<Storage>>
+            + HasBindingValue<PointLightsUBO, Value = FrameContextRange<Storage>>
+            + HasBindingValue<DirectionalLightUBO, Value = FrameContextRange<Uniform>>
+            + HasBindingValue<DepthImage, Value = FrameContextImageHandle>,
+    {
+        let camera_data_range = <T as HasBindingValue<CameraUBO>>::get(ctx_state);
+        let camera_infos = ctx.resolve(camera_data_range, renderer)?;
 
-        let instance_infos: Box<[vk::DescriptorBufferInfo]> = (0..crate::MAX_FRAME_COUNT as usize)
-            .map(|i| vk::DescriptorBufferInfo {
-                buffer: ctx.frames()[i].allocator().storage_allocator().buffer(),
-                offset: instance_data_range.offset,
-                range: instance_data_range.size,
-            })
-            .collect();
+        let instance_data_range = <T as HasBindingValue<InstanceBuffer>>::get(ctx_state);
+        let instance_infos = ctx.resolve(instance_data_range, renderer)?;
 
-        let point_light_infos: Box<[vk::DescriptorBufferInfo]> = (0..crate::MAX_FRAME_COUNT
-            as usize)
-            .map(|i| vk::DescriptorBufferInfo {
-                buffer: ctx.frames()[i].allocator().storage_allocator().buffer(),
-                offset: point_lights_data_range.offset,
-                range: point_lights_data_range.size,
-            })
-            .collect();
+        let point_lights_data_range = <T as HasBindingValue<PointLightsUBO>>::get(ctx_state);
+        let point_light_infos = ctx.resolve(point_lights_data_range, renderer)?;
 
-        let light_infos: Box<[vk::DescriptorBufferInfo]> = (0..crate::MAX_FRAME_COUNT as usize)
-            .map(|i| vk::DescriptorBufferInfo {
-                buffer: ctx.frames()[i].allocator().uniform_allocator().buffer(),
-                offset: directional_light_data_range.offset,
-                range: directional_light_data_range.size,
-            })
-            .collect();
+        let directional_light_data_range =
+            <T as HasBindingValue<DirectionalLightUBO>>::get(ctx_state);
+        let directional_light_infos = ctx.resolve(directional_light_data_range, renderer)?;
 
-        let mut depth_image_infos =
-            Vec::<vk::DescriptorImageInfo>::with_capacity(crate::MAX_FRAME_COUNT as usize);
-        for i in 0..crate::MAX_FRAME_COUNT as usize {
-            let image = ctx.frames()[i]
-                .get_image(depth_image_handle.index())
-                .ok_or(crate::Error::ResourceMissing)?;
-            depth_image_infos.push(vk::DescriptorImageInfo {
-                image_view: image.view,
-                sampler: renderer.shadowmap_sampler(),
-                image_layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-            })
-        }
+        let depth_image_handle = <T as HasBindingValue<DepthImage>>::get(&ctx_state);
+        let depth_image_infos = ctx.resolve(depth_image_handle, renderer)?;
 
         let writes: Box<[vk::WriteDescriptorSet]> = (0..crate::MAX_FRAME_COUNT as usize)
             .flat_map(|i| {
                 [
                     vk::WriteDescriptorSet {
                         dst_set: self.per_frame_descriptor_sets[i],
-                        dst_binding: 0,
+                        dst_binding: <Self as ShaderBinding<InstanceBuffer>>::BINDING,
                         descriptor_count: 1,
                         p_buffer_info: &instance_infos[i],
                         descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
@@ -730,7 +731,7 @@ impl MainTechnique {
                     },
                     vk::WriteDescriptorSet {
                         dst_set: self.per_frame_descriptor_sets[i],
-                        dst_binding: 1,
+                        dst_binding: <Self as ShaderBinding<CameraUBO>>::BINDING,
                         descriptor_count: 1,
                         p_buffer_info: &camera_infos[i],
                         descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
@@ -738,7 +739,7 @@ impl MainTechnique {
                     },
                     vk::WriteDescriptorSet {
                         dst_set: self.per_frame_descriptor_sets[i],
-                        dst_binding: 2,
+                        dst_binding: <Self as ShaderBinding<PointLightsUBO>>::BINDING,
                         descriptor_count: 1,
                         p_buffer_info: &point_light_infos[i],
                         descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
@@ -746,15 +747,15 @@ impl MainTechnique {
                     },
                     vk::WriteDescriptorSet {
                         dst_set: self.per_frame_descriptor_sets[i],
-                        dst_binding: 3,
+                        dst_binding: <Self as ShaderBinding<DirectionalLightUBO>>::BINDING,
                         descriptor_count: 1,
-                        p_buffer_info: &light_infos[i],
+                        p_buffer_info: &directional_light_infos[i],
                         descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
                         ..Default::default()
                     },
                     vk::WriteDescriptorSet {
                         dst_set: self.per_frame_descriptor_sets[i],
-                        dst_binding: 4,
+                        dst_binding: <Self as ShaderBinding<DepthImage>>::BINDING,
                         descriptor_count: 1,
                         p_image_info: &depth_image_infos[i],
                         descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,

@@ -1,4 +1,7 @@
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::{
+    marker::PhantomData,
+    sync::atomic::{AtomicU32, Ordering},
+};
 
 use ash::vk;
 use vulkan::device::SharedDeviceRef;
@@ -281,6 +284,49 @@ struct SwapchainImage {
     resolve: vulkan::Image,
 }
 
+#[derive(Default, Copy, Clone)]
+pub struct FrameContextRange<T: Default + Copy + Clone> {
+    pub offset: u64,
+    pub size: u64,
+    _marker: PhantomData<T>,
+}
+
+impl<T: Default + Copy + Clone> From<FrameContextRange<T>> for vulkan::AllocationRange {
+    fn from(value: FrameContextRange<T>) -> Self {
+        Self {
+            offset: value.offset,
+            size: value.size,
+        }
+    }
+}
+
+impl<T: Default + Copy + Clone> From<vulkan::AllocationRange> for FrameContextRange<T> {
+    fn from(value: vulkan::AllocationRange) -> Self {
+        Self {
+            offset: value.offset,
+            size: value.size,
+            _marker: PhantomData::default(),
+        }
+    }
+}
+
+impl<T: Default + Copy + Clone> FrameContextRange<T> {
+    #[allow(unused)]
+    #[inline]
+    pub fn new(offset: u64, size: u64) -> Self {
+        Self {
+            offset,
+            size,
+            _marker: PhantomData::default(),
+        }
+    }
+}
+
+#[derive(Default, Copy, Clone)]
+pub struct Uniform;
+#[derive(Default, Copy, Clone)]
+pub struct Storage;
+
 #[allow(dead_code)]
 pub struct FrameContext {
     id: u32,
@@ -292,6 +338,69 @@ pub struct FrameContext {
     frames: [FrameData; MAX_FRAME_COUNT as usize],
     pub frame_index: usize,
     swapchain_image_index: usize,
+}
+
+// TODO: Renderer is only used to get a sampler. This is probably not optimal. Look into improvements later.
+pub(crate) trait CanResolveBindingValue<Value> {
+    type Resolved;
+    fn resolve(&self, value: Value, renderer: &Renderer) -> Result<Self::Resolved>;
+}
+
+impl CanResolveBindingValue<FrameContextRange<Uniform>> for FrameContext {
+    type Resolved = [vk::DescriptorBufferInfo; MAX_FRAME_COUNT as usize];
+    fn resolve(&self, value: FrameContextRange<Uniform>, _: &Renderer) -> Result<Self::Resolved> {
+        let camera_infos: Vec<vk::DescriptorBufferInfo> = (0..crate::MAX_FRAME_COUNT as usize)
+            .map(|i| vk::DescriptorBufferInfo {
+                buffer: self.frames()[i].allocator().uniform_allocator().buffer(),
+                offset: value.offset,
+                range: value.size,
+            })
+            .collect();
+        camera_infos
+            .try_into()
+            .map_err(|_| crate::Error::BoxToSliceError)
+    }
+}
+
+impl CanResolveBindingValue<FrameContextRange<Storage>> for FrameContext {
+    type Resolved = [vk::DescriptorBufferInfo; MAX_FRAME_COUNT as usize];
+    fn resolve(&self, value: FrameContextRange<Storage>, _: &Renderer) -> Result<Self::Resolved> {
+        let camera_infos: Vec<vk::DescriptorBufferInfo> = (0..crate::MAX_FRAME_COUNT as usize)
+            .map(|i| vk::DescriptorBufferInfo {
+                buffer: self.frames()[i].allocator().storage_allocator().buffer(),
+                offset: value.offset,
+                range: value.size,
+            })
+            .collect();
+        camera_infos
+            .try_into()
+            .map_err(|_| crate::Error::BoxToSliceError)
+    }
+}
+
+impl CanResolveBindingValue<FrameContextImageHandle> for FrameContext {
+    type Resolved = [vk::DescriptorImageInfo; MAX_FRAME_COUNT as usize];
+    fn resolve(
+        &self,
+        value: FrameContextImageHandle,
+        renderer: &Renderer,
+    ) -> Result<Self::Resolved> {
+        let mut image_infos =
+            Vec::<vk::DescriptorImageInfo>::with_capacity(crate::MAX_FRAME_COUNT as usize);
+        for i in 0..crate::MAX_FRAME_COUNT as usize {
+            let image = self.frames()[i]
+                .get_image(value.index())
+                .ok_or(crate::Error::ResourceMissing)?;
+            image_infos.push(vk::DescriptorImageInfo {
+                image_view: image.view,
+                sampler: renderer.shadowmap_sampler(),
+                image_layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+            })
+        }
+        image_infos
+            .try_into()
+            .map_err(|_| crate::Error::BoxToSliceError)
+    }
 }
 
 static NEXT_FRAME_CONTEXT_ID: AtomicU32 = AtomicU32::new(0);
@@ -477,15 +586,17 @@ impl FrameContext {
         &mut self,
         byte_count: u64,
         alignment: u64,
-    ) -> Option<vulkan::AllocationRange> {
+    ) -> Option<FrameContextRange<Uniform>> {
         self.reserve_data(byte_count, alignment, Self::select_uniform_allocator)
+            .and_then(|range| Some(range.into()))
     }
     pub fn reserve_storage_data(
         &mut self,
         byte_count: u64,
         alignment: u64,
-    ) -> Option<vulkan::AllocationRange> {
+    ) -> Option<FrameContextRange<Storage>> {
         self.reserve_data(byte_count, alignment, Self::select_storage_allocator)
+            .and_then(|range| Some(range.into()))
     }
     pub fn reserve_indirect_data(
         &mut self,

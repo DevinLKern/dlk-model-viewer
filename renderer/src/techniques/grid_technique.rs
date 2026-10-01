@@ -1,12 +1,13 @@
 use std::sync::{Arc, atomic::AtomicU32};
 
 use crate::{
-    CameraUBO, DescriptorSetLayoutBindingInfo, DescriptorSetLayoutDescription,
-    DescriptorSetLayoutResourceHandle, ENTRY_POINT_NAME_GRID_FRAG, ENTRY_POINT_NAME_GRID_VERT,
-    Error, FrameContext, GridInstanceUBO, GridMaterialUBO, GridVertVertex, MAX_FRAME_COUNT,
-    MaterialHandle, PipelineLayoutDescription, PipelineLayoutResourceHandle, RenderStorage,
-    RenderTarget, RenderTechnique, Renderer, ResourceRegistry, ResourceUploader, Resources, Result,
-    ShaderModuleDescription, ShaderModuleResourceHandle,
+    CameraUBO, CanResolveBindingValue, DescriptorSetLayoutBindingInfo,
+    DescriptorSetLayoutDescription, DescriptorSetLayoutResourceHandle, ENTRY_POINT_NAME_GRID_FRAG,
+    ENTRY_POINT_NAME_GRID_VERT, Error, FrameContext, FrameContextRange, GridInstanceBuffer,
+    GridMaterialUBO, GridVertVertex, HasBindingValue, MAX_FRAME_COUNT, MaterialHandle,
+    PipelineLayoutDescription, PipelineLayoutResourceHandle, RenderStorage, RenderTarget,
+    RenderTechnique, Renderer, ResourceRegistry, ResourceUploader, Resources, Result,
+    ShaderBinding, ShaderModuleDescription, ShaderModuleResourceHandle, Storage, Uniform,
 };
 
 use ash::vk;
@@ -374,6 +375,15 @@ impl Drop for GridTechnique {
     }
 }
 
+impl ShaderBinding<GridInstanceBuffer> for GridTechnique {
+    const BINDING: u32 = 0;
+    const SET: u32 = 0;
+}
+impl ShaderBinding<CameraUBO> for GridTechnique {
+    const BINDING: u32 = 1;
+    const SET: u32 = 0;
+}
+
 #[allow(dead_code)]
 impl GridTechnique {
     pub fn new(renderer: &mut Renderer, resources: &GridResources) -> Result<Self> {
@@ -425,37 +435,29 @@ impl GridTechnique {
             per_frame_descriptor_sets,
         })
     }
-    pub fn update_context(
-        &self,
-        ctx: &FrameContext,
-        instance_data_range: &vulkan::AllocationRange,
-        camera_data_range: &vulkan::AllocationRange,
-    ) {
-        const CAMERA_SIZE: u64 = std::mem::size_of::<CameraUBO>() as u64;
-        const INSTANCE_SIZE: u64 = std::mem::size_of::<GridInstanceUBO>() as u64;
+    pub fn update_context<T>(
+        &mut self,
+        ctx: &mut FrameContext,
+        ctx_state: &T,
+        renderer: &crate::Renderer,
+    ) -> crate::Result<()>
+    where
+        Self: ShaderBinding<CameraUBO> + ShaderBinding<GridInstanceBuffer>,
+        T: HasBindingValue<CameraUBO, Value = FrameContextRange<Uniform>>
+            + HasBindingValue<GridInstanceBuffer, Value = FrameContextRange<Storage>>,
+    {
+        let camera_data_range = <T as HasBindingValue<CameraUBO>>::get(&ctx_state);
+        let camera_infos = ctx.resolve(camera_data_range, renderer)?;
 
-        let instance_infos: Box<[vk::DescriptorBufferInfo]> = (0..MAX_FRAME_COUNT as usize)
-            .map(|i| vk::DescriptorBufferInfo {
-                buffer: ctx.frames()[i].allocator().storage_allocator().buffer(),
-                offset: instance_data_range.offset,
-                range: instance_data_range.size,
-            })
-            .collect();
-
-        let camera_infos: Box<[vk::DescriptorBufferInfo]> = (0..MAX_FRAME_COUNT as usize)
-            .map(|i| vk::DescriptorBufferInfo {
-                buffer: ctx.frames()[i].allocator().uniform_allocator().buffer(),
-                offset: camera_data_range.offset,
-                range: camera_data_range.size,
-            })
-            .collect();
+        let instance_data_range = <T as HasBindingValue<GridInstanceBuffer>>::get(&ctx_state);
+        let instance_infos = ctx.resolve(instance_data_range, renderer)?;
 
         let writes: Box<[vk::WriteDescriptorSet]> = (0..MAX_FRAME_COUNT as usize)
             .flat_map(|i| {
                 [
                     vk::WriteDescriptorSet {
                         dst_set: self.per_frame_descriptor_sets[i],
-                        dst_binding: 0,
+                        dst_binding: <Self as ShaderBinding<GridInstanceBuffer>>::BINDING,
                         descriptor_count: 1,
                         p_buffer_info: &instance_infos[i],
                         descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
@@ -463,7 +465,7 @@ impl GridTechnique {
                     },
                     vk::WriteDescriptorSet {
                         dst_set: self.per_frame_descriptor_sets[i],
-                        dst_binding: 1,
+                        dst_binding: <Self as ShaderBinding<CameraUBO>>::BINDING,
                         descriptor_count: 1,
                         p_buffer_info: &camera_infos[i],
                         descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
@@ -475,6 +477,8 @@ impl GridTechnique {
             .collect();
 
         unsafe { self.device.update_descriptor_sets(&writes, &[]) };
+
+        Ok(())
     }
 }
 

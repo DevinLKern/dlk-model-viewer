@@ -3,8 +3,9 @@ use std::sync::atomic::AtomicU32;
 use ash::vk;
 
 use crate::{
-    Error, FrameContext, RenderStorage, RenderTarget, RenderTechnique, Renderer, Result,
-    ShaderVertVertex,
+    CanResolveBindingValue, DirectionalLightUBO, Error, FrameContext, FrameContextRange,
+    HasBindingValue, InstanceBuffer, RenderStorage, RenderTarget, RenderTechnique, Renderer,
+    Result, ShaderBinding, ShaderVertVertex, Storage, Uniform,
 };
 
 const COMPILED_DEPTH_VERT_SHADER: &[u8] = include_bytes!("../../shaders/depth.vert.spv");
@@ -175,6 +176,15 @@ impl Drop for DepthTechnique {
     }
 }
 
+impl ShaderBinding<InstanceBuffer> for DepthTechnique {
+    const BINDING: u32 = 0;
+    const SET: u32 = 0;
+}
+impl ShaderBinding<DirectionalLightUBO> for DepthTechnique {
+    const BINDING: u32 = 1;
+    const SET: u32 = 0;
+}
+
 impl DepthTechnique {
     pub fn new(
         renderer: &mut crate::Renderer,
@@ -228,34 +238,30 @@ impl DepthTechnique {
             per_frame_descriptor_sets,
         })
     }
-    pub fn update_context(
+    pub fn update_context<T>(
         &mut self,
-        ctx: &crate::FrameContext,
-        light_data_range: &vulkan::AllocationRange,
-        instance_data_range: &vulkan::AllocationRange,
-    ) {
-        let light_infos: Box<[vk::DescriptorBufferInfo]> = (0..crate::MAX_FRAME_COUNT as usize)
-            .map(|i| vk::DescriptorBufferInfo {
-                buffer: ctx.frames()[i].allocator().uniform_allocator().buffer(),
-                offset: light_data_range.offset,
-                range: light_data_range.size,
-            })
-            .collect();
+        ctx: &mut FrameContext,
+        ctx_state: &T,
+        renderer: &Renderer,
+    ) -> crate::Result<()>
+    where
+        Self: ShaderBinding<DirectionalLightUBO> + ShaderBinding<InstanceBuffer>,
+        T: HasBindingValue<DirectionalLightUBO, Value = FrameContextRange<Uniform>>
+            + HasBindingValue<InstanceBuffer, Value = FrameContextRange<Storage>>,
+    {
+        let directional_lights_data_range =
+            <T as HasBindingValue<DirectionalLightUBO>>::get(ctx_state);
+        let directional_light_infos = ctx.resolve(directional_lights_data_range, renderer)?;
 
-        let instance_infos: Box<[vk::DescriptorBufferInfo]> = (0..crate::MAX_FRAME_COUNT as usize)
-            .map(|i| vk::DescriptorBufferInfo {
-                buffer: ctx.frames()[i].allocator().storage_allocator().buffer(),
-                offset: instance_data_range.offset,
-                range: instance_data_range.size,
-            })
-            .collect();
+        let instance_data_range = <T as HasBindingValue<InstanceBuffer>>::get(ctx_state);
+        let instance_infos = ctx.resolve(instance_data_range, renderer)?;
 
         let writes: Box<[vk::WriteDescriptorSet]> = (0..crate::MAX_FRAME_COUNT as usize)
             .flat_map(|i| {
                 [
                     vk::WriteDescriptorSet {
                         dst_set: self.per_frame_descriptor_sets[i],
-                        dst_binding: 0,
+                        dst_binding: <Self as ShaderBinding<InstanceBuffer>>::BINDING,
                         descriptor_count: 1,
                         p_buffer_info: &instance_infos[i],
                         descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
@@ -263,9 +269,9 @@ impl DepthTechnique {
                     },
                     vk::WriteDescriptorSet {
                         dst_set: self.per_frame_descriptor_sets[i],
-                        dst_binding: 1,
+                        dst_binding: <Self as ShaderBinding<DirectionalLightUBO>>::BINDING,
                         descriptor_count: 1,
-                        p_buffer_info: &light_infos[i],
+                        p_buffer_info: &directional_light_infos[i],
                         descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
                         ..Default::default()
                     },
@@ -275,6 +281,8 @@ impl DepthTechnique {
             .collect();
 
         unsafe { self.device.update_descriptor_sets(&writes, &[]) };
+
+        Ok(())
     }
 }
 
