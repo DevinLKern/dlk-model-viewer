@@ -17,6 +17,12 @@ impl Swapchain {
 
         let surface_format = unsafe { device.get_physical_device_surface_formats(surface) }?
             .into_iter()
+            .filter(|format| {
+                matches!(
+                    format.format,
+                    vk::Format::R8G8B8A8_SRGB | vk::Format::B8G8R8A8_SRGB
+                )
+            })
             .next()
             .ok_or(Error::NoSurfaceFomratsSupported)?;
 

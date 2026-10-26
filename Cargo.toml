@@ -17,3 +17,7 @@ debug = false
 strip = true
 opt-level = 3
 # panic = "abort"
+
+[workspace.dependencies]
+# winit = { version = "0.30.12", default-features = false, features = ["x11", "rwh_06"] }
+winit = "0.30.12"

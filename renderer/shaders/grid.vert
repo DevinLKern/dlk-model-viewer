@@ -11,7 +11,7 @@ struct GridInstanceUBO {
     uint _pad2;
 };
 
-layout(std430, set = 0, binding = 0) buffer GridInstanceBuffer {
+layout(std430, set = 0, binding = 0) readonly buffer GridInstanceBuffer {
     GridInstanceUBO arr [];
 } instances;
 

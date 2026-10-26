@@ -15,7 +15,7 @@ struct InstanceUBO {
     uint _pad2;
 };
 
-layout(std430, set = 0, binding = 0) buffer InstanceBuffer {
+layout(std430, set = 0, binding = 0) readonly buffer InstanceBuffer {
     InstanceUBO arr [];
 } instances;
 
@@ -30,7 +30,7 @@ struct PointLightUBO {
     vec3 position;
     int _pad;
 };
-layout(std430, set = 0, binding = 2) buffer PointLightsUBO {
+layout(std430, set = 0, binding = 2) readonly buffer PointLightsUBO {
     uint count;
     uint _pad0;
     uint _pad1;
@@ -38,11 +38,6 @@ layout(std430, set = 0, binding = 2) buffer PointLightsUBO {
     
     PointLightUBO arr [];
 } point_lights;
-
-// layout(std140, set = 0, binding = 3) uniform DirectionalLightUBO {
-//     mat4 view_matrix;
-//     mat4 proj_matrix;
-// } light;
 
 // added to main shader
 layout(set = 0, binding = 4) uniform sampler2D shadow_map;
@@ -70,7 +65,7 @@ struct MainMaterialUBO {
     uint _pad1;
 };
 
-layout(std140, set = 1, binding = 2) buffer MainMaterialsUBO {
+layout(std140, set = 1, binding = 2) readonly buffer MainMaterialsUBO {
     MainMaterialUBO arr [];
 } materials;
 

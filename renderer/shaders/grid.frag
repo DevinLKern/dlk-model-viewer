@@ -18,7 +18,7 @@ struct GridMaterialUBO {
     vec2 scale;
 };
 
-layout(set = 1, binding = 0) buffer GridMaterialsUBO {
+layout(set = 1, binding = 0) readonly buffer GridMaterialsUBO {
     GridMaterialUBO arr [];
 } materials;
 

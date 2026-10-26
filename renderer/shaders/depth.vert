@@ -9,7 +9,7 @@ struct InstanceUBO {
     uint _pad1;
     uint _pad2;
 };
-layout(std430, set = 0, binding = 0) buffer InstanceBuffer {
+layout(std430, set = 0, binding = 0) readonly buffer InstanceBuffer {
     InstanceUBO arr [];
 } instances;
 

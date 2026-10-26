@@ -938,11 +938,9 @@ impl Application {
                     self.orbit_camera.set_aspect_ratio(aspect_ratio);
                 }
 
+                let (window_id, (_, window)) = self.windows.remove_entry(window_id).unwrap();
+
                 let new_context = {
-                    let (_, window) = self
-                        .windows
-                        .get_mut(window_id)
-                        .ok_or(Error::WindowIdInvalid)?;
                     let mut ctx =
                         unsafe { renderer::FrameContext::new(&mut self.renderer, &window) }?;
 
@@ -950,12 +948,8 @@ impl Application {
 
                     ctx
                 };
-                // fighting the borrow checker
-                let (context, _) = self.windows.get_mut(window_id).unwrap();
 
-                // TODO: not sure I need this
-                context.destroy_images();
-                *context = new_context;
+                self.windows.insert(window_id, (new_context, window));
 
                 return Ok(false);
             }
