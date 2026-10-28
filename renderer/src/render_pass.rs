@@ -66,7 +66,7 @@ impl RenderPass {
                     Some(image_handle) => {
                         let img = storage
                             .get_image_mut(image_handle)
-                            .ok_or(Error::ResourceMissing)?;
+                            .ok_or(Error::ResourceMissing("color resolve image missing"))?;
                         let new_layout = vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL;
                         if img.layout != new_layout {
                             barriers.push(vk::ImageMemoryBarrier2 {
@@ -98,7 +98,7 @@ impl RenderPass {
                 };
             let image = storage
                 .get_image_mut(color_target.handle)
-                .ok_or(Error::ResourceMissing)?;
+                .ok_or(Error::ResourceMissing("color image missing"))?;
 
             let new_layout = vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL;
             if image.layout != new_layout {
@@ -139,7 +139,7 @@ impl RenderPass {
         if let (Some(depth_image), Some(attachment)) = (target.depth_image(), &self.depth) {
             let img = storage
                 .get_image_mut(depth_image)
-                .ok_or(Error::ResourceMissing)?;
+                .ok_or(Error::ResourceMissing("depth image missing"))?;
             let new_layout = vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
             if img.layout != new_layout {
@@ -238,7 +238,9 @@ impl RenderPass {
                 Some(img) => img,
                 None => color_target.handle,
             };
-            let image = storage.get_image_mut(image).ok_or(Error::ResourceMissing)?;
+            let image = storage
+                .get_image_mut(image)
+                .ok_or(Error::ResourceMissing("color image missing"))?;
 
             if image.layout == attachment.final_layout {
                 continue;
@@ -267,7 +269,7 @@ impl RenderPass {
         if let (Some(attachment), Some(depth_target)) = (&self.depth, target.depth_image()) {
             let img = storage
                 .get_image_mut(depth_target)
-                .ok_or(Error::ResourceMissing)?;
+                .ok_or(Error::ResourceMissing("depth image missing"))?;
             let aspect_mask = if matches!(
                 img.format,
                 vk::Format::D32_SFLOAT_S8_UINT

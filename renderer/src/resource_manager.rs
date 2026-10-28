@@ -389,10 +389,10 @@ impl PipelineResourceManager {
                 let (vert_stage, vert_input_attributes, vert_input_bindings) = {
                     let vert_shader_desc = shader_modules
                         .get_desc(*vert_shader)
-                        .ok_or(Error::ResourceMissing)?;
+                        .ok_or(Error::ResourceMissing("vertex shader module missing"))?;
                     let vert_shader = shader_modules
                         .get(*vert_shader)
-                        .ok_or(Error::ResourceMissing)?;
+                        .ok_or(Error::ResourceMissing("vertex shader module missing"))?;
 
                     let vert_stage = vk::PipelineShaderStageCreateInfo {
                         stage: vk::ShaderStageFlags::VERTEX,
@@ -409,12 +409,15 @@ impl PipelineResourceManager {
                 };
 
                 let (frag_stage, frag_input_attributes, frag_input_bindings) = {
-                    let frag_shader_desc = shader_modules
-                        .get_desc(*frag_shader)
-                        .ok_or(Error::ResourceMissing)?;
+                    let frag_shader_desc =
+                        shader_modules
+                            .get_desc(*frag_shader)
+                            .ok_or(Error::ResourceMissing(
+                                "fragment shader module description missing",
+                            ))?;
                     let frag_shader = shader_modules
                         .get(*frag_shader)
-                        .ok_or(Error::ResourceMissing)?;
+                        .ok_or(Error::ResourceMissing("fragment shader module missing"))?;
                     let frag_stage = vk::PipelineShaderStageCreateInfo {
                         stage: vk::ShaderStageFlags::FRAGMENT,
                         module: *frag_shader,
@@ -545,11 +548,11 @@ impl PipelineResourceManager {
             } => {
                 let layout = pipeline_layouts
                     .get(*pipeline_layout)
-                    .ok_or(Error::ResourceMissing)?;
+                    .ok_or(Error::ResourceMissing("pipeline layout missing"))?;
                 let (layout, bind_point) = (layout.raw, layout.desc.bind_point);
                 let module = *shader_modules
                     .get(*shader_module)
-                    .ok_or(Error::ResourceMissing)?;
+                    .ok_or(Error::ResourceMissing("shader module missing"))?;
 
                 let stage = vk::PipelineShaderStageCreateInfo {
                     stage: vk::ShaderStageFlags::COMPUTE,

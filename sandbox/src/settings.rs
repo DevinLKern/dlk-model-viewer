@@ -1,6 +1,6 @@
 use yaml_rust2::YamlLoader;
 
-use crate::{CameraInUse, Input, Result, result::Error};
+use crate::{CameraInUse, Error, Input};
 
 use std::{
     collections::HashMap,
@@ -107,7 +107,7 @@ pub struct Settings {
 }
 
 impl Settings {
-    pub fn new(settings_path: &std::path::Path, _args: &[String]) -> Result<Self> {
+    pub fn new(settings_path: &std::path::Path, _args: &[String]) -> anyhow::Result<Self> {
         use yaml_rust2::Yaml;
 
         let file = File::open(settings_path)?;
@@ -132,21 +132,21 @@ impl Settings {
             let b = if let Some(h) = binding_yaml.as_hash() {
                 h
             } else {
-                return Err(Error::ConfigFileInvalid("expected binding to be a has"));
+                return Err(Error::ConfigFileInvalid("expected binding to be a has").into());
             };
             let c = if let Some(c) = b.get(&Yaml::String(String::from("command"))) {
                 c
             } else {
-                return Err(Error::ConfigFileInvalid("command not found"));
+                return Err(Error::ConfigFileInvalid("command not found").into());
             };
             let c = if let Some(c) = c.as_str() {
                 c
             } else {
-                return Err(Error::ConfigFileInvalid("expected command to be a string"));
+                return Err(Error::ConfigFileInvalid("expected command to be a string").into());
             };
 
             if let Some(_) = binding_command_names.insert(c, i) {
-                return Err(Error::ConfigFileInvalid("command name duplicated"));
+                return Err(Error::ConfigFileInvalid("command name duplicated").into());
             }
         }
         let mut bindings = Vec::with_capacity(bindings_yaml.len());
@@ -160,7 +160,7 @@ impl Settings {
                 Some(c) => c,
                 _ => {
                     if !binding_command_names.contains_key(command) {
-                        return Err(Error::ConfigFileInvalid("invalid command value"));
+                        return Err(Error::ConfigFileInvalid("invalid command value").into());
                     } else {
                         Command::Requirement
                     }
@@ -196,7 +196,7 @@ impl Settings {
             let requirement = if let Some(r) = requirement {
                 match binding_command_names.get(r) {
                     Some(idx) => Some(*idx),
-                    _ => return Err(Error::ConfigFileInvalid("invalid requirement value")),
+                    _ => return Err(Error::ConfigFileInvalid("invalid requirement value").into()),
                 }
             } else {
                 None
@@ -207,17 +207,20 @@ impl Settings {
                 (Command::Rotate, _, _) => {
                     return Err(Error::ConfigFileInvalid(
                         "rotate command only supports mouse_moved",
-                    ));
+                    )
+                    .into());
                 }
                 (_, Input::MouseMotion, _) => {
                     return Err(Error::ConfigFileInvalid(
                         "only rotate command supports mouse_moved",
-                    ));
+                    )
+                    .into());
                 }
                 (_, _, Event::Movement) => {
                     return Err(Error::ConfigFileInvalid(
                         "only rotate command supports movement event",
-                    ));
+                    )
+                    .into());
                 }
                 _ => {}
             }
@@ -242,7 +245,7 @@ impl Settings {
             .as_f64()
             .ok_or(Error::ConfigFileInvalid("expected fov_y to be a float"))?;
         if fov_y < 30.0 || 120.0 < fov_y {
-            return Err(Error::ConfigFileInvalid("fov_y must be between 30 and 120"));
+            return Err(Error::ConfigFileInvalid("fov_y must be between 30 and 120").into());
         }
 
         let mouse_sensitivity = options
@@ -287,7 +290,7 @@ impl Settings {
         let default_camera = match default_camera {
             "fps" => CameraInUse::Fps,
             "orbit" => CameraInUse::Orbit,
-            _ => return Err(Error::ConfigFileInvalid("invalid default_camera value")),
+            _ => return Err(Error::ConfigFileInvalid("invalid default_camera value").into()),
         };
 
         let model_up = options
@@ -321,7 +324,8 @@ impl Settings {
         {
             return Err(Error::ConfigFileInvalid(
                 "model_up, model_right, and model_forward, must form a valid cordinate system",
-            ));
+            )
+            .into());
         }
 
         // The transpose is equivalent to the inverse of a matrix when the matrix is orthonormal.
@@ -355,7 +359,7 @@ impl Settings {
             "2XMSAA" => AntiAliasing::MSAA2x,
             "1XMSAA" | "NONE" => AntiAliasing::None,
             _ => {
-                return Err(Error::ConfigFileInvalid("Invalid anti-aliasing setting"));
+                return Err(Error::ConfigFileInvalid("Invalid anti-aliasing setting").into());
             }
         };
 

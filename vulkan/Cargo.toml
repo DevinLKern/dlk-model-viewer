@@ -8,3 +8,4 @@ math = { path = "../math" }
 ash = "0.38.0"
 ash-window = "0.13.0"
 winit.workspace = true
+thiserror = "2.0.21"

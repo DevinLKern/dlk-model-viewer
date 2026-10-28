@@ -12,9 +12,9 @@ resolver = "3"
 codegen-units = 1
 lto = "fat"
 # debug = true
-# strip = false
+strip = false
 debug = false
-strip = true
+# strip = true
 opt-level = 3
 # panic = "abort"
 

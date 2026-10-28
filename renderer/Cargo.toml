@@ -12,6 +12,7 @@ image = "0.25.9"
 tracing = "0.1.44"
 slotmap = "1.0"
 winit.workspace = true
+thiserror = "2.0.21"
 
 [build-dependencies]
 spirv = { path = "../spirv" }

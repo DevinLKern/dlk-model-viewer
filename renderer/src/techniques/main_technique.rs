@@ -94,8 +94,12 @@ impl MainResourcesRegistry {
 
         let diffuse_texture_index = match material_data.diffuse_texture {
             Some(handle) => {
-                let (image, _) = self.get_image(handle).ok_or(Error::ResourceMissing)?;
-                registry.get_image(*image).ok_or(Error::ResourceMissing)?;
+                let (image, _) = self
+                    .get_image(handle)
+                    .ok_or(Error::ResourceMissing("diffuse texture missing"))?;
+                registry
+                    .get_image(*image)
+                    .ok_or(Error::ResourceMissing("diffuse texture not in registry"))?;
 
                 flags |= MATERIAL_FLAG_DIFFUSE_TEXTURE_BIT;
                 image.index()
@@ -104,8 +108,12 @@ impl MainResourcesRegistry {
         };
         let ambient_texture_index = match material_data.ambient_texture {
             Some(handle) => {
-                let (image, _) = self.get_image(handle).ok_or(Error::ResourceMissing)?;
-                registry.get_image(*image).ok_or(Error::ResourceMissing)?;
+                let (image, _) = self
+                    .get_image(handle)
+                    .ok_or(Error::ResourceMissing("ambient texture missing"))?;
+                registry
+                    .get_image(*image)
+                    .ok_or(Error::ResourceMissing("ambient texture not in registry"))?;
 
                 flags |= MATERIAL_FLAG_AMBIENT_TEXTURE_BIT;
                 image.index()
@@ -114,8 +122,12 @@ impl MainResourcesRegistry {
         };
         let specular_texture_index = match material_data.specular_texture {
             Some(handle) => {
-                let (image, _) = self.get_image(handle).ok_or(Error::ResourceMissing)?;
-                registry.get_image(*image).ok_or(Error::ResourceMissing)?;
+                let (image, _) = self
+                    .get_image(handle)
+                    .ok_or(Error::ResourceMissing("specular texture missing"))?;
+                registry
+                    .get_image(*image)
+                    .ok_or(Error::ResourceMissing("specular texture not in registry"))?;
 
                 flags |= MATERIAL_FLAG_SPECULAR_TEXTURE_BIT;
                 image.index()
@@ -285,7 +297,7 @@ impl MainResourcesPromise {
             let layout = *renderer
                 .descriptor_set_layouts
                 .get(other_descriptor_set_layout_handle)
-                .ok_or(Error::ResourceMissing)?;
+                .ok_or(Error::ResourceMissing("descriptor set layout missing"))?;
             let set_layouts = [layout];
 
             let alloc_info = vk::DescriptorSetAllocateInfo {
@@ -304,7 +316,7 @@ impl MainResourcesPromise {
             for (image_handle, sampler) in &self.images {
                 let image = resources
                     .get_image(*image_handle)
-                    .ok_or(Error::ResourceMissing)?;
+                    .ok_or(Error::ResourceMissing("image missing"))?;
 
                 image_info.push(vk::DescriptorImageInfo {
                     sampler: *sampler,
@@ -529,21 +541,23 @@ impl MainResources {
             let layout = renderer
                 .pipeline_layouts
                 .get(self.pipeline_layout)
-                .ok_or(crate::Error::ResourceMissing)?
+                .ok_or(crate::Error::ResourceMissing(
+                    "pipeline layout resource missing",
+                ))?
                 .raw;
 
             let mut color_formats: Vec<vk::Format> = Vec::with_capacity(8);
             for target_image in target.color_images().iter() {
                 let img = storage
                     .get_image(target_image.handle)
-                    .ok_or(crate::Error::ResourceMissing)?;
+                    .ok_or(crate::Error::ResourceMissing("target image missing"))?;
                 color_formats.push(img.format);
             }
 
             let depth_format = if let Some(img_handle) = target.depth_image() {
                 let img = storage
                     .get_image(img_handle)
-                    .ok_or(crate::Error::ResourceMissing)?;
+                    .ok_or(crate::Error::ResourceMissing("depth format image missing"))?;
                 Some(img.format)
             } else {
                 None
@@ -567,7 +581,7 @@ impl MainResources {
             let pipeline = renderer
                 .pipelines
                 .get(pipeline_handle)
-                .ok_or(Error::ResourceMissing)?;
+                .ok_or(Error::ResourceMissing("pipeline missing"))?;
 
             (*pipeline, layout)
         };
@@ -689,7 +703,7 @@ impl MainTechnique {
         ctx: &mut FrameContext,
         ctx_state: &T,
         renderer: &Renderer,
-    ) -> crate::Result<()>
+    ) -> Result<()>
     where
         Self: ShaderBinding<CameraUBO>
             + ShaderBinding<InstanceBuffer>
@@ -780,7 +794,7 @@ impl RenderTechnique for MainTechnique {
         ctx: &FrameContext,
         resources: &Self::TechniqueResources,
         renderer: &Renderer,
-    ) -> crate::Result<()> {
+    ) -> Result<()> {
         debug_assert!(self.main_resource_id == resources.id);
 
         let current_frame_index = ctx.frame_index;
@@ -788,7 +802,7 @@ impl RenderTechnique for MainTechnique {
         let layout = renderer
             .pipeline_layouts
             .get(resources.pipeline_layout)
-            .ok_or(crate::Error::ResourceMissing)?
+            .ok_or(crate::Error::ResourceMissing("pipeline layout missing"))?
             .raw;
 
         unsafe {

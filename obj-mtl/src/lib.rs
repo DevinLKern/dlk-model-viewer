@@ -1,5 +1,3 @@
-use std::fmt::Display;
-
 mod obj_tokenizer;
 pub(crate) use obj_tokenizer::*;
 
@@ -13,25 +11,13 @@ mod mtl;
 pub use mtl::*;
 
 #[allow(unused)]
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
-    Io(std::io::Error),
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("parse error: {0}")]
     Parse(&'static str),
-}
-
-impl Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Error::Io(e) => write!(f, "Io({e})"),
-            Error::Parse(e) => write!(f, "Parse({e})"),
-        }
-    }
-}
-
-impl From<std::io::Error> for Error {
-    fn from(value: std::io::Error) -> Self {
-        Self::Io(value)
-    }
 }
 
 #[allow(unused)]

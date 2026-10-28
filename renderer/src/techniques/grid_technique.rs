@@ -154,7 +154,9 @@ impl GridResourcesPromise {
             let layout = *renderer
                 .descriptor_set_layouts
                 .get(other_descriptor_set_layout_handle)
-                .ok_or(Error::ResourceMissing)?;
+                .ok_or(Error::ResourceMissing(
+                    "other descriptor set layout missing",
+                ))?;
             let set_layouts = [layout];
 
             let alloc_info = vk::DescriptorSetAllocateInfo {
@@ -298,21 +300,21 @@ impl GridResources {
             let layout = renderer
                 .pipeline_layouts
                 .get(self.pipeline_layout_handle)
-                .ok_or(crate::Error::ResourceMissing)?
+                .ok_or(crate::Error::ResourceMissing("pipeline layout missing"))?
                 .raw;
 
             let mut color_formats: Vec<vk::Format> = Vec::with_capacity(8);
             for target_image in target.color_images().iter() {
                 let img = storage
                     .get_image(target_image.handle)
-                    .ok_or(crate::Error::ResourceMissing)?;
+                    .ok_or(crate::Error::ResourceMissing("target image missing"))?;
                 color_formats.push(img.format);
             }
 
             let depth_format = if let Some(img_handle) = target.depth_image() {
                 let img = storage
                     .get_image(img_handle)
-                    .ok_or(crate::Error::ResourceMissing)?;
+                    .ok_or(crate::Error::ResourceMissing("depth format image missing"))?;
                 Some(img.format)
             } else {
                 None
@@ -336,7 +338,7 @@ impl GridResources {
             let pipeline = renderer
                 .pipelines
                 .get(pipeline_handle)
-                .ok_or(Error::ResourceMissing)?;
+                .ok_or(Error::ResourceMissing("pipeline missing"))?;
 
             (*pipeline, layout)
         };
@@ -498,7 +500,7 @@ impl RenderTechnique for GridTechnique {
         let layout = renderer
             .pipeline_layouts
             .get(resources.pipeline_layout_handle)
-            .ok_or(crate::Error::ResourceMissing)?
+            .ok_or(crate::Error::ResourceMissing("pipeline layout missing"))?
             .raw;
 
         unsafe {

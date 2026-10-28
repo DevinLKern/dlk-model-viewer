@@ -116,14 +116,14 @@ impl DepthResources {
             for target_image in target.color_images().iter() {
                 let img = storage
                     .get_image(target_image.handle)
-                    .ok_or(Error::ResourceMissing)?;
+                    .ok_or(Error::ResourceMissing("target image missing"))?;
                 color_formats.push(img.format);
             }
 
             let depth_format = if let Some(img_handle) = target.depth_image() {
                 let img = storage
                     .get_image(img_handle)
-                    .ok_or(Error::ResourceMissing)?;
+                    .ok_or(Error::ResourceMissing("depth format image missing"))?;
                 Some(img.format)
             } else {
                 None
@@ -147,7 +147,7 @@ impl DepthResources {
             let pipeline = renderer
                 .pipelines
                 .get(pipeline_handle)
-                .ok_or(Error::ResourceMissing)?;
+                .ok_or(Error::ResourceMissing("pipeline missing"))?;
 
             *pipeline
         };
@@ -302,7 +302,7 @@ impl RenderTechnique for DepthTechnique {
         let layout = renderer
             .pipeline_layouts
             .get(resources.pipeline_layout_handle)
-            .ok_or(crate::Error::ResourceMissing)?
+            .ok_or(crate::Error::ResourceMissing("pipeline layout missing"))?
             .raw;
 
         unsafe {

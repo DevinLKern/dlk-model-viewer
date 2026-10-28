@@ -1,40 +1,27 @@
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
-    VulkanError(vulkan::result::Error),
-    ExpectedUniformBufferView,
-    ResourceMissing,
-    BufferCapacityExceeded,
-    BoxToSliceError,
-    IoError(std::io::Error),
-}
+    #[error("Vulkan operation failed")]
+    VulkanError(#[from] vulkan::result::Error),
 
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::VulkanError(e) => write!(f, "VulkanError({})", e),
-            Self::BufferCapacityExceeded => write!(f, "BufferCapacityExceeded"),
-            Self::ResourceMissing => write!(f, "ResourceMissing"),
-            _ => write!(f, "Error type not added yet"),
-        }
-    }
+    #[error("expected a uniform buffer view")]
+    ExpectedUniformBufferView,
+
+    #[error("resource missing: {0}")]
+    ResourceMissing(&'static str),
+
+    #[error("buffer capacity exceeded")]
+    BufferCapacityExceeded,
+
+    #[error("failed to convert boxed value to slice")]
+    BoxToSliceError,
+
+    #[error("I/O operation failed")]
+    IoError(#[from] std::io::Error),
 }
 
 impl From<ash::vk::Result> for Error {
-    #[inline]
     fn from(value: ash::vk::Result) -> Self {
         Self::VulkanError(value.into())
-    }
-}
-
-impl From<vulkan::Error> for Error {
-    fn from(value: vulkan::result::Error) -> Self {
-        Self::VulkanError(value)
-    }
-}
-
-impl From<std::io::Error> for Error {
-    fn from(value: std::io::Error) -> Self {
-        Self::IoError(value)
     }
 }
 

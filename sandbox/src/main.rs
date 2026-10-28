@@ -17,7 +17,7 @@ use winit::{event_loop::EventLoop, raw_window_handle::HasDisplayHandle};
 
 const DEFAULT_SETTINGS: &str = include_str!("../../files/default_settings.yaml");
 
-fn main() -> Result<()> {
+fn main() -> anyhow::Result<()> {
     {
         const LEVEL: tracing::Level = if cfg!(debug_assertions) {
             tracing::Level::DEBUG
@@ -38,7 +38,7 @@ fn main() -> Result<()> {
         std::env::current_exe()?.file_name().unwrap().display()
     );
 
-    let print_usage = || -> Result<()> {
+    let print_usage = || -> anyhow::Result<()> {
         println!(
             "Invalid program arguments. Usage: {} <options> <model>",
             name.clone()

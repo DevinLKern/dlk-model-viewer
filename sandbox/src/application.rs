@@ -2,7 +2,7 @@ use crate::{
     camera::{self, controllers::CameraController, *},
     constants::*,
     input_manager::{Input, InputEvent, InputManager},
-    settings, {Command, Error, Event, Result, Settings},
+    settings, {Command, Error, Event, Settings},
 };
 use obj_mtl::{Vertex, VertexNormal};
 use renderer::{
@@ -13,10 +13,12 @@ use renderer::{
     RenderTechnique, Renderer, ShaderVertVertex, TypedSubMeshHandle,
 };
 
+use anyhow::{Context, Result};
+
 use ash::vk;
 
 use std::str::FromStr;
-use std::u8;
+
 use std::{
     collections::HashMap,
     collections::HashSet,
@@ -199,7 +201,8 @@ impl Application {
     ) -> Result<Self> {
         // load materials
         let file_path = model_path.with_extension("mtl");
-        let mut obj_scene = obj_mtl::ShapeIterator::new(model_path)?;
+        let mut obj_scene =
+            obj_mtl::ShapeIterator::new(model_path).context("could not create shape iterator")?;
 
         let mtl_materials = match obj_mtl::load_materials(&file_path) {
             Ok(materials) => materials,
@@ -220,7 +223,8 @@ impl Application {
                 settings::AntiAliasing::MSAA2x => vk::SampleCountFlags::TYPE_2,
                 _ => vk::SampleCountFlags::TYPE_1,
             };
-            let renderer = renderer::Renderer::new(debug_enabled, display_handle, target_samples)?;
+            let renderer = renderer::Renderer::new(debug_enabled, display_handle, target_samples)
+                .context("could not create renderer")?;
             if renderer.samples() != target_samples {
                 println!("INFO: Selected antialiasing setting not supported.");
             }
@@ -292,12 +296,17 @@ impl Application {
                         // PathBuf::from_str is infallible
                         let target = PathBuf::from_str(&texture.file_path).unwrap();
 
-                        Application::search_for(&base, &target).ok_or(Error::CouldNotFindFile)?
+                        Application::search_for(&base, &target)
+                            .with_context(|| format!("could not find {}", target.display()))?
                     };
 
-                    let image = image::open(&path).inspect_err(|e| tracing::error!("{e}"))?;
-                    let image =
-                        renderer.create_and_populate_image(image, vk::SampleCountFlags::TYPE_1)?;
+                    let image = image::open(&path)
+                        .with_context(|| format!("could not open image: {}", path.display()))?;
+                    let image = renderer
+                        .create_and_populate_image(image, vk::SampleCountFlags::TYPE_1)
+                        .with_context(|| {
+                            format!("could not create and populate image: {}", path.display())
+                        })?;
                     let image_handle = resources.add_image(image);
                     let image_handle =
                         main_resources.add_image(image_handle, renderer.repeat_sampler());
@@ -766,8 +775,8 @@ impl Application {
             .ok_or_else(|| {
                 self.reset_allocations(ctx);
                 renderer::Error::BufferCapacityExceeded
-            })?
-            .into();
+            })
+            .context("could not reserve bytes in uniform buffers for camera data")?;
         self.frame_state.instance_data_range = ctx
             .reserve_storage_data(
                 renderer::MAX_INSTANCE_DATA_COUNT * INSTANCE_SIZE,
@@ -776,8 +785,8 @@ impl Application {
             .ok_or_else(|| {
                 self.reset_allocations(ctx);
                 renderer::Error::BufferCapacityExceeded
-            })?
-            .into();
+            })
+            .context("could not reserve byte in storage buffers for instance data")?;
         self.frame_state.grid_instance_data_range = ctx
             .reserve_storage_data(
                 renderer::MAX_INSTANCE_DATA_COUNT * GRID_INSTANCE_SIZE,
@@ -786,8 +795,8 @@ impl Application {
             .ok_or_else(|| {
                 self.reset_allocations(ctx);
                 renderer::Error::BufferCapacityExceeded
-            })?
-            .into();
+            })
+            .context("could not reserve bytes in storage buffer for grid instance data")?;
 
         let temp_alloc = ctx
             .reserve_storage_data(
@@ -797,7 +806,8 @@ impl Application {
             .ok_or_else(|| {
                 self.reset_allocations(ctx);
                 renderer::Error::BufferCapacityExceeded
-            })?;
+            })
+            .context("could not reserve bytes in storage buffers for point light data")?;
 
         self.frame_state.point_light_count_ubo_data_range =
             FrameContextRange::new(temp_alloc.offset, POINT_LIGHT_COUNT_SIZE);
@@ -811,14 +821,15 @@ impl Application {
             .ok_or_else(|| {
                 self.reset_allocations(ctx);
                 renderer::Error::BufferCapacityExceeded
-            })?;
+            })
+            .context("could not reserve bytes for global light ubo")?;
         self.frame_state.directional_light_data_range = ctx
             .reserve_uniform_data(DIRECTIONAL_LIGHT_SIZE, uniform_offset)
             .ok_or_else(|| {
                 self.reset_allocations(ctx);
                 renderer::Error::BufferCapacityExceeded
-            })?
-            .into();
+            })
+            .context("could not reserve bytes for directional light ubo")?;
         const SIZE_INDIRECT: u64 = std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u64;
         const DRAW_COUNT: u64 = MAX_INDIRECT_COMMAND_DATA_COUNT / 3;
         self.frame_state.indirect_command_range = ctx
@@ -826,14 +837,16 @@ impl Application {
             .ok_or_else(|| {
                 self.reset_allocations(ctx);
                 renderer::Error::BufferCapacityExceeded
-            })?;
+            })
+            .context("could not reserve bytes for indirect commands")?;
 
         self.frame_state.grid_indirect_command_range = ctx
             .reserve_indirect_data(DRAW_COUNT * SIZE_INDIRECT, SIZE_INDIRECT)
             .ok_or_else(|| {
                 self.reset_allocations(ctx);
                 renderer::Error::BufferCapacityExceeded
-            })?;
+            })
+            .context("could not reserve bytes for grid commands")?;
 
         self.frame_state.depth_image_handle = {
             let image_create_info = vulkan::ImageCreateInfo {
@@ -850,26 +863,30 @@ impl Application {
                 samples: vk::SampleCountFlags::TYPE_1,
             };
             ctx.create_image(&image_create_info, &mut self.renderer)
-        }
-        .inspect_err(|_| {
-            self.reset_allocations(ctx);
-        })?;
+                .inspect_err(|_| {
+                    self.reset_allocations(ctx);
+                })
+                .context("could not create depth image")
+        }?;
 
         self.main_technique
             .update_context(ctx, &self.frame_state, &self.renderer)
             .inspect_err(|_| {
                 self.reset_allocations(ctx);
-            })?;
+            })
+            .context("could not update context for main technique")?;
         self.grid_technique
             .update_context(ctx, &self.frame_state, &self.renderer)
             .inspect_err(|_| {
                 self.reset_allocations(ctx);
-            })?;
+            })
+            .context("could not update context for grid technique")?;
         self.depth_technique
             .update_context(ctx, &self.frame_state, &self.renderer)
             .inspect_err(|_| {
                 self.reset_allocations(ctx);
-            })?;
+            })
+            .context("could not update context for depth technique")?;
 
         Ok(())
     }
@@ -889,9 +906,11 @@ impl Application {
 
         let window_id = window.id();
         let context = {
-            let mut ctx = unsafe { renderer::FrameContext::new(&mut self.renderer, &window) }?;
+            let mut ctx = unsafe { renderer::FrameContext::new(&mut self.renderer, &window) }
+                .context("could not create frame context")?;
 
-            self.update_context(&mut ctx)?;
+            self.update_context(&mut ctx)
+                .context("could not update frame context")?;
 
             ctx
         };
@@ -942,9 +961,11 @@ impl Application {
 
                 let new_context = {
                     let mut ctx =
-                        unsafe { renderer::FrameContext::new(&mut self.renderer, &window) }?;
+                        unsafe { renderer::FrameContext::new(&mut self.renderer, &window) }
+                        .context("could not create frame context")?;
 
-                    self.update_context(&mut ctx)?;
+                    self.update_context(&mut ctx)
+                        .context("could not update context")?;
 
                     ctx
                 };
@@ -954,7 +975,8 @@ impl Application {
                 return Ok(false);
             }
             WindowEvent::RedrawRequested => {
-                self.execute_commands(window_id)?;
+                self.execute_commands(window_id)
+                    .context("could not execute commands")?;
 
                 let (context, window) = self
                     .windows
@@ -1022,27 +1044,24 @@ impl Application {
                 unsafe {
                     context
                         .get_current_frame_mut()
-                        .allocator_mut()
                         .storage_allocator_mut()
                         .upload_data(self.frame_state.instance_data_range.into(), &instance_data)
-                        .map_err(|e| renderer::Error::VulkanError(e))?;
+                        .context("could not upload instance data")?;
 
                     context
                         .get_current_frame_mut()
-                        .allocator_mut()
                         .indirect_allocator_mut()
                         .upload_data(
                             self.frame_state.indirect_command_range.into(),
                             &indirect_command_data,
                         )
-                        .map_err(|e| renderer::Error::VulkanError(e))?;
+                        .context("could not upload indirect command data")?;
 
                     context
                         .get_current_frame_mut()
-                        .allocator_mut()
                         .uniform_allocator_mut()
                         .upload_data(self.frame_state.camera_data_range.into(), &[camera_data])
-                        .map_err(|e| renderer::Error::VulkanError(e))?;
+                        .context("could not upload camera data")?;
                 }
 
                 let swapchain_extent = context.swapchain_extent();
@@ -1051,7 +1070,6 @@ impl Application {
 
                 context
                     .get_current_frame_mut()
-                    .allocator_mut()
                     .indirect_allocator_mut()
                     .reset();
 
@@ -1089,7 +1107,9 @@ impl Application {
                     (pass, target)
                 };
 
-                depth_pass.begin_rendering(&depth_target, context, &mut self.renderer, cmd)?;
+                depth_pass
+                    .begin_rendering(&depth_target, context, &mut self.renderer, cmd)
+                    .context("could not begin depth_pass")?;
 
                 {
                     unsafe {
@@ -1119,31 +1139,35 @@ impl Application {
                     unsafe {
                         context
                             .get_current_frame_mut()
-                            .allocator_mut()
                             .uniform_allocator_mut()
                             .upload_data(
                                 self.frame_state.directional_light_data_range.into(),
                                 &light_data,
                             )
-                            .map_err(|e| renderer::Error::VulkanError(e))?;
+                            .context("could not upload directional light data")?;
                     }
                 }
 
                 self.mesh_data.bind(cmd, &self.renderer);
 
                 self.depth_resources
-                    .bind(cmd, &mut self.renderer, &depth_target, context);
+                    .bind(cmd, &mut self.renderer, &depth_target, context)
+                    .context("could not bind depth resources")?;
 
-                self.renderer.render(
-                    context,
-                    &self.depth_technique,
-                    &self.depth_resources,
-                    self.frame_state.indirect_command_range.offset,
-                    indirect_command_data.len() as u32,
-                    indirect_command_stride as u32,
-                )?;
+                self.renderer
+                    .render(
+                        context,
+                        &self.depth_technique,
+                        &self.depth_resources,
+                        self.frame_state.indirect_command_range.offset,
+                        indirect_command_data.len() as u32,
+                        indirect_command_stride as u32,
+                    )
+                    .context("could not render depth image")?;
 
-                depth_pass.end_rendering(&depth_target, context, &mut self.renderer, cmd)?;
+                depth_pass
+                    .end_rendering(&depth_target, context, &mut self.renderer, cmd)
+                    .context("could not end depth pass")?;
 
                 let main_pass = renderer::RenderPass {
                     color: Box::new([renderer::Attachment {
@@ -1167,7 +1191,9 @@ impl Application {
                     }),
                 };
 
-                main_pass.begin_rendering(&swapchain_target, context, &mut self.renderer, cmd)?;
+                main_pass
+                    .begin_rendering(&swapchain_target, context, &mut self.renderer, cmd)
+                    .context("could not begin main pass")?;
 
                 {
                     unsafe {
@@ -1188,14 +1214,13 @@ impl Application {
                     unsafe {
                         context
                             .get_current_frame_mut()
-                            .allocator_mut()
                             .storage_allocator_mut()
                             .upload_data(
                                 self.frame_state.point_light_data_range.into(),
                                 &point_light_data,
                             )
-                            .map_err(|e| renderer::Error::VulkanError(e))
-                    }?;
+                            .context("could not upload point light data")?
+                    };
                     let point_light_count_data = [renderer::PointLightsUBO {
                         count: point_light_data.len() as u32,
                         _pad0: 0,
@@ -1206,29 +1231,31 @@ impl Application {
                     unsafe {
                         context
                             .get_current_frame_mut()
-                            .allocator_mut()
                             .storage_allocator_mut()
                             .upload_data(
                                 self.frame_state.point_light_count_ubo_data_range.into(),
                                 &point_light_count_data,
                             )
-                            .map_err(|e| renderer::Error::VulkanError(e))
-                    }?;
+                            .context("could not upload point light count data")?
+                    };
                 }
 
                 self.main_resources
-                    .bind(cmd, &mut self.renderer, &swapchain_target, context)?;
+                    .bind(cmd, &mut self.renderer, &swapchain_target, context)
+                    .context("could not bind main resources")?;
 
                 self.mesh_data.bind(cmd, &self.renderer);
 
-                self.renderer.render(
-                    context,
-                    &self.main_technique,
-                    &self.main_resources,
-                    self.frame_state.indirect_command_range.offset,
-                    indirect_command_data.len() as u32,
-                    indirect_command_stride as u32,
-                )?;
+                self.renderer
+                    .render(
+                        context,
+                        &self.main_technique,
+                        &self.main_resources,
+                        self.frame_state.indirect_command_range.offset,
+                        indirect_command_data.len() as u32,
+                        indirect_command_stride as u32,
+                    )
+                    .context("could not render model")?;
 
                 // grid
                 indirect_command_data.clear();
@@ -1256,44 +1283,47 @@ impl Application {
                 unsafe {
                     context
                         .get_current_frame_mut()
-                        .allocator_mut()
                         .storage_allocator_mut()
                         .upload_data(
                             self.frame_state.grid_instance_data_range.into(),
                             &grid_instance_data,
                         )
-                        .map_err(|e| renderer::Error::VulkanError(e))?;
+                        .context("could not upload grid instance data")?;
 
                     context
                         .get_current_frame_mut()
-                        .allocator_mut()
                         .indirect_allocator_mut()
                         .upload_data(
                             self.frame_state.grid_indirect_command_range,
                             &indirect_command_data,
                         )
-                        .map_err(|e| renderer::Error::VulkanError(e))?;
+                        .context("could not upload grid indirect data")?;
                 }
 
                 self.grid_technique
-                    .bind(cmd, context, &self.grid_resources, &self.renderer)?;
+                    .bind(cmd, context, &self.grid_resources, &self.renderer)
+                    .context("Could not bind grid technique")?;
 
                 self.grid_resources
                     .bind(cmd, &mut self.renderer, &swapchain_target, context);
 
                 self.grid_mesh_data.bind(cmd, &self.renderer);
 
-                self.renderer.render(
-                    context,
-                    &self.grid_technique,
-                    &self.grid_resources,
-                    self.frame_state.grid_indirect_command_range.offset,
-                    indirect_command_data.len() as u32,
-                    indirect_command_stride as u32,
-                )?;
+                self.renderer
+                    .render(
+                        context,
+                        &self.grid_technique,
+                        &self.grid_resources,
+                        self.frame_state.grid_indirect_command_range.offset,
+                        indirect_command_data.len() as u32,
+                        indirect_command_stride as u32,
+                    )
+                    .context("could not render grid")?;
 
-                main_pass.end_rendering(&swapchain_target, context, &mut self.renderer, cmd)?;
-                context.submit()?;
+                main_pass
+                    .end_rendering(&swapchain_target, context, &mut self.renderer, cmd)
+                    .context("could not end main pass")?;
+                context.submit().context("submit failed")?;
 
                 window.request_redraw();
 
@@ -1322,8 +1352,8 @@ impl ApplicationHandler for Application {
         self.input_manager.start_frame();
     }
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if let Err(e) = self.resumed_inner(event_loop) {
-            tracing::error!("{}", e);
+        if let Err(err) = self.resumed_inner(event_loop) {
+            tracing::error!("{err:?}");
             self.exiting = true;
             event_loop.exit();
         }
@@ -1352,8 +1382,8 @@ impl ApplicationHandler for Application {
                     self.exiting(event_loop);
                 }
             }
-            Err(e) => {
-                tracing::error!("{}", e);
+            Err(err) => {
+                tracing::error!("{err:?}");
                 self.exiting(event_loop);
             }
         }

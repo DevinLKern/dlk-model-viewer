@@ -19,7 +19,6 @@ pub use techniques::*;
 
 use ash::vk;
 use std::rc::Rc;
-use std::u64;
 use vulkan::SharedDeviceRef;
 
 unsafe extern "system" fn vulkan_debug_callback(
@@ -208,7 +207,7 @@ impl Renderer {
         unsafe {
             self.device.cmd_draw_indexed_indirect(
                 cmd,
-                frame.allocator().indirect_allocator().buffer(),
+                frame.indirect_allocator().buffer(),
                 indirect_offset,
                 draw_count,
                 stride,
@@ -239,7 +238,7 @@ impl Renderer {
     pub fn piplines_mut(&mut self) -> &mut PipelineResourceManager {
         &mut self.pipelines
     }
-    fn create_transfer_buffer(&self, size: u64) -> result::Result<vulkan::Buffer> {
+    fn create_transfer_buffer(&self, size: u64) -> Result<vulkan::Buffer> {
         let create_info = vulkan::BufferCreateInfo {
             size: size,
             usage: vk::BufferUsageFlags::TRANSFER_SRC,

@@ -6,72 +6,15 @@ use std::{
 use ash::vk;
 use vulkan::device::SharedDeviceRef;
 
-use crate::{CameraUBO, InstanceUBO, RenderStorage, RenderTarget, Renderer, Result, TargetImage};
+use crate::{
+    CameraUBO, GlobalLightUBO, GridInstanceUBO, InstanceUBO, PointLightUBO, PointLightsUBO,
+    RenderStorage, RenderTarget, Renderer, Result, TargetImage,
+};
 
 pub const MAX_FRAME_COUNT: u64 = 3;
 pub const MAX_CAMERA_DATA_COUNT: u64 = 32;
 pub const MAX_INSTANCE_DATA_COUNT: u64 = 128;
 pub const MAX_INDIRECT_COMMAND_DATA_COUNT: u64 = MAX_INSTANCE_DATA_COUNT * 4;
-
-#[allow(dead_code)]
-pub struct FrameAllocator {
-    uniform_allocator: vulkan::StackAllocator,
-    storage_allocator: vulkan::StackAllocator,
-    indirect_allocator: vulkan::StackAllocator,
-}
-
-#[allow(dead_code)]
-impl FrameAllocator {
-    pub fn new(
-        device: SharedDeviceRef,
-        uniform_buffer_capcity: u64,
-        storage_buffer_capacity: u64,
-        indirect_buffer_capacity: u64,
-    ) -> Result<Self> {
-        let uniform_allocator =
-            vulkan::StackAllocator::new_uniform(device.clone(), uniform_buffer_capcity)?;
-        let storage_allocator =
-            vulkan::StackAllocator::new_storage(device.clone(), storage_buffer_capacity)?;
-        let indirect_allocator =
-            vulkan::StackAllocator::new_indirect(device, indirect_buffer_capacity)?;
-
-        Ok(Self {
-            uniform_allocator,
-            storage_allocator,
-            indirect_allocator,
-        })
-    }
-    #[inline]
-    pub fn uniform_allocator(&self) -> &vulkan::StackAllocator {
-        &self.uniform_allocator
-    }
-    #[inline]
-    pub fn uniform_allocator_mut(&mut self) -> &mut vulkan::StackAllocator {
-        &mut self.uniform_allocator
-    }
-    #[inline]
-    pub fn storage_allocator(&self) -> &vulkan::StackAllocator {
-        &self.storage_allocator
-    }
-    #[inline]
-    pub fn storage_allocator_mut(&mut self) -> &mut vulkan::StackAllocator {
-        &mut self.storage_allocator
-    }
-    #[inline]
-    pub fn indirect_allocator(&self) -> &vulkan::StackAllocator {
-        &self.indirect_allocator
-    }
-    #[inline]
-    pub fn indirect_allocator_mut(&mut self) -> &mut vulkan::StackAllocator {
-        &mut self.indirect_allocator
-    }
-    #[inline]
-    pub fn reset(&mut self) {
-        self.indirect_allocator.reset();
-        self.uniform_allocator.reset();
-        self.storage_allocator.reset();
-    }
-}
 
 pub struct FrameData {
     device: SharedDeviceRef,
@@ -80,7 +23,9 @@ pub struct FrameData {
     render_complete: vk::Semaphore,
     command_pool: vk::CommandPool,
     command_buffer: vk::CommandBuffer,
-    allocator: FrameAllocator,
+    uniform_allocator: vulkan::StackAllocator,
+    storage_allocator: vulkan::StackAllocator,
+    indirect_allocator: vulkan::StackAllocator,
     images: Vec<vulkan::Image>,
     // TODO: static resources should get aded to this struct
     #[allow(dyn_drop)]
@@ -96,27 +41,43 @@ impl std::fmt::Debug for FrameData {
 #[allow(unused)]
 impl FrameData {
     pub fn new(device: SharedDeviceRef) -> Result<Self> {
+        let properties = unsafe { device.get_physical_device_properties() };
+
         let camera_data_element_size = {
             let size = std::mem::size_of::<CameraUBO>() as u64;
-            let properties = unsafe { device.get_physical_device_properties() };
 
             size.next_multiple_of(properties.limits.min_uniform_buffer_offset_alignment)
         };
 
-        let instance_data_element_size = {
-            let size = std::mem::size_of::<InstanceUBO>() as u64;
-            let properties = unsafe { device.get_physical_device_properties() };
+        let instance_data_size = {
+            let size = std::mem::size_of::<InstanceUBO>() as u64 * MAX_INSTANCE_DATA_COUNT;
+            size.next_multiple_of(properties.limits.min_storage_buffer_offset_alignment)
+        };
 
+        let grid_instance_data_size = {
+            let size = std::mem::size_of::<GridInstanceUBO>() as u64 * MAX_INSTANCE_DATA_COUNT;
             size.next_multiple_of(properties.limits.min_storage_buffer_offset_alignment)
         };
 
         let indirect_command_data_element_size =
             std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u64;
 
-        let allocator = FrameAllocator::new(
+        let uniform_allocator = vulkan::StackAllocator::new_uniform(
             device.clone(),
             camera_data_element_size * MAX_CAMERA_DATA_COUNT,
-            (instance_data_element_size * MAX_INSTANCE_DATA_COUNT) + 200000,
+        )?;
+        let storage_allocator = vulkan::StackAllocator::new_storage(
+            device.clone(),
+            instance_data_size
+                + grid_instance_data_size
+                // TODO: This should refer to MAX_POINT_LIGHT_COUNT in application.rs not 32
+                + (32 + std::mem::size_of::<PointLightUBO>() as u64)
+                + std::mem::size_of::<PointLightsUBO>() as u64
+                + std::mem::size_of::<GlobalLightUBO>() as u64
+                + 1024,
+        )?;
+        let indirect_allocator = vulkan::StackAllocator::new_indirect(
+            device.clone(),
             indirect_command_data_element_size * MAX_INDIRECT_COMMAND_DATA_COUNT,
         )?;
 
@@ -190,18 +151,36 @@ impl FrameData {
             render_complete,
             command_pool,
             command_buffer,
-            allocator,
+            uniform_allocator,
+            storage_allocator,
+            indirect_allocator,
             images: Vec::with_capacity(16),
             persistent_resources_in_use: Vec::with_capacity(16),
         })
     }
     #[inline]
-    pub fn allocator(&self) -> &FrameAllocator {
-        &self.allocator
+    pub fn uniform_allocator(&self) -> &vulkan::StackAllocator {
+        &self.uniform_allocator
     }
     #[inline]
-    pub fn allocator_mut(&mut self) -> &mut FrameAllocator {
-        &mut self.allocator
+    pub fn uniform_allocator_mut(&mut self) -> &mut vulkan::StackAllocator {
+        &mut self.uniform_allocator
+    }
+    #[inline]
+    pub fn storage_allocator(&self) -> &vulkan::StackAllocator {
+        &self.storage_allocator
+    }
+    #[inline]
+    pub fn storage_allocator_mut(&mut self) -> &mut vulkan::StackAllocator {
+        &mut self.storage_allocator
+    }
+    #[inline]
+    pub fn indirect_allocator(&self) -> &vulkan::StackAllocator {
+        &self.indirect_allocator
+    }
+    #[inline]
+    pub fn indirect_allocator_mut(&mut self) -> &mut vulkan::StackAllocator {
+        &mut self.indirect_allocator
     }
     #[inline]
     pub fn command_buffer(&self) -> vk::CommandBuffer {
@@ -209,7 +188,9 @@ impl FrameData {
     }
     #[inline]
     pub fn reset(&mut self, renderer: &mut Renderer) {
-        self.allocator.reset();
+        self.indirect_allocator.reset();
+        self.uniform_allocator.reset();
+        self.storage_allocator.reset();
         self.images.clear();
         self.persistent_resources_in_use.clear();
     }
@@ -351,7 +332,7 @@ impl CanResolveBindingValue<FrameContextRange<Uniform>> for FrameContext {
     fn resolve(&self, value: FrameContextRange<Uniform>, _: &Renderer) -> Result<Self::Resolved> {
         let camera_infos: Vec<vk::DescriptorBufferInfo> = (0..crate::MAX_FRAME_COUNT as usize)
             .map(|i| vk::DescriptorBufferInfo {
-                buffer: self.frames()[i].allocator().uniform_allocator().buffer(),
+                buffer: self.frames()[i].uniform_allocator().buffer(),
                 offset: value.offset,
                 range: value.size,
             })
@@ -367,7 +348,7 @@ impl CanResolveBindingValue<FrameContextRange<Storage>> for FrameContext {
     fn resolve(&self, value: FrameContextRange<Storage>, _: &Renderer) -> Result<Self::Resolved> {
         let camera_infos: Vec<vk::DescriptorBufferInfo> = (0..crate::MAX_FRAME_COUNT as usize)
             .map(|i| vk::DescriptorBufferInfo {
-                buffer: self.frames()[i].allocator().storage_allocator().buffer(),
+                buffer: self.frames()[i].storage_allocator().buffer(),
                 offset: value.offset,
                 range: value.size,
             })
@@ -386,11 +367,11 @@ impl CanResolveBindingValue<FrameContextImageHandle> for FrameContext {
         renderer: &Renderer,
     ) -> Result<Self::Resolved> {
         let mut image_infos =
-            Vec::<vk::DescriptorImageInfo>::with_capacity(crate::MAX_FRAME_COUNT as usize);
-        for i in 0..crate::MAX_FRAME_COUNT as usize {
+            Vec::<vk::DescriptorImageInfo>::with_capacity(MAX_FRAME_COUNT as usize);
+        for i in 0..MAX_FRAME_COUNT as usize {
             let image = self.frames()[i]
                 .get_image(value.index())
-                .ok_or(crate::Error::ResourceMissing)?;
+                .ok_or(crate::Error::ResourceMissing("image missing"))?;
             image_infos.push(vk::DescriptorImageInfo {
                 image_view: image.view,
                 sampler: renderer.shadowmap_sampler(),
@@ -529,14 +510,14 @@ impl FrameContext {
         &mut self,
         byte_count: u64,
         alignment: u64,
-        select_allocator: fn(&mut FrameAllocator) -> &mut vulkan::StackAllocator,
+        select_allocator: fn(&mut FrameData) -> &mut vulkan::StackAllocator,
     ) -> Option<vulkan::AllocationRange> {
         let mut last_range = None;
 
         for allocator in self
             .frames
             .iter_mut()
-            .map(|f| select_allocator(f.allocator_mut()))
+            .map(|frame_data| select_allocator(frame_data))
         {
             let cur_range = if let Some(range) = allocator.can_reserve(byte_count, alignment) {
                 range
@@ -557,7 +538,7 @@ impl FrameContext {
         for allocator in self
             .frames
             .iter_mut()
-            .map(|f| select_allocator(f.allocator_mut()))
+            .map(|frame_data| select_allocator(frame_data))
         {
             let cur_range = allocator.reserve_data(byte_count, alignment).unwrap();
 
@@ -571,16 +552,16 @@ impl FrameContext {
         return Some(last_range);
     }
     #[inline]
-    fn select_uniform_allocator(allocator: &mut FrameAllocator) -> &mut vulkan::StackAllocator {
-        &mut allocator.uniform_allocator
+    fn select_uniform_allocator(frame_data: &mut FrameData) -> &mut vulkan::StackAllocator {
+        &mut frame_data.uniform_allocator
     }
     #[inline]
-    fn select_storage_allocator(allocator: &mut FrameAllocator) -> &mut vulkan::StackAllocator {
-        &mut allocator.storage_allocator
+    fn select_storage_allocator(frame_data: &mut FrameData) -> &mut vulkan::StackAllocator {
+        &mut frame_data.storage_allocator
     }
     #[inline]
-    fn select_indirect_allocator(allocator: &mut FrameAllocator) -> &mut vulkan::StackAllocator {
-        &mut allocator.indirect_allocator
+    fn select_indirect_allocator(frame_data: &mut FrameData) -> &mut vulkan::StackAllocator {
+        &mut frame_data.indirect_allocator
     }
     pub fn reserve_uniform_data(
         &mut self,
