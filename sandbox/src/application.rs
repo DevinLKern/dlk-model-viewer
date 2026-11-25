@@ -9,8 +9,8 @@ use renderer::{
     DepthResources, DepthTechnique, FrameContextImageHandle, FrameContextRange, GridInstanceUBO,
     GridMaterialData, GridMaterialUBO, GridResources, GridResourcesRegistry, GridTechnique,
     GridVertVertex, InstanceUBO, MAX_INDIRECT_COMMAND_DATA_COUNT, MainMaterialUBO, MainResources,
-    MainTechnique, MaterialHandle, MeshData, MeshNodeRegistry, RenderStorage, RenderTarget,
-    RenderTechnique, Renderer, ShaderVertVertex, TypedSubMeshHandle,
+    MainTechnique, MaterialHandle, MeshData, MeshNodeRegistry, RenderStorage, RenderTechnique,
+    Renderer, ShaderVertVertex, TypedSubMeshHandle,
 };
 
 use anyhow::{Context, Result};
@@ -499,7 +499,7 @@ impl Application {
             grid_draws.push((material, submesh));
         }
         let scene_vertices = scene_vertices.register(&mut scene_resources);
-        let main_resources = main_resources.register(&mut scene_resources);
+        let main_resources = main_resources.register(&mut scene_resources)?;
         let grid_mesh_data = grid_mesh_data.register(&mut scene_resources);
         let grid_resources = grid_resources.register(&mut scene_resources);
 
@@ -848,19 +848,19 @@ impl Application {
             })
             .context("could not reserve bytes for grid commands")?;
 
+        // image layout is vk::ImageLayout::UNDEFINED
         self.frame_state.depth_image_handle = {
-            let image_create_info = vulkan::ImageCreateInfo {
-                memory_property_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
-                image_type: vk::ImageType::TYPE_2D,
+            let image_create_info = renderer::ImageCreateInfo {
                 format: vk::Format::D32_SFLOAT,
+                image_type: vk::ImageType::TYPE_2D,
                 width: 1024 * 4,
                 height: 1024 * 4,
                 depth: 1,
-                usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
-                mip_level_count: 1,
-                layer_count: 1,
-                level_count: 1,
+                mip_levels: 1,
+                array_layers: 1,
                 samples: vk::SampleCountFlags::TYPE_1,
+                usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+                memory_property_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
             };
             ctx.create_image(&image_create_info, &mut self.renderer)
                 .inspect_err(|_| {
@@ -876,13 +876,13 @@ impl Application {
             })
             .context("could not update context for main technique")?;
         self.grid_technique
-            .update_context(ctx, &self.frame_state, &self.renderer)
+            .update_context(ctx, &self.frame_state)
             .inspect_err(|_| {
                 self.reset_allocations(ctx);
             })
             .context("could not update context for grid technique")?;
         self.depth_technique
-            .update_context(ctx, &self.frame_state, &self.renderer)
+            .update_context(ctx, &self.frame_state)
             .inspect_err(|_| {
                 self.reset_allocations(ctx);
             })
@@ -962,7 +962,7 @@ impl Application {
                 let new_context = {
                     let mut ctx =
                         unsafe { renderer::FrameContext::new(&mut self.renderer, &window) }
-                        .context("could not create frame context")?;
+                            .context("could not create frame context")?;
 
                     self.update_context(&mut ctx)
                         .context("could not update context")?;
@@ -1076,10 +1076,6 @@ impl Application {
                 let swapchain_target = context.get_swapchain_render_target()?;
 
                 let (depth_pass, depth_target) = {
-                    let depth_image = context
-                        .get_image(self.frame_state.depth_image_handle)
-                        .unwrap();
-                    let (width, height) = (depth_image.width, depth_image.height);
                     let pass = renderer::RenderPass {
                         color: Box::new([]),
                         depth: Some(renderer::Attachment {
@@ -1091,13 +1087,73 @@ impl Application {
                                     stencil: 0,
                                 },
                             },
-                            final_layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
                         }),
                     };
 
-                    let target = renderer::FrameContextRenderTarget {
+                    let depth_image = context
+                        .get_image_mut(self.frame_state.depth_image_handle)
+                        .unwrap();
+
+                    // NOTE: This is temporary until I build a render graph or some better system.
+                    {
+                        const NEW_DEPTH_IMAGE_LAYOUT: vk::ImageLayout =
+                            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                        if depth_image.layout() != NEW_DEPTH_IMAGE_LAYOUT {
+                            let barriers = [vk::ImageMemoryBarrier2 {
+                                src_stage_mask: vk::PipelineStageFlags2::TOP_OF_PIPE,
+                                src_access_mask: vk::AccessFlags2::empty(),
+                                dst_stage_mask: vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS,
+                                dst_access_mask: vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                                old_layout: depth_image.layout(),
+                                new_layout: NEW_DEPTH_IMAGE_LAYOUT,
+                                image: depth_image.handle(),
+                                subresource_range: vk::ImageSubresourceRange {
+                                    aspect_mask: vk::ImageAspectFlags::DEPTH,
+                                    base_mip_level: 0,
+                                    level_count: depth_image.mip_levels(),
+                                    base_array_layer: 0,
+                                    layer_count: depth_image.array_layers(),
+                                },
+                                ..Default::default()
+                            }];
+
+                            let info = vk::DependencyInfo {
+                                p_image_memory_barriers: barriers.as_ptr(),
+                                image_memory_barrier_count: barriers.len() as u32,
+                                ..Default::default()
+                            };
+
+                            unsafe {
+                                self.renderer.device.cmd_pipeline_barrier2(cmd, &info);
+                            }
+
+                            *depth_image.layout_mut() = NEW_DEPTH_IMAGE_LAYOUT;
+                        }
+                    }
+
+                    let (width, height) = (depth_image.get_width(0), depth_image.get_height(0));
+
+                    let target = renderer::RenderTarget {
                         color_images: Box::new([]),
-                        depth_image: Some(self.frame_state.depth_image_handle),
+                        depth_image: Some(renderer::ResolvableTargetImage {
+                            main: {
+                                let image_view_desc = depth_image.get_default_image_view_desc(
+                                    vk::ImageAspectFlags::DEPTH,
+                                    vk::ImageViewType::TYPE_2D,
+                                );
+                                let image_view = depth_image
+                                    .get_image_view(image_view_desc)
+                                    .context("could not get image view")?;
+                                renderer::TargetImage {
+                                    image: depth_image.handle(),
+                                    image_layout: depth_image.layout(),
+                                    image_format: depth_image.format(),
+                                    image_view,
+                                    image_view_desc,
+                                }
+                            },
+                            resolve: None,
+                        }),
                         render_area: vk::Rect2D {
                             offset: vk::Offset2D { x: 0, y: 0 },
                             extent: vk::Extent2D { width, height },
@@ -1107,9 +1163,7 @@ impl Application {
                     (pass, target)
                 };
 
-                depth_pass
-                    .begin_rendering(&depth_target, context, &mut self.renderer, cmd)
-                    .context("could not begin depth_pass")?;
+                depth_pass.begin_rendering(&depth_target, &mut self.renderer, cmd);
 
                 {
                     unsafe {
@@ -1151,7 +1205,7 @@ impl Application {
                 self.mesh_data.bind(cmd, &self.renderer);
 
                 self.depth_resources
-                    .bind(cmd, &mut self.renderer, &depth_target, context)
+                    .bind(cmd, &mut self.renderer, &depth_target)
                     .context("could not bind depth resources")?;
 
                 self.renderer
@@ -1165,10 +1219,47 @@ impl Application {
                     )
                     .context("could not render depth image")?;
 
-                depth_pass
-                    .end_rendering(&depth_target, context, &mut self.renderer, cmd)
-                    .context("could not end depth pass")?;
+                depth_pass.end_rendering(&mut self.renderer, cmd);
 
+                // NOTE: This is temporary until I build a render graph or some better system.
+                {
+                    let depth_image = context
+                        .get_image_mut(self.frame_state.depth_image_handle)
+                        .unwrap();
+                    const NEW_DEPTH_IMAGE_LAYOUT: vk::ImageLayout =
+                        vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+                    if depth_image.layout() != NEW_DEPTH_IMAGE_LAYOUT {
+                        let barriers = [vk::ImageMemoryBarrier2 {
+                            src_stage_mask: vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS,
+                            src_access_mask: vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                            dst_stage_mask: vk::PipelineStageFlags2::FRAGMENT_SHADER,
+                            dst_access_mask: vk::AccessFlags2::SHADER_READ,
+                            old_layout: depth_image.layout(),
+                            new_layout: NEW_DEPTH_IMAGE_LAYOUT,
+                            image: depth_image.handle(),
+                            subresource_range: vk::ImageSubresourceRange {
+                                aspect_mask: vk::ImageAspectFlags::DEPTH,
+                                base_mip_level: 0,
+                                level_count: depth_image.mip_levels(),
+                                base_array_layer: 0,
+                                layer_count: depth_image.array_layers(),
+                            },
+                            ..Default::default()
+                        }];
+
+                        let info = vk::DependencyInfo {
+                            p_image_memory_barriers: barriers.as_ptr(),
+                            image_memory_barrier_count: barriers.len() as u32,
+                            ..Default::default()
+                        };
+
+                        unsafe {
+                            self.renderer.device.cmd_pipeline_barrier2(cmd, &info);
+                        }
+
+                        *depth_image.layout_mut() = NEW_DEPTH_IMAGE_LAYOUT;
+                    }
+                }
                 let main_pass = renderer::RenderPass {
                     color: Box::new([renderer::Attachment {
                         load_op: vk::AttachmentLoadOp::CLEAR,
@@ -1176,7 +1267,6 @@ impl Application {
                         clear_val: vk::ClearValue {
                             color: vk::ClearColorValue { float32: [0.0; 4] },
                         },
-                        final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
                     }]),
                     depth: Some(renderer::Attachment {
                         load_op: vk::AttachmentLoadOp::CLEAR,
@@ -1187,13 +1277,10 @@ impl Application {
                                 stencil: 0,
                             },
                         },
-                        final_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                     }),
                 };
 
-                main_pass
-                    .begin_rendering(&swapchain_target, context, &mut self.renderer, cmd)
-                    .context("could not begin main pass")?;
+                main_pass.begin_rendering(&swapchain_target, &mut self.renderer, cmd);
 
                 {
                     unsafe {
@@ -1241,7 +1328,7 @@ impl Application {
                 }
 
                 self.main_resources
-                    .bind(cmd, &mut self.renderer, &swapchain_target, context)
+                    .bind(cmd, &mut self.renderer, &swapchain_target)
                     .context("could not bind main resources")?;
 
                 self.mesh_data.bind(cmd, &self.renderer);
@@ -1305,7 +1392,8 @@ impl Application {
                     .context("Could not bind grid technique")?;
 
                 self.grid_resources
-                    .bind(cmd, &mut self.renderer, &swapchain_target, context);
+                    .bind(cmd, &mut self.renderer, &swapchain_target)
+                    .context("could not bind grid resources")?;
 
                 self.grid_mesh_data.bind(cmd, &self.renderer);
 
@@ -1320,9 +1408,7 @@ impl Application {
                     )
                     .context("could not render grid")?;
 
-                main_pass
-                    .end_rendering(&swapchain_target, context, &mut self.renderer, cmd)
-                    .context("could not end main pass")?;
+                main_pass.end_rendering(&mut self.renderer, cmd);
                 context.submit().context("submit failed")?;
 
                 window.request_redraw();

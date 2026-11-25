@@ -1,4 +1,5 @@
 mod frame_context;
+mod image;
 mod render_pass;
 mod resource_manager;
 mod resources;
@@ -10,6 +11,7 @@ include!(concat!(env!("OUT_DIR"), "/shader_paths.rs"));
 include!(concat!(env!("OUT_DIR"), "/entry_points.rs"));
 
 pub use frame_context::*;
+pub use image::*;
 pub use render_pass::*;
 pub(crate) use resource_manager::*;
 pub use resources::*;
@@ -356,10 +358,10 @@ impl Renderer {
     }
     pub fn create_and_populate_image(
         &mut self,
-        image_data: image::DynamicImage,
+        image_data: ::image::DynamicImage,
         samples: vk::SampleCountFlags,
-    ) -> result::Result<vulkan::Image> {
-        use image::GenericImageView;
+    ) -> result::Result<Image> {
+        use ::image::GenericImageView;
 
         let (width, height) = image_data.dimensions();
         let rgba = image_data.into_rgba8();
@@ -367,21 +369,20 @@ impl Renderer {
         let size = data.len() as u64;
 
         let mut image = {
-            let image_create_info = vulkan::ImageCreateInfo {
-                memory_property_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
-                mip_level_count: 1,
-                image_type: vk::ImageType::TYPE_2D,
+            let image_create_info = ImageCreateInfo {
                 format: vk::Format::R8G8B8A8_SRGB,
                 width,
                 height,
                 depth: 1,
-                usage: vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
-                layer_count: 1,
-                level_count: 1,
+                mip_levels: 1,
+                array_layers: 1,
                 samples,
+                usage: vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
+                image_type: vk::ImageType::TYPE_2D,
+                memory_property_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
             };
 
-            vulkan::Image::new(self.device.clone(), &image_create_info)?
+            Image::new_owned(self.device.clone(), &image_create_info)?
         };
 
         let transfer_buffer = self.create_transfer_buffer(size)?;
@@ -408,7 +409,7 @@ impl Renderer {
         {
             // to I need the stage mask here?
             let barriers = [vk::ImageMemoryBarrier2 {
-                image: image.handle,
+                image: image.handle(),
                 old_layout: vk::ImageLayout::UNDEFINED,
                 new_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
@@ -447,16 +448,16 @@ impl Renderer {
                 },
                 image_offset: vk::Offset3D { x: 0, y: 0, z: 0 },
                 image_extent: vk::Extent3D {
-                    width: image.width,
-                    height: image.height,
-                    depth: image.depth,
+                    width: image.get_width(0),
+                    height: image.get_height(0),
+                    depth: image.get_depth(0),
                 },
                 ..Default::default()
             }];
 
             let copy_buffer_to_image_info = vk::CopyBufferToImageInfo2 {
                 src_buffer: transfer_buffer.handle,
-                dst_image: image.handle,
+                dst_image: image.handle(),
                 dst_image_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 region_count: regions.len() as u32,
                 p_regions: regions.as_ptr(),
@@ -469,7 +470,7 @@ impl Renderer {
             };
 
             let barriers = [vk::ImageMemoryBarrier2 {
-                image: image.handle,
+                image: image.handle(),
                 old_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                 src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
@@ -511,7 +512,7 @@ impl Renderer {
                 .queue_submit(self.device.queue, &submit_info, vk::Fence::null())?;
             self.device.device_wait_idle()?;
             self.device.free_command_buffers(self.command_pool, &[cmd]);
-            image.layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
+            *image.layout_mut() = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
         }
 
         Ok(image)

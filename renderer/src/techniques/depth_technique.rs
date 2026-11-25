@@ -3,9 +3,9 @@ use std::sync::atomic::AtomicU32;
 use ash::vk;
 
 use crate::{
-    CanResolveBindingValue, DirectionalLightUBO, Error, FrameContext, FrameContextRange,
-    HasBindingValue, InstanceBuffer, RenderStorage, RenderTarget, RenderTechnique, Renderer,
-    Result, ShaderBinding, ShaderVertVertex, Storage, Uniform,
+    DirectionalLightUBO, Error, FrameContext, FrameContextRange, HasBindingValue, InstanceBuffer,
+    MAX_FRAME_COUNT, RenderTarget, RenderTechnique, Renderer, Result, ShaderBinding,
+    ShaderVertVertex, Storage, Uniform,
 };
 
 const COMPILED_DEPTH_VERT_SHADER: &[u8] = include_bytes!("../../shaders/depth.vert.spv");
@@ -99,32 +99,20 @@ impl DepthResources {
         })
     }
     #[inline]
-    pub fn bind<Target, Storage, Handle>(
+    pub fn bind(
         &self,
         cmd: vk::CommandBuffer,
         renderer: &mut Renderer,
-        target: &Target,
-        storage: &Storage,
-    ) -> Result<()>
-    where
-        Handle: Copy + Clone,
-        Target: RenderTarget<ImageHandle = Handle>,
-        Storage: RenderStorage<ImageHandle = Handle>,
-    {
+        target: &RenderTarget,
+    ) -> Result<()> {
         let pipeline = {
             let mut color_formats: Vec<vk::Format> = Vec::with_capacity(8);
             for target_image in target.color_images().iter() {
-                let img = storage
-                    .get_image(target_image.handle)
-                    .ok_or(Error::ResourceMissing("target image missing"))?;
-                color_formats.push(img.format);
+                color_formats.push(target_image.main.image_format);
             }
 
-            let depth_format = if let Some(img_handle) = target.depth_image() {
-                let img = storage
-                    .get_image(img_handle)
-                    .ok_or(Error::ResourceMissing("depth format image missing"))?;
-                Some(img.format)
+            let depth_format = if let Some(target_image) = target.depth_image() {
+                Some(target_image.main.image_format)
             } else {
                 None
             };
@@ -238,23 +226,34 @@ impl DepthTechnique {
             per_frame_descriptor_sets,
         })
     }
-    pub fn update_context<T>(
-        &mut self,
-        ctx: &mut FrameContext,
-        ctx_state: &T,
-        renderer: &Renderer,
-    ) -> crate::Result<()>
+    pub fn update_context<T>(&mut self, ctx: &mut FrameContext, ctx_state: &T) -> crate::Result<()>
     where
         Self: ShaderBinding<DirectionalLightUBO> + ShaderBinding<InstanceBuffer>,
         T: HasBindingValue<DirectionalLightUBO, Value = FrameContextRange<Uniform>>
             + HasBindingValue<InstanceBuffer, Value = FrameContextRange<Storage>>,
     {
-        let directional_lights_data_range =
-            <T as HasBindingValue<DirectionalLightUBO>>::get(ctx_state);
-        let directional_light_infos = ctx.resolve(directional_lights_data_range, renderer)?;
+        type DescriptorBufferInfos = [vk::DescriptorBufferInfo; MAX_FRAME_COUNT as usize];
 
-        let instance_data_range = <T as HasBindingValue<InstanceBuffer>>::get(ctx_state);
-        let instance_infos = ctx.resolve(instance_data_range, renderer)?;
+        let directional_light_infos: DescriptorBufferInfos = {
+            let directional_light_data_range =
+                <T as HasBindingValue<DirectionalLightUBO>>::get(ctx_state);
+
+            std::array::from_fn(|i| vk::DescriptorBufferInfo {
+                buffer: ctx.frames()[i].uniform_allocator().buffer(),
+                offset: directional_light_data_range.offset,
+                range: directional_light_data_range.size,
+            })
+        };
+
+        let instance_infos: DescriptorBufferInfos = {
+            let instance_data_range = <T as HasBindingValue<InstanceBuffer>>::get(ctx_state);
+
+            std::array::from_fn(|i| vk::DescriptorBufferInfo {
+                buffer: ctx.frames()[i].storage_allocator().buffer(),
+                offset: instance_data_range.offset,
+                range: instance_data_range.size,
+            })
+        };
 
         let writes: Box<[vk::WriteDescriptorSet]> = (0..crate::MAX_FRAME_COUNT as usize)
             .flat_map(|i| {

@@ -7,8 +7,9 @@ use ash::vk;
 use vulkan::device::SharedDeviceRef;
 
 use crate::{
-    CameraUBO, GlobalLightUBO, GridInstanceUBO, InstanceUBO, PointLightUBO, PointLightsUBO,
-    RenderStorage, RenderTarget, Renderer, Result, TargetImage,
+    CameraUBO, GlobalLightUBO, GridInstanceUBO, Image, ImageCreateInfo, InstanceUBO, PointLightUBO,
+    PointLightsUBO, RenderStorage, RenderTarget, Renderer, ResolvableTargetImage, Result,
+    TargetImage,
 };
 
 pub const MAX_FRAME_COUNT: u64 = 3;
@@ -26,7 +27,7 @@ pub struct FrameData {
     uniform_allocator: vulkan::StackAllocator,
     storage_allocator: vulkan::StackAllocator,
     indirect_allocator: vulkan::StackAllocator,
-    images: Vec<vulkan::Image>,
+    images: Vec<Image>,
     // TODO: static resources should get aded to this struct
     #[allow(dyn_drop)]
     persistent_resources_in_use: Vec<std::sync::Arc<dyn Drop>>,
@@ -195,18 +196,18 @@ impl FrameData {
         self.persistent_resources_in_use.clear();
     }
     #[inline]
-    pub fn create_image(&mut self, create_info: vulkan::ImageCreateInfo) -> Result<u32> {
-        let image = vulkan::Image::new(self.device.clone(), &create_info)?;
+    pub fn create_image(&mut self, create_info: &ImageCreateInfo) -> Result<u32> {
+        let image = Image::new_owned(self.device.clone(), &create_info)?;
         let index = self.images.len() as u32;
         self.images.push(image);
         Ok(index)
     }
     #[inline]
-    pub(crate) fn get_image(&self, index: u32) -> Option<&vulkan::Image> {
+    pub(crate) fn get_image(&self, index: u32) -> Option<&Image> {
         self.images.get(index as usize)
     }
     #[inline]
-    pub fn get_image_mut(&mut self, index: u32) -> Option<&mut vulkan::Image> {
+    pub fn get_image_mut(&mut self, index: u32) -> Option<&mut Image> {
         self.images.get_mut(index as usize)
     }
     #[inline]
@@ -260,9 +261,9 @@ impl Default for FrameContextImageHandle {
 }
 
 struct SwapchainImage {
-    swapchain: vulkan::Image,
-    depth: vulkan::Image,
-    resolve: vulkan::Image,
+    swapchain: Image,
+    depth: Image,
+    resolve: Image,
 }
 
 #[derive(Default, Copy, Clone)]
@@ -321,68 +322,7 @@ pub struct FrameContext {
     swapchain_image_index: usize,
 }
 
-// TODO: Renderer is only used to get a sampler. This is probably not optimal. Look into improvements later.
-pub(crate) trait CanResolveBindingValue<Value> {
-    type Resolved;
-    fn resolve(&self, value: Value, renderer: &Renderer) -> Result<Self::Resolved>;
-}
-
-impl CanResolveBindingValue<FrameContextRange<Uniform>> for FrameContext {
-    type Resolved = [vk::DescriptorBufferInfo; MAX_FRAME_COUNT as usize];
-    fn resolve(&self, value: FrameContextRange<Uniform>, _: &Renderer) -> Result<Self::Resolved> {
-        let camera_infos: Vec<vk::DescriptorBufferInfo> = (0..crate::MAX_FRAME_COUNT as usize)
-            .map(|i| vk::DescriptorBufferInfo {
-                buffer: self.frames()[i].uniform_allocator().buffer(),
-                offset: value.offset,
-                range: value.size,
-            })
-            .collect();
-        camera_infos
-            .try_into()
-            .map_err(|_| crate::Error::BoxToSliceError)
-    }
-}
-
-impl CanResolveBindingValue<FrameContextRange<Storage>> for FrameContext {
-    type Resolved = [vk::DescriptorBufferInfo; MAX_FRAME_COUNT as usize];
-    fn resolve(&self, value: FrameContextRange<Storage>, _: &Renderer) -> Result<Self::Resolved> {
-        let camera_infos: Vec<vk::DescriptorBufferInfo> = (0..crate::MAX_FRAME_COUNT as usize)
-            .map(|i| vk::DescriptorBufferInfo {
-                buffer: self.frames()[i].storage_allocator().buffer(),
-                offset: value.offset,
-                range: value.size,
-            })
-            .collect();
-        camera_infos
-            .try_into()
-            .map_err(|_| crate::Error::BoxToSliceError)
-    }
-}
-
-impl CanResolveBindingValue<FrameContextImageHandle> for FrameContext {
-    type Resolved = [vk::DescriptorImageInfo; MAX_FRAME_COUNT as usize];
-    fn resolve(
-        &self,
-        value: FrameContextImageHandle,
-        renderer: &Renderer,
-    ) -> Result<Self::Resolved> {
-        let mut image_infos =
-            Vec::<vk::DescriptorImageInfo>::with_capacity(MAX_FRAME_COUNT as usize);
-        for i in 0..MAX_FRAME_COUNT as usize {
-            let image = self.frames()[i]
-                .get_image(value.index())
-                .ok_or(crate::Error::ResourceMissing("image missing"))?;
-            image_infos.push(vk::DescriptorImageInfo {
-                image_view: image.view,
-                sampler: renderer.shadowmap_sampler(),
-                image_layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-            })
-        }
-        image_infos
-            .try_into()
-            .map_err(|_| crate::Error::BoxToSliceError)
-    }
-}
+// CanResolveBindingValue was here
 
 static NEXT_FRAME_CONTEXT_ID: AtomicU32 = AtomicU32::new(0);
 impl FrameContext {
@@ -407,16 +347,13 @@ impl FrameContext {
             let raw_images = unsafe { swapchain.get_images() }?;
             let mut images = Vec::with_capacity(raw_images.len());
             for vk_img in raw_images {
-                let image = unsafe {
-                    vulkan::Image::new_swapchain_image(
-                        renderer.device.clone(),
-                        vk_img,
-                        swapchain.format(),
-                        vk::ImageLayout::UNDEFINED,
-                        swapchain.extent().width,
-                        swapchain.extent().height,
-                    )
-                }?;
+                let image = Image::new_swapchain(
+                    renderer.device.clone(),
+                    vk_img,
+                    swapchain.extent().width,
+                    swapchain.extent().height,
+                    swapchain.format(),
+                )?;
                 images.push(image);
             }
             images
@@ -429,22 +366,21 @@ impl FrameContext {
         let depth_images = {
             let mut images = Vec::with_capacity(swapchain_images.len());
 
-            let depth_image_create_info = vulkan::image::ImageCreateInfo {
+            let depth_image_create_info = ImageCreateInfo {
                 memory_property_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
-                mip_level_count: 1,
+                mip_levels: 1,
                 image_type: vk::ImageType::TYPE_2D,
                 format: depth_format,
                 width: swapchain.extent().width,
                 height: swapchain.extent().height,
                 depth: 1,
                 usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
-                layer_count: 1,
-                level_count: 1,
+                array_layers: 1,
                 samples: renderer.samples(),
             };
 
             for _ in 0..swapchain_images.len() {
-                let image = vulkan::Image::new(renderer.device.clone(), &depth_image_create_info)?;
+                let image = Image::new_owned(renderer.device.clone(), &depth_image_create_info)?;
                 images.push(image);
             }
 
@@ -461,23 +397,22 @@ impl FrameContext {
             let usage_flags =
                 vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT;
             let color_image_create_info = {
-                vulkan::image::ImageCreateInfo {
+                ImageCreateInfo {
                     memory_property_flags: fallback_memory_flags,
-                    mip_level_count: 1,
+                    mip_levels: 1,
                     image_type: vk::ImageType::TYPE_2D,
                     format: swapchain.format(),
                     width: swapchain.extent().width,
                     height: swapchain.extent().height,
                     depth: 1,
                     usage: usage_flags,
-                    layer_count: 1,
-                    level_count: 1,
+                    array_layers: 1,
                     samples: renderer.samples(),
                 }
             };
 
             for _ in 0..swapchain_images.len() {
-                let image = vulkan::Image::new(renderer.device.clone(), &color_image_create_info)?;
+                let image = Image::new_owned(renderer.device.clone(), &color_image_create_info)?;
                 images.push(image);
             }
 
@@ -593,7 +528,7 @@ impl FrameContext {
     }
     pub fn create_image(
         &mut self,
-        image_create_info: &vulkan::ImageCreateInfo,
+        image_create_info: &ImageCreateInfo,
         renderer: &mut Renderer,
     ) -> Result<FrameContextImageHandle> {
         let mut index = None;
@@ -607,7 +542,7 @@ impl FrameContext {
                     break;
                 }
             }
-            let image = match vulkan::Image::new(renderer.device.clone(), image_create_info) {
+            let image = match Image::new_owned(renderer.device.clone(), image_create_info) {
                 Ok(img) => img,
                 Err(e) => {
                     error = Some(e);
@@ -620,9 +555,9 @@ impl FrameContext {
         }
 
         if cleanup != 0 && error.is_none() {
-            unreachable!("This should never panic");
+            unreachable!();
         } else if let Some(e) = error {
-            return Err(crate::Error::VulkanError(e));
+            return Err(e);
         }
 
         Ok(FrameContextImageHandle::Frame {
@@ -651,13 +586,17 @@ impl FrameContext {
     pub(crate) fn frames(&self) -> &[FrameData] {
         &self.frames
     }
+    #[inline]
+    pub(crate) fn frames_mut(&mut self) -> &mut [FrameData] {
+        &mut self.frames
+    }
     pub fn get_current_frame_mut(&mut self) -> &mut FrameData {
         &mut self.frames[self.frame_index]
     }
     pub fn swapchain_extent(&self) -> vk::Extent2D {
         *self.swapchain.extent()
     }
-    pub fn get_swapchain_render_target(&mut self) -> Result<FrameContextRenderTarget> {
+    pub fn get_swapchain_render_target(&mut self) -> Result<RenderTarget> {
         let (swapchain_image_index, swapchain_image, depth_image, color_image) = {
             let frame = self.get_current_frame();
 
@@ -670,68 +609,233 @@ impl FrameContext {
                 self.swapchain
                     .acquire_next_image(frame.image_acquired, vk::Fence::null())?
             };
+            let image_index = image_index as usize;
 
             unsafe { self.device.reset_fences(&[frame.command_buffer_executed])? };
 
+            // Begin command buffer
+            let begin_info = vk::CommandBufferBeginInfo {
+                flags: ash::vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
+                ..Default::default()
+            };
+
+            unsafe {
+                let frame = self.get_current_frame();
+
+                // Reset the command buffer (requires pool/reset capability)
+                self.device.reset_command_buffer(
+                    frame.command_buffer,
+                    vk::CommandBufferResetFlags::empty(),
+                )?;
+
+                self.device
+                    .begin_command_buffer(frame.command_buffer, &begin_info)?;
+            }
+
+            let cmd = frame.command_buffer();
+            let image = &mut self.swapchain_images[image_index];
+
+            {
+                let mut barriers = [vk::ImageMemoryBarrier2::default(); 3];
+                let mut barrier_count = 0;
+
+                const NEW_SWAPCHAIN_IMAGE_LAYOUT: vk::ImageLayout =
+                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL;
+                if image.swapchain.layout() != NEW_SWAPCHAIN_IMAGE_LAYOUT {
+                    barriers[barrier_count as usize] = vk::ImageMemoryBarrier2 {
+                        src_stage_mask: vk::PipelineStageFlags2::TOP_OF_PIPE,
+                        src_access_mask: vk::AccessFlags2::empty(),
+                        dst_stage_mask: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                        dst_access_mask: vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+                        old_layout: image.swapchain.layout(),
+                        new_layout: NEW_SWAPCHAIN_IMAGE_LAYOUT,
+                        image: image.swapchain.handle(),
+                        subresource_range: vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: 0,
+                            level_count: image.swapchain.mip_levels(),
+                            base_array_layer: 0,
+                            layer_count: image.swapchain.array_layers(),
+                        },
+                        ..Default::default()
+                    };
+                    *image.swapchain.layout_mut() = NEW_SWAPCHAIN_IMAGE_LAYOUT;
+                    barrier_count += 1;
+                }
+
+                const NEW_COLOR_IMAGE_LAYOUT: vk::ImageLayout =
+                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL;
+                if image.resolve.layout() != NEW_COLOR_IMAGE_LAYOUT {
+                    barriers[barrier_count as usize] = vk::ImageMemoryBarrier2 {
+                        src_stage_mask: vk::PipelineStageFlags2::TOP_OF_PIPE,
+                        src_access_mask: vk::AccessFlags2::empty(),
+                        dst_stage_mask: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                        dst_access_mask: vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+                        old_layout: image.resolve.layout(),
+                        new_layout: NEW_COLOR_IMAGE_LAYOUT,
+                        image: image.resolve.handle(),
+                        subresource_range: vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: 0,
+                            level_count: image.resolve.mip_levels(),
+                            base_array_layer: 0,
+                            layer_count: image.resolve.array_layers(),
+                        },
+                        ..Default::default()
+                    };
+                    *image.resolve.layout_mut() = NEW_COLOR_IMAGE_LAYOUT;
+                    barrier_count += 1;
+                }
+
+                const NEW_DEPTH_IMAGE_LAYOUT: vk::ImageLayout =
+                    vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                if image.depth.layout() != NEW_DEPTH_IMAGE_LAYOUT {
+                    let aspect_mask = if matches!(
+                        image.depth.format(),
+                        vk::Format::D32_SFLOAT_S8_UINT
+                            | vk::Format::D24_UNORM_S8_UINT
+                            | vk::Format::D16_UNORM_S8_UINT
+                    ) {
+                        vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+                    } else {
+                        vk::ImageAspectFlags::DEPTH
+                    };
+                    barriers[barrier_count as usize] = vk::ImageMemoryBarrier2 {
+                        src_stage_mask: vk::PipelineStageFlags2::TOP_OF_PIPE,
+                        src_access_mask: vk::AccessFlags2::empty(),
+                        dst_stage_mask: vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS,
+                        dst_access_mask: vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                        old_layout: image.depth.layout(),
+                        new_layout: NEW_DEPTH_IMAGE_LAYOUT,
+                        image: image.depth.handle(),
+                        subresource_range: vk::ImageSubresourceRange {
+                            aspect_mask,
+                            base_mip_level: 0,
+                            level_count: image.depth.mip_levels(),
+                            base_array_layer: 0,
+                            layer_count: image.depth.array_layers(),
+                        },
+                        ..Default::default()
+                    };
+                    *image.depth.layout_mut() = NEW_DEPTH_IMAGE_LAYOUT;
+                    barrier_count += 1;
+                }
+
+                let info = vk::DependencyInfo {
+                    image_memory_barrier_count: barrier_count,
+                    p_image_memory_barriers: barriers.as_ptr(),
+                    ..Default::default()
+                };
+
+                unsafe {
+                    self.device.cmd_pipeline_barrier2(cmd, &info);
+                }
+            }
+
             (
-                image_index as usize,
-                FrameContextImageHandle::Swapchain {
-                    id: self.id,
-                    index: image_index,
-                },
-                FrameContextImageHandle::Depth {
-                    id: self.id,
-                    index: image_index,
-                },
-                FrameContextImageHandle::Resolve {
-                    id: self.id,
-                    index: image_index,
-                },
+                image_index,
+                &mut image.swapchain,
+                &mut image.depth,
+                &mut image.resolve,
             )
         };
 
         self.swapchain_image_index = swapchain_image_index;
 
-        // Begin command buffer
-        let begin_info = vk::CommandBufferBeginInfo {
-            flags: ash::vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
-            ..Default::default()
+        // TODO: Depth should have associated resolve image
+        let depth_image = {
+            let image_view_desc = depth_image.get_default_image_view_desc(
+                vk::ImageAspectFlags::DEPTH,
+                vk::ImageViewType::TYPE_2D,
+            );
+            Some(ResolvableTargetImage {
+                main: TargetImage::new(depth_image, image_view_desc)?,
+                resolve: None,
+            })
         };
 
-        unsafe {
-            let frame = self.get_current_frame();
+        let (main, resolve) = if self.straight_to_resolve {
+            let swapchain_image_view_desc = swapchain_image.get_default_image_view_desc(
+                vk::ImageAspectFlags::COLOR,
+                vk::ImageViewType::TYPE_2D,
+            );
+            let target = TargetImage::new(swapchain_image, swapchain_image_view_desc)?;
 
-            // Reset the command buffer (requires pool/reset capability)
-            self.device
-                .reset_command_buffer(frame.command_buffer, vk::CommandBufferResetFlags::empty())?;
-
-            self.device
-                .begin_command_buffer(frame.command_buffer, &begin_info)?;
-        }
-
-        let (image, resolve_image) = if self.straight_to_resolve {
-            (swapchain_image, None)
+            (target, None)
         } else {
-            (color_image, Some(swapchain_image))
+            let swapchain_image_view_desc = swapchain_image.get_default_image_view_desc(
+                vk::ImageAspectFlags::COLOR,
+                vk::ImageViewType::TYPE_2D,
+            );
+            let resolve = TargetImage::new(swapchain_image, swapchain_image_view_desc)?;
+
+            let color_image_view_desc = color_image.get_default_image_view_desc(
+                vk::ImageAspectFlags::COLOR,
+                vk::ImageViewType::TYPE_2D,
+            );
+            let target = TargetImage::new(color_image, color_image_view_desc)?;
+
+            (target, Some(resolve))
         };
 
-        Ok(FrameContextRenderTarget {
-            color_images: Box::new([TargetImage {
-                handle: image,
-                resolve_handle: resolve_image,
-            }]),
-            depth_image: Some(depth_image),
+        let target = RenderTarget {
+            color_images: Box::new([ResolvableTargetImage { main, resolve }]),
+            depth_image,
             render_area: vk::Rect2D {
                 offset: vk::Offset2D { x: 0, y: 0 },
                 extent: *self.swapchain.extent(),
             },
-        })
+        };
+
+        Ok(target)
     }
     pub fn submit(&mut self) -> Result<()> {
+        let cmd = self.get_current_frame().command_buffer();
+
+        {
+            let image = &mut self.swapchain_images[self.swapchain_image_index];
+
+            let mut barriers = [vk::ImageMemoryBarrier2::default(); 1];
+            let mut barrier_count = 0;
+
+            const NEW_SWAPCHAIN_IMAGE_LAYOUT: vk::ImageLayout = vk::ImageLayout::PRESENT_SRC_KHR;
+            if image.swapchain.layout() != NEW_SWAPCHAIN_IMAGE_LAYOUT {
+                barriers[barrier_count as usize] = vk::ImageMemoryBarrier2 {
+                    src_stage_mask: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                    src_access_mask: vk::AccessFlags2::NONE,
+                    dst_stage_mask: vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+                    dst_access_mask: vk::AccessFlags2::NONE,
+                    old_layout: image.swapchain.layout(),
+                    new_layout: NEW_SWAPCHAIN_IMAGE_LAYOUT,
+                    image: image.swapchain.handle(),
+                    subresource_range: vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: image.swapchain.mip_levels(),
+                        base_array_layer: 0,
+                        layer_count: image.swapchain.array_layers(),
+                    },
+                    ..Default::default()
+                };
+                *image.swapchain.layout_mut() = NEW_SWAPCHAIN_IMAGE_LAYOUT;
+                barrier_count += 1;
+            }
+
+            let info = vk::DependencyInfo {
+                image_memory_barrier_count: barrier_count,
+                p_image_memory_barriers: barriers.as_ptr(),
+                ..Default::default()
+            };
+
+            unsafe {
+                self.device.cmd_pipeline_barrier2(cmd, &info);
+            }
+        }
+
         let frame = self.get_current_frame();
 
         unsafe {
-            self.device.end_command_buffer(frame.command_buffer)?;
+            self.device.end_command_buffer(cmd)?;
         }
 
         // Submit
@@ -785,7 +889,7 @@ impl FrameContext {
 
 impl RenderStorage for FrameContext {
     type ImageHandle = FrameContextImageHandle;
-    fn get_image(&self, image_handle: FrameContextImageHandle) -> Option<&vulkan::Image> {
+    fn get_image(&self, image_handle: FrameContextImageHandle) -> Option<&Image> {
         match image_handle {
             FrameContextImageHandle::Swapchain { id, index } => {
                 if id != self.id {
@@ -819,10 +923,7 @@ impl RenderStorage for FrameContext {
             }
         }
     }
-    fn get_image_mut(
-        &mut self,
-        image_handle: FrameContextImageHandle,
-    ) -> Option<&mut vulkan::Image> {
+    fn get_image_mut(&mut self, image_handle: FrameContextImageHandle) -> Option<&mut Image> {
         match image_handle {
             FrameContextImageHandle::Swapchain { id, index } => {
                 if id != self.id {
@@ -863,36 +964,5 @@ impl Drop for FrameContext {
         unsafe {
             let _ = self.device.device_wait_idle();
         }
-    }
-}
-
-pub struct FrameContextRenderTarget {
-    pub render_area: vk::Rect2D,
-    pub color_images: Box<[TargetImage<FrameContextImageHandle>]>,
-    pub depth_image: Option<FrameContextImageHandle>,
-}
-
-impl RenderTarget for FrameContextRenderTarget {
-    type ImageHandle = FrameContextImageHandle;
-    fn get_default_scissor_and_viewport(&self) -> (vk::Rect2D, vk::Viewport) {
-        let scissor = self.render_area;
-        let viewport = vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: scissor.extent.width as f32,
-            height: scissor.extent.height as f32,
-            min_depth: 0.0,
-            max_depth: 1.0,
-        };
-        return (scissor, viewport);
-    }
-    fn render_area(&self) -> vk::Rect2D {
-        self.render_area
-    }
-    fn color_images(&self) -> &[TargetImage<Self::ImageHandle>] {
-        &self.color_images
-    }
-    fn depth_image(&self) -> Option<Self::ImageHandle> {
-        self.depth_image
     }
 }

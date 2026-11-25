@@ -3,12 +3,11 @@ use std::{sync::Arc, sync::atomic::AtomicU32};
 use ash::vk;
 
 use crate::{
-    CameraUBO, CanResolveBindingValue, DescriptorSetLayoutDescription,
-    DescriptorSetLayoutResourceHandle, DirectionalLightUBO, Error, FrameContext,
-    FrameContextImageHandle, FrameContextRange, GlobalLightUBO, ImageResourceHandle,
-    InstanceBuffer, MAX_FRAME_COUNT, MainMaterialUBO, MaterialHandle, PointLightsUBO,
-    RenderStorage, RenderTarget, RenderTechnique, Renderer, ResourceRegistry, Resources, Result,
-    Storage, Uniform,
+    CameraUBO, DescriptorSetLayoutDescription, DescriptorSetLayoutResourceHandle,
+    DirectionalLightUBO, Error, FrameContext, FrameContextImageHandle, FrameContextRange,
+    GlobalLightUBO, ImageResourceHandle, InstanceBuffer, MAX_FRAME_COUNT, MainMaterialUBO,
+    MaterialHandle, PointLightsUBO, RenderTarget, RenderTechnique, Renderer, ResourceRegistry,
+    Resources, Result, Storage, Uniform,
     techniques::{HasBindingValue, ShaderBinding},
 };
 
@@ -151,7 +150,14 @@ impl MainResourcesRegistry {
         Ok(crate::MaterialHandle::new(self.id, index))
     }
     #[inline]
-    pub fn register(self, registry: &mut ResourceRegistry) -> MainResourcesUploader {
+    pub fn register(self, registry: &mut ResourceRegistry) -> Result<MainResourcesUploader> {
+        for (image_handle, _) in self.images.iter() {
+            let image = registry.get_image(*image_handle)
+                .ok_or(Error::ResourceMissing("image missing. cannot register"))?;
+            let image_view_desc = image.get_default_image_view_desc(vk::ImageAspectFlags::COLOR, vk::ImageViewType::TYPE_2D);
+            let _ = image.create_image_view(image_view_desc)?;
+        }
+
         registry.add_storage_allocation(
             (self.materials.len() * std::mem::size_of::<MainMaterialUBO>()) as u64,
             std::mem::size_of::<MainMaterialUBO>() as u64,
@@ -165,13 +171,13 @@ impl MainResourcesRegistry {
         registry.add_descriptors(vk::DescriptorType::STORAGE_BUFFER, 1);
         registry.add_sets(1);
 
-        MainResourcesUploader {
+        Ok(MainResourcesUploader {
             id: self.id,
             scene_id: registry.id(),
             images: self.images.into_boxed_slice(),
             materials: self.materials.into_boxed_slice(),
             global_light_ubo_data: self.global_light_ubo_data,
-        }
+        })
     }
 }
 
@@ -318,10 +324,19 @@ impl MainResourcesPromise {
                     .get_image(*image_handle)
                     .ok_or(Error::ResourceMissing("image missing"))?;
 
+                let image_view = {
+                    let view_desc = image.get_default_image_view_desc(
+                        vk::ImageAspectFlags::COLOR,
+                        vk::ImageViewType::TYPE_2D
+                    );
+                    image
+                        .get_image_view(view_desc)
+                        .ok_or(Error::ResourceMissing("image view missing"))?
+                };
                 image_info.push(vk::DescriptorImageInfo {
                     sampler: *sampler,
-                    image_view: image.view,
-                    image_layout: image.layout,
+                    image_view: image_view,
+                    image_layout: image.layout(),
                 });
             }
 
@@ -525,18 +540,12 @@ impl MainResources {
         self.images.get(image_handle.index() as usize)
     }
     #[inline]
-    pub fn bind<Target, Storage, Handle>(
+    pub fn bind(
         &self,
         cmd: vk::CommandBuffer,
         renderer: &mut Renderer,
-        target: &Target,
-        storage: &Storage,
-    ) -> Result<()>
-    where
-        Handle: Copy + Clone,
-        Target: RenderTarget<ImageHandle = Handle>,
-        Storage: RenderStorage<ImageHandle = Handle>,
-    {
+        target: &RenderTarget,
+    ) -> Result<()> {
         let (pipeline, layout) = {
             let layout = renderer
                 .pipeline_layouts
@@ -548,17 +557,11 @@ impl MainResources {
 
             let mut color_formats: Vec<vk::Format> = Vec::with_capacity(8);
             for target_image in target.color_images().iter() {
-                let img = storage
-                    .get_image(target_image.handle)
-                    .ok_or(crate::Error::ResourceMissing("target image missing"))?;
-                color_formats.push(img.format);
+                color_formats.push(target_image.main.image_format);
             }
 
-            let depth_format = if let Some(img_handle) = target.depth_image() {
-                let img = storage
-                    .get_image(img_handle)
-                    .ok_or(crate::Error::ResourceMissing("depth format image missing"))?;
-                Some(img.format)
+            let depth_format = if let Some(image_target) = target.depth_image() {
+                Some(image_target.main.image_format)
             } else {
                 None
             };
@@ -716,21 +719,74 @@ impl MainTechnique {
             + HasBindingValue<DirectionalLightUBO, Value = FrameContextRange<Uniform>>
             + HasBindingValue<DepthImage, Value = FrameContextImageHandle>,
     {
-        let camera_data_range = <T as HasBindingValue<CameraUBO>>::get(ctx_state);
-        let camera_infos = ctx.resolve(camera_data_range, renderer)?;
+        type DescriptorBufferInfos = [vk::DescriptorBufferInfo; MAX_FRAME_COUNT as usize];
 
-        let instance_data_range = <T as HasBindingValue<InstanceBuffer>>::get(ctx_state);
-        let instance_infos = ctx.resolve(instance_data_range, renderer)?;
+        let camera_infos: DescriptorBufferInfos = {
+            let camera_data_range = <T as HasBindingValue<CameraUBO>>::get(ctx_state);
 
-        let point_lights_data_range = <T as HasBindingValue<PointLightsUBO>>::get(ctx_state);
-        let point_light_infos = ctx.resolve(point_lights_data_range, renderer)?;
+            std::array::from_fn(|i| vk::DescriptorBufferInfo {
+                buffer: ctx.frames()[i].uniform_allocator().buffer(),
+                offset: camera_data_range.offset,
+                range: camera_data_range.size,
+            })
+        };
 
-        let directional_light_data_range =
-            <T as HasBindingValue<DirectionalLightUBO>>::get(ctx_state);
-        let directional_light_infos = ctx.resolve(directional_light_data_range, renderer)?;
+        let instance_infos: DescriptorBufferInfos = {
+            let instance_data_range = <T as HasBindingValue<InstanceBuffer>>::get(ctx_state);
 
-        let depth_image_handle = <T as HasBindingValue<DepthImage>>::get(&ctx_state);
-        let depth_image_infos = ctx.resolve(depth_image_handle, renderer)?;
+            std::array::from_fn(|i| vk::DescriptorBufferInfo {
+                buffer: ctx.frames()[i].storage_allocator().buffer(),
+                offset: instance_data_range.offset,
+                range: instance_data_range.size,
+            })
+        };
+
+        let point_light_infos: DescriptorBufferInfos = {
+            let point_lights_data_range = <T as HasBindingValue<PointLightsUBO>>::get(ctx_state);
+
+            std::array::from_fn(|i| vk::DescriptorBufferInfo {
+                buffer: ctx.frames()[i].storage_allocator().buffer(),
+                offset: point_lights_data_range.offset,
+                range: point_lights_data_range.size,
+            })
+        };
+
+        let directional_light_infos: DescriptorBufferInfos = {
+            let directional_light_data_range =
+                <T as HasBindingValue<DirectionalLightUBO>>::get(ctx_state);
+
+            std::array::from_fn(|i| vk::DescriptorBufferInfo {
+                buffer: ctx.frames()[i].uniform_allocator().buffer(),
+                offset: directional_light_data_range.offset,
+                range: directional_light_data_range.size,
+            })
+        };
+
+        let depth_image_infos: [vk::DescriptorImageInfo; MAX_FRAME_COUNT as usize] = {
+            let depth_image_handle = <T as HasBindingValue<DepthImage>>::get(&ctx_state);
+
+            let mut infos: Vec<vk::DescriptorImageInfo> =
+                Vec::with_capacity(MAX_FRAME_COUNT as usize);
+
+            for i in 0..MAX_FRAME_COUNT as usize {
+                let image = ctx.frames_mut()[i]
+                    .get_image_mut(depth_image_handle.index())
+                    .ok_or(Error::ResourceMissing("image missing"))?;
+                let image_view_desc = image.get_default_image_view_desc(
+                    vk::ImageAspectFlags::DEPTH,
+                    vk::ImageViewType::TYPE_2D,
+                );
+                let image_view = image.create_image_view(image_view_desc)?;
+
+                infos.push(vk::DescriptorImageInfo {
+                    sampler: renderer.shadowmap_sampler(),
+                    image_view,
+                    image_layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                })
+            }
+
+            infos.try_into().unwrap()
+        };
 
         let writes: Box<[vk::WriteDescriptorSet]> = (0..crate::MAX_FRAME_COUNT as usize)
             .flat_map(|i| {

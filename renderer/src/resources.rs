@@ -1,6 +1,6 @@
 use vulkan::SharedDeviceRef;
 
-use crate::{Error, Renderer, Result};
+use crate::{Error, Renderer, Result, Image};
 
 use std::{
     collections::HashMap,
@@ -12,8 +12,6 @@ use std::{
 };
 
 use ash::vk;
-
-pub type Image = vulkan::Image;
 
 #[derive(Copy, Clone, Debug, Default)]
 pub struct ImageResourceHandle {
@@ -71,7 +69,7 @@ pub struct ResourceRegistry {
     uniform_buffer_size: u64,
     storage_buffer_size: u64,
     max_set_count: u32,
-    images: Vec<vulkan::Image>,
+    images: Vec<Image>,
     descriptor_counts: HashMap<vk::DescriptorType, u32>,
 }
 
@@ -121,7 +119,7 @@ impl ResourceRegistry {
         self.index_buffer_size = self.index_buffer_size.next_multiple_of(alignment) + byte_count;
     }
     #[inline]
-    pub fn add_image(&mut self, image: vulkan::Image) -> crate::ImageResourceHandle {
+    pub fn add_image(&mut self, image: Image) -> crate::ImageResourceHandle {
         let index = self.images.len() as u32;
         self.images.push(image);
         ImageResourceHandle::new(self.id, index)
@@ -135,7 +133,7 @@ impl ResourceRegistry {
     pub(crate) fn get_image(
         &mut self,
         image_handle: ImageResourceHandle,
-    ) -> Option<&mut vulkan::Image> {
+    ) -> Option<&mut Image> {
         if image_handle.id() != self.id() {
             return None;
         }
@@ -202,7 +200,7 @@ pub struct ResourceUploader {
     id: u32,
     descriptor_pool: vk::DescriptorPool,
     device: SharedDeviceRef,
-    images: Box<[vulkan::Image]>,
+    images: Box<[Image]>,
     pub(crate) vertex_allocator: vulkan::StackAllocator,
     pub(crate) index_allocator: vulkan::StackAllocator,
     pub(crate) uniform_allocator: vulkan::StackAllocator,
@@ -252,7 +250,7 @@ pub struct Resources {
     index_buffer: vulkan::Buffer,
     uniform_buffer: vulkan::Buffer,
     storage_buffer: vulkan::Buffer,
-    images: Box<[vulkan::Image]>,
+    images: Box<[Image]>,
 }
 
 impl Drop for Resources {
@@ -289,7 +287,7 @@ impl Resources {
         self.descriptor_pool
     }
     #[inline]
-    pub(crate) fn get_image(&self, image_handle: ImageResourceHandle) -> Option<&vulkan::Image> {
+    pub(crate) fn get_image(&self, image_handle: ImageResourceHandle) -> Option<&Image> {
         if image_handle.id() != self.id() {
             return None;
         }

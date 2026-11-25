@@ -5,7 +5,7 @@ edition = "2024"
 authors = ["Devin Kern"]
 license = "Apache-2.0"
 description = "A program that displays Wavefront .obj files."
-homepage = "https://github.com/DevinLKern/dlk-model-viewer"
+# homepage = "https://github.com/DevinLKern/dlk-model-viewer"
 repository = "https://github.com/DevinLKern/dlk-model-viewer"
 # readme = ""
 # documentation = ""
@@ -20,7 +20,6 @@ obj-mtl = { path = "../obj-mtl" }
 image = "=0.25.9"
 tracing = { version = "0.1.44", features = ["max_level_trace", "release_max_level_warn"] }
 tracing-subscriber = "0.3.22"
-tracing-appender = "0.2.4"
 yaml-rust2 = "0.11.0"
 directories = "6.0"
 anyhow = "1.0.104"

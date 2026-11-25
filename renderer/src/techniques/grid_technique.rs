@@ -1,13 +1,13 @@
 use std::sync::{Arc, atomic::AtomicU32};
 
 use crate::{
-    CameraUBO, CanResolveBindingValue, DescriptorSetLayoutBindingInfo,
-    DescriptorSetLayoutDescription, DescriptorSetLayoutResourceHandle, ENTRY_POINT_NAME_GRID_FRAG,
-    ENTRY_POINT_NAME_GRID_VERT, Error, FrameContext, FrameContextRange, GridInstanceBuffer,
-    GridMaterialUBO, GridVertVertex, HasBindingValue, MAX_FRAME_COUNT, MaterialHandle,
-    PipelineLayoutDescription, PipelineLayoutResourceHandle, RenderStorage, RenderTarget,
-    RenderTechnique, Renderer, ResourceRegistry, ResourceUploader, Resources, Result,
-    ShaderBinding, ShaderModuleDescription, ShaderModuleResourceHandle, Storage, Uniform,
+    CameraUBO, DescriptorSetLayoutBindingInfo, DescriptorSetLayoutDescription,
+    DescriptorSetLayoutResourceHandle, ENTRY_POINT_NAME_GRID_FRAG, ENTRY_POINT_NAME_GRID_VERT,
+    Error, FrameContext, FrameContextRange, GridInstanceBuffer, GridMaterialUBO, GridVertVertex,
+    HasBindingValue, MAX_FRAME_COUNT, MaterialHandle, PipelineLayoutDescription,
+    PipelineLayoutResourceHandle, RenderTarget, RenderTechnique, Renderer, ResourceRegistry,
+    ResourceUploader, Resources, Result, ShaderBinding, ShaderModuleDescription,
+    ShaderModuleResourceHandle, Storage, Uniform,
 };
 
 use ash::vk;
@@ -284,18 +284,12 @@ pub struct GridResources {
 
 impl GridResources {
     #[inline]
-    pub fn bind<Target, Storage, Handle>(
+    pub fn bind(
         &self,
         cmd: vk::CommandBuffer,
         renderer: &mut Renderer,
-        target: &Target,
-        storage: &Storage,
-    ) -> Result<()>
-    where
-        Handle: Copy + Clone,
-        Target: RenderTarget<ImageHandle = Handle>,
-        Storage: RenderStorage<ImageHandle = Handle>,
-    {
+        target: &RenderTarget,
+    ) -> Result<()> {
         let (pipeline, layout) = {
             let layout = renderer
                 .pipeline_layouts
@@ -305,17 +299,11 @@ impl GridResources {
 
             let mut color_formats: Vec<vk::Format> = Vec::with_capacity(8);
             for target_image in target.color_images().iter() {
-                let img = storage
-                    .get_image(target_image.handle)
-                    .ok_or(crate::Error::ResourceMissing("target image missing"))?;
-                color_formats.push(img.format);
+                color_formats.push(target_image.main.image_format);
             }
 
-            let depth_format = if let Some(img_handle) = target.depth_image() {
-                let img = storage
-                    .get_image(img_handle)
-                    .ok_or(crate::Error::ResourceMissing("depth format image missing"))?;
-                Some(img.format)
+            let depth_format = if let Some(image) = target.depth_image() {
+                Some(image.main.image_format)
             } else {
                 None
             };
@@ -437,22 +425,33 @@ impl GridTechnique {
             per_frame_descriptor_sets,
         })
     }
-    pub fn update_context<T>(
-        &mut self,
-        ctx: &mut FrameContext,
-        ctx_state: &T,
-        renderer: &crate::Renderer,
-    ) -> crate::Result<()>
+    pub fn update_context<T>(&mut self, ctx: &mut FrameContext, ctx_state: &T) -> crate::Result<()>
     where
         Self: ShaderBinding<CameraUBO> + ShaderBinding<GridInstanceBuffer>,
         T: HasBindingValue<CameraUBO, Value = FrameContextRange<Uniform>>
             + HasBindingValue<GridInstanceBuffer, Value = FrameContextRange<Storage>>,
     {
-        let camera_data_range = <T as HasBindingValue<CameraUBO>>::get(&ctx_state);
-        let camera_infos = ctx.resolve(camera_data_range, renderer)?;
+        type DescriptorBufferInfos = [vk::DescriptorBufferInfo; MAX_FRAME_COUNT as usize];
 
-        let instance_data_range = <T as HasBindingValue<GridInstanceBuffer>>::get(&ctx_state);
-        let instance_infos = ctx.resolve(instance_data_range, renderer)?;
+        let camera_infos: DescriptorBufferInfos = {
+            let camera_data_range = <T as HasBindingValue<CameraUBO>>::get(ctx_state);
+
+            std::array::from_fn(|i| vk::DescriptorBufferInfo {
+                buffer: ctx.frames()[i].uniform_allocator().buffer(),
+                offset: camera_data_range.offset,
+                range: camera_data_range.size,
+            })
+        };
+
+        let instance_infos: DescriptorBufferInfos = {
+            let instance_data_range = <T as HasBindingValue<GridInstanceBuffer>>::get(ctx_state);
+
+            std::array::from_fn(|i| vk::DescriptorBufferInfo {
+                buffer: ctx.frames()[i].storage_allocator().buffer(),
+                offset: instance_data_range.offset,
+                range: instance_data_range.size,
+            })
+        };
 
         let writes: Box<[vk::WriteDescriptorSet]> = (0..MAX_FRAME_COUNT as usize)
             .flat_map(|i| {
